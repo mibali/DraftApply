@@ -1,0 +1,21 @@
+{
+  "name": "draftapply",
+  "version": "1.0.0",
+  "description": "DraftApply - Generate authentic job application answers using your CV",
+  "type": "module",
+  "scripts": {
+    "start": "npm run start --prefix backend",
+    "dev": "npm run dev --prefix backend",
+    "serve-frontend": "npx serve frontend -p 3000",
+    "install-all": "npm install --prefix backend"
+  },
+  "keywords": [
+    "cv",
+    "resume",
+    "job-application",
+    "ai",
+    "career"
+  ],
+  "author": "",
+  "license": "MIT"
+}

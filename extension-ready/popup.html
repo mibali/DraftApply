@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DraftApply</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      width: 360px;
+      padding: 16px;
+      background: #f8fafc;
+    }
+    
+    h1 {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 12px;
+      color: #1e293b;
+    }
+    
+    .status-bar {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 12px;
+      background: white;
+      border-radius: 6px;
+      border: 1px solid #e2e8f0;
+      flex: 1;
+    }
+    
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #94a3b8;
+    }
+    
+    .status-dot.ready {
+      background: #22c55e;
+    }
+    
+    .status-dot.error {
+      background: #ef4444;
+    }
+    
+    .status-text {
+      font-size: 12px;
+      color: #64748b;
+    }
+    
+    .section {
+      margin-bottom: 16px;
+    }
+    
+    .section-title {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      color: #64748b;
+      margin-bottom: 8px;
+    }
+    
+    textarea {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      font-size: 13px;
+      font-family: inherit;
+      resize: vertical;
+      min-height: 100px;
+    }
+    
+    textarea:focus {
+      outline: none;
+      border-color: #2563eb;
+    }
+    
+    .btn {
+      width: 100%;
+      padding: 10px;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+    
+    .btn-primary {
+      background: #2563eb;
+      color: white;
+    }
+    
+    .btn-primary:hover {
+      background: #1d4ed8;
+    }
+    
+    .btn-secondary {
+      background: #f1f5f9;
+      color: #475569;
+    }
+    
+    .btn-secondary:hover {
+      background: #e2e8f0;
+    }
+    
+    .cv-preview {
+      padding: 10px;
+      background: white;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      font-size: 13px;
+      max-height: 100px;
+      overflow: hidden;
+      color: #64748b;
+    }
+    
+    .upload-area {
+      border: 2px dashed #cbd5e1;
+      border-radius: 8px;
+      padding: 20px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s;
+      background: white;
+    }
+    
+    .upload-area:hover,
+    .upload-area.dragover {
+      border-color: #2563eb;
+      background: #eff6ff;
+    }
+    
+    .upload-icon {
+      font-size: 28px;
+      margin-bottom: 6px;
+    }
+    
+    .upload-text {
+      font-size: 13px;
+      color: #475569;
+    }
+    
+    .upload-link {
+      color: #2563eb;
+      font-weight: 500;
+    }
+    
+    .upload-hint {
+      font-size: 11px;
+      color: #94a3b8;
+      margin-top: 4px;
+    }
+    
+    .upload-area.has-file {
+      border-color: #22c55e;
+      background: #f0fdf4;
+    }
+    
+    .upload-area.has-file .upload-icon::before {
+      content: '✓ ';
+    }
+    
+    .divider {
+      display: flex;
+      align-items: center;
+      margin: 12px 0;
+      color: #94a3b8;
+      font-size: 12px;
+    }
+    
+    .divider::before,
+    .divider::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: #e2e8f0;
+    }
+    
+    .divider span {
+      padding: 0 10px;
+    }
+    
+    .message {
+      padding: 10px;
+      background: #dcfce7;
+      color: #166534;
+      border-radius: 6px;
+      font-size: 13px;
+      margin-top: 8px;
+    }
+    
+    .message.error {
+      background: #fee2e2;
+      color: #dc2626;
+    }
+    
+    .help {
+      font-size: 12px;
+      color: #94a3b8;
+      margin-top: 12px;
+      line-height: 1.5;
+    }
+    
+    .help code {
+      background: #e2e8f0;
+      padding: 2px 4px;
+      border-radius: 3px;
+      font-size: 11px;
+    }
+    
+    [hidden] {
+      display: none !important;
+    }
+  </style>
+</head>
+<body>
+  <h1>DraftApply</h1>
+  
+  <div class="status-bar">
+    <div class="status">
+      <div class="status-dot" id="cv-status-dot"></div>
+      <span class="status-text" id="cv-status-text">No CV</span>
+    </div>
+    <div class="status">
+      <div class="status-dot" id="proxy-status-dot"></div>
+      <span class="status-text" id="proxy-status-text">Proxy: Checking...</span>
+    </div>
+  </div>
+
+  <div class="section" id="proxy-section">
+    <div class="section-title">Proxy (Render)</div>
+    <textarea id="proxy-url" placeholder="https://your-service.onrender.com" style="min-height: 44px;"></textarea>
+    <button class="btn btn-secondary" id="save-proxy-btn">Save Proxy URL</button>
+    <p class="help">This is the hosted API that powers generation (keeps Groq key server-side).</p>
+  </div>
+  
+  <!-- CV Input Section -->
+  <div class="section" id="cv-input-section">
+    <div class="section-title">Your CV</div>
+    <div class="upload-area" id="upload-area">
+      <input type="file" id="cv-file" accept=".pdf,.doc,.docx,.txt" hidden>
+      <div class="upload-icon">📄</div>
+      <div class="upload-text">Drop file or <span class="upload-link">browse</span></div>
+      <div class="upload-hint">PDF, DOCX, or TXT</div>
+    </div>
+    <div class="divider"><span>or paste text</span></div>
+    <textarea id="cv-text" placeholder="Paste your CV text here..."></textarea>
+    <button class="btn btn-primary" id="save-cv-btn">Save CV</button>
+  </div>
+  
+  <!-- CV Loaded Section -->
+  <div class="section" id="cv-loaded-section" hidden>
+    <div class="section-title">Your CV</div>
+    <div class="cv-preview" id="cv-preview"></div>
+    <button class="btn btn-secondary" id="change-cv-btn">Change CV</button>
+  </div>
+  
+  <div class="message" id="message" hidden></div>
+  
+  <p class="help">
+    <strong>How to use:</strong> Highlight any question on a job application page, right-click, and select "DraftApply - Answer using my CV".
+  </p>
+  <p class="help">
+    <strong>Proxy required:</strong> Deploy `render-proxy/` to Render and paste the URL above.
+  </p>
+  
+  <script src="popup.js"></script>
+</body>
+</html>

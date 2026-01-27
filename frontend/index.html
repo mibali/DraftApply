@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DraftApply</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>DraftApply</h1>
+      <p class="subtitle">Generate authentic answers to job application questions using your CV</p>
+    </header>
+
+    <main>
+      <!-- CV Section -->
+      <section class="cv-section" id="cv-section">
+        <div class="section-header">
+          <h2>Your CV</h2>
+          <div class="cv-status" id="cv-status">
+            <span class="status-dot"></span>
+            <span class="status-text">No CV loaded</span>
+          </div>
+        </div>
+
+        <div class="cv-input-area" id="cv-input-area">
+          <!-- Upload Option -->
+          <div class="upload-zone" id="upload-zone">
+            <input type="file" id="cv-file" accept=".pdf,.docx,.txt" hidden>
+            <div class="upload-content">
+              <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="17 8 12 3 7 8"/>
+                <line x1="12" y1="3" x2="12" y2="15"/>
+              </svg>
+              <p>Drop your CV here or <span class="upload-link">browse</span></p>
+              <p class="upload-hint">Supports PDF, DOCX, TXT (max 5MB)</p>
+            </div>
+          </div>
+
+          <div class="divider">
+            <span>or paste your CV</span>
+          </div>
+
+          <!-- Paste Option -->
+          <textarea 
+            id="cv-text" 
+            placeholder="Paste your CV text here..."
+            rows="6"
+          ></textarea>
+
+          <button class="btn btn-primary" id="load-cv-btn">Load CV</button>
+        </div>
+
+        <!-- CV Loaded State -->
+        <div class="cv-loaded" id="cv-loaded" hidden>
+          <div class="cv-summary" id="cv-summary"></div>
+          <button class="btn btn-secondary" id="change-cv-btn">Change CV</button>
+        </div>
+      </section>
+
+      <!-- Job Description Section -->
+      <section class="job-section" id="job-section">
+        <div class="section-header">
+          <h2>Job Description</h2>
+          <div class="job-status" id="job-status">
+            <span class="status-dot"></span>
+            <span class="status-text">No job loaded</span>
+          </div>
+        </div>
+
+        <div class="job-input-area" id="job-input-area">
+          <div class="context-inputs">
+            <input type="text" id="job-title" placeholder="Job title (e.g., Senior Software Engineer)">
+            <input type="text" id="company" placeholder="Company name">
+          </div>
+          <textarea 
+            id="job-description" 
+            placeholder="Paste the full job description here... This helps generate highly tailored answers that match what the employer is looking for."
+            rows="6"
+          ></textarea>
+          <button class="btn btn-primary" id="load-job-btn">Load Job Description</button>
+        </div>
+
+        <div class="job-loaded" id="job-loaded" hidden>
+          <div class="job-summary" id="job-summary"></div>
+          <button class="btn btn-secondary" id="change-job-btn">Change Job</button>
+        </div>
+      </section>
+
+      <!-- Question Section -->
+      <section class="question-section" id="question-section">
+        <h2>Application Question</h2>
+
+        <div class="form-group">
+          <label for="question">Question</label>
+          <textarea 
+            id="question" 
+            placeholder="Paste the job application question here..."
+            rows="4"
+          ></textarea>
+        </div>
+
+        <div class="form-group">
+          <label>Response Length</label>
+          <div class="length-options">
+            <button class="length-btn" data-length="short">Short</button>
+            <button class="length-btn active" data-length="medium">Medium</button>
+            <button class="length-btn" data-length="long">Long</button>
+          </div>
+        </div>
+
+        <button class="btn btn-primary btn-generate" id="generate-btn" disabled>
+          Generate Answer
+        </button>
+      </section>
+
+      <!-- Answer Section -->
+      <section class="answer-section" id="answer-section" hidden>
+        <div class="section-header">
+          <h2>Generated Answer</h2>
+          <div class="answer-meta" id="answer-meta"></div>
+        </div>
+
+        <div class="answer-output" id="answer-output"></div>
+
+        <div class="answer-actions">
+          <button class="btn btn-secondary" id="copy-btn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+            </svg>
+            Copy to Clipboard
+          </button>
+          <button class="btn btn-secondary" id="regenerate-btn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="23 4 23 10 17 10"/>
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+            </svg>
+            Regenerate
+          </button>
+        </div>
+
+        <div class="warnings" id="warnings" hidden></div>
+      </section>
+    </main>
+
+    <footer>
+      <p>CV data is processed locally. Powered by <span id="llm-provider">Ollama</span>.</p>
+    </footer>
+  </div>
+
+  <!-- Loading Overlay -->
+  <div class="loading-overlay" id="loading-overlay" hidden>
+    <div class="loading-spinner"></div>
+    <p>Generating answer...</p>
+  </div>
+
+  <!-- Toast Notification -->
+  <div class="toast" id="toast" hidden></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

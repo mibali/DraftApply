@@ -1,0 +1,27 @@
+.DS_Store
+
+# Env / secrets
+.env
+**/.env
+
+# Node
+node_modules/
+**/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build / dist
+dist/
+build/
+coverage/
+.parcel-cache/
+.vite/
+
+# Cursor / IDE
+.cursor/
+.vscode/
+
+# OS / misc
+*.log
