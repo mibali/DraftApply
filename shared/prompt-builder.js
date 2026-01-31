@@ -15,6 +15,15 @@
 export class PromptBuilder {
   constructor() {
     this.questionTypes = {
+      cover_letter: [
+        'cover letter',
+        'coverletter',
+        'letter of interest',
+        'motivation letter',
+        'application letter',
+        'write a cover letter',
+        'write cover letter'
+      ],
       behavioral: [
         'tell me about a time',
         'describe a situation',
@@ -187,6 +196,19 @@ The answer should feel like something the candidate would naturally write themse
    */
   buildTypeInstructions(questionType) {
     const instructions = {
+      cover_letter: `This is a COVER LETTER request. Write a real cover letter (not a paragraph answer).
+
+Format:
+- "Dear Hiring Manager," (or "Dear [Company] team," if company is known)
+- 1st paragraph: specific hook showing you understand the role and why you fit (no generic hype)
+- 2nd–3rd paragraphs: map 3 key job requirements to concrete evidence from DIFFERENT parts of the CV when possible (older roles/projects are valid)
+- Final paragraph: close confidently, mention interest in discussing, and add a simple sign-off
+- End with: "Sincerely," and the candidate name as "[Your Name]"
+
+Rules:
+- Must reference at least 3 specific requirements/responsibilities from the job description when provided
+- Must NOT invent employers, degrees, dates, or metrics not in the CV
+- Avoid buzzwords and "AI voice"`,
       behavioral: `This is a BEHAVIORAL question. Use the STAR method implicitly (Situation, Task, Action, Result) without making it obvious. Draw from specific experiences in the CV. Include concrete details and outcomes where available.`,
       
       technical: `This is a TECHNICAL question. Reference specific technologies, tools, or methodologies from the CV. Be honest about proficiency levels. It's okay to mention related experience even if not an exact match.`,
@@ -232,9 +254,11 @@ The answer should feel like something the candidate would naturally write themse
     }
 
     context += '### Job Description\n';
-    context += jobDescription.slice(0, 3000); // Limit to avoid token overflow
+    // Give the model enough detail to tailor properly without blowing up tokens.
+    const cap = 6000;
+    context += jobDescription.slice(0, cap);
     
-    if (jobDescription.length > 3000) {
+    if (jobDescription.length > cap) {
       context += '\n[...truncated for length...]';
     }
     
@@ -298,6 +322,15 @@ The answer should feel like something the candidate would naturally write themse
   buildPrompt(cvData, question, length = 'medium', options = {}) {
     const questionType = this.detectQuestionType(question);
     const lengthSpec = this.responseLengths[length] || this.responseLengths.medium;
+    const coverLetterLengths = {
+      short: { words: '150-220', sentences: '6-10' },
+      medium: { words: '250-350', sentences: '10-16' },
+      long: { words: '350-500', sentences: '16-24' }
+    };
+    const effectiveLengthSpec =
+      questionType === 'cover_letter'
+        ? (coverLetterLengths[length] || coverLetterLengths.medium)
+        : lengthSpec;
 
     const systemPrompt = this.buildSystemPrompt();
     const cvContext = this.buildCVContext(cvData, questionType);
@@ -317,6 +350,7 @@ ${questionType.toUpperCase()}
 ${typeInstructions}
 ${options.jobDescription ? `
 IMPORTANT: Tailor your answer to the specific job description provided. Reference relevant requirements, technologies, or responsibilities mentioned in the job posting where they align with your experience. Show that you understand what the employer is looking for.
+${questionType === 'cover_letter' ? `For a cover letter, you MUST explicitly connect job requirements to CV evidence (not generic claims).` : ''}
 ` : ''}
 ${questionType === 'motivation' && isWhyCompany ? `
 ${options.jobDescription ? `FOR THIS "WHY COMPANY" QUESTION, you MUST use BOTH the job description and the CV:` : `FOR THIS "WHY COMPANY" QUESTION, use the CV and any company/job context provided:`}
@@ -326,7 +360,7 @@ ${options.jobDescription ? `FOR THIS "WHY COMPANY" QUESTION, you MUST use BOTH t
 - End with a grounded reason this role is a logical next step based on your trajectory (no generic excitement).
 ` : ''}
 ## RESPONSE LENGTH
-Write approximately ${lengthSpec.words} words (${lengthSpec.sentences} sentences).
+Write approximately ${effectiveLengthSpec.words} words (${effectiveLengthSpec.sentences} sentences).
 
 ## THE QUESTION
 ${question}

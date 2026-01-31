@@ -28,3 +28,7 @@ coverage/
 
 # Artifacts
 *.zip
+
+# Chrome extension packaging (do not commit private keys)
+*.crx
+*.pem

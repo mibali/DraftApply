@@ -779,17 +779,37 @@ Return ONLY the value, nothing else.`;
     );
   }
 
+  isCoverLetterQuestion(question) {
+    const q = (question || '').trim().toLowerCase();
+    return (
+      q.includes('cover letter') ||
+      q.includes('coverletter') ||
+      q.includes('motivation letter') ||
+      q.includes('letter of interest') ||
+      q.includes('application letter') ||
+      q === 'cover letter' ||
+      q === 'coverletter'
+    );
+  }
+
   // Build prompt with automatic page context
   buildPrompt(cvData, question, length) {
     // For simple data extraction, use a direct extraction prompt
     if (this.isDataExtractionQuestion(question)) {
       return this.buildExtractionPrompt(cvData, question);
     }
-    const lengthSpec = {
-      short: '50-80 words',
-      medium: '100-150 words',
-      long: '200-300 words'
-    }[length];
+    const isCoverLetter = this.isCoverLetterQuestion(question);
+    const lengthSpec = isCoverLetter
+      ? ({
+          short: '150-220 words',
+          medium: '250-350 words',
+          long: '350-500 words'
+        }[length] || '250-350 words')
+      : ({
+          short: '50-80 words',
+          medium: '100-150 words',
+          long: '200-300 words'
+        }[length] || '100-150 words');
 
     const systemPrompt = `You are helping a job candidate write authentic, tailored answers to application questions.
 
@@ -806,6 +826,15 @@ If a job description / requirements are provided, you MUST:
 - Map them to concrete CV evidence (specific roles/projects/skills) from anywhere in the CV
 - Use the role language naturally (tools, responsibilities) but do NOT copy/paste
 - If a requirement is not covered, either avoid claiming it or address it honestly ("I haven't done X directly, but I've done Y which is adjacent")
+
+${isCoverLetter ? `## COVER LETTER MODE
+If the user asks for a cover letter (or the field is "Cover letter"), you MUST write a real cover letter:
+- Greeting ("Dear Hiring Manager," or "Dear [Company] team,")
+- 1st paragraph: specific hook showing you understand the role and why you fit
+- 2nd–3rd paragraphs: map at least 3 job requirements to concrete CV evidence (use different roles/time periods when possible)
+- Final paragraph: close confidently and add "Sincerely,\\n[Your Name]"
+- Do NOT write a generic summary of skills; this must be tailored to the job context
+` : ''}
 
 ## ANSWER STRUCTURE
 Your answer MUST include experiences from at least 2 different time periods or roles when the CV has them. For example:
@@ -832,7 +861,7 @@ ${cvContext.text}
 `;
 
     // Add page context if available (job posting text or extracted page text)
-    if ((this.pageContext?.jobDescription && this.pageContext.jobDescription.length > 200) || (this.pageContext?.fullPageText && this.pageContext.fullPageText.length > 400)) {
+    if (this.pageContext?.jobDescription || this.pageContext?.fullPageText || this.pageContext?.requirements?.length) {
       const ctx = this.pageExtractor.buildContext();
       userPrompt += ctx;
       userPrompt += '\n\n';
@@ -852,6 +881,13 @@ SPECIAL (WHY COMPANY):
 - Use 2-3 specific points from the job context (mission, responsibilities, requirements) to show you understand the role
 - Then connect each point to a concrete example from your CV (preferably from different roles/time periods)
 - End with 1 sentence explaining why this is a logical next step for you (no generic hype)
+` : ''}
+
+${isCoverLetter ? `
+SPECIAL (COVER LETTER):
+- Output must be a complete cover letter with greeting + 3–4 paragraphs + closing.
+- Explicitly mention the role (${this.pageContext?.jobTitle ? this.pageContext.jobTitle : 'the role'})${this.pageContext?.company ? ` at ${this.pageContext.company}` : ''}.
+- Include at least 3 specific job requirements from the job context and map each to CV evidence.
 ` : ''}
 
 Write the answer now. First person, no preamble.`;
