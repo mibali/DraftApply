@@ -254,7 +254,7 @@ class PageExtractor {
       .replace(/\s+/g, ' ')
       .replace(/\n\s*\n/g, '\n\n')
       .trim()
-      .slice(0, 8000); // Limit for token management
+      .slice(0, 20000); // Limit for token management
   }
 
   /**
@@ -297,9 +297,14 @@ class PageExtractor {
     }
 
     context += '### Job Description\n';
-    context += content.jobDescription.slice(0, 4000);
+    // Prefer job description, but fall back to cleaned page text if needed (some application pages hide the full posting).
+    const jd = (content.jobDescription && content.jobDescription.length > 200)
+      ? content.jobDescription
+      : content.fullPageText;
+
+    context += jd.slice(0, 10000);
     
-    if (content.jobDescription.length > 4000) {
+    if (jd.length > 10000) {
       context += '\n[...truncated...]';
     }
 

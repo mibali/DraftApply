@@ -20,21 +20,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     message: document.getElementById('message'),
     uploadArea: document.getElementById('upload-area'),
     cvFile: document.getElementById('cv-file'),
-    proxyUrl: document.getElementById('proxy-url'),
-    saveProxyBtn: document.getElementById('save-proxy-btn')
   };
 
   let proxyUrl = null; // Will be set by checkProxy()
 
   // Load saved state
   await loadState();
-  await loadProxy();
   await checkProxy();
 
   // Event listeners
   elements.saveCvBtn.addEventListener('click', saveCV);
   elements.changeCvBtn.addEventListener('click', showCVInput);
-  elements.saveProxyBtn.addEventListener('click', saveProxyUrl);
   
   // File upload handling
   elements.uploadArea.addEventListener('click', () => elements.cvFile.click());
@@ -62,24 +58,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (response.cvText) {
       showCVLoaded(response.cvText);
     }
-  }
-
-  async function loadProxy() {
-    const { proxyUrl: saved } = await chrome.storage.local.get('proxyUrl');
-    if (saved && typeof saved === 'string') {
-      elements.proxyUrl.value = saved;
-    }
-  }
-
-  async function saveProxyUrl() {
-    const url = (elements.proxyUrl.value || '').trim().replace(/\/+$/, '');
-    if (!url.startsWith('http')) {
-      showMessage('Enter a valid proxy URL (https://...)', 'error');
-      return;
-    }
-    await chrome.storage.local.set({ proxyUrl: url });
-    showMessage('Proxy URL saved');
-    await checkProxy();
   }
 
   async function checkProxy() {
@@ -186,8 +164,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.cvStatusDot.classList.add('ready');
     elements.cvStatusText.textContent = 'CV ready';
     
-    const preview = text.slice(0, 150).replace(/\n/g, ' ') + '...';
-    elements.cvPreview.textContent = preview;
+    // Avoid showing CV content in popup by default (privacy)
+    elements.cvPreview.textContent = `Saved (${text.length.toLocaleString()} characters)`;
   }
 
   function showCVInput() {

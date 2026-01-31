@@ -20,17 +20,30 @@ class DraftApplyExtension {
     this.pageContext = null;
     this.activeRequestId = null;
     this.lastAnswer = null;
+    this.lastQuestion = null;
     this.observer = null;
     
     this.init();
   }
 
-  agentLog(payload) {
-    try {
-      chrome.runtime.sendMessage({ type: 'DEBUG_LOG', payload });
-    } catch (e) {
-      // ignore
-    }
+  createDraftApplyIconImg(sizePx = 20) {
+    const img = document.createElement('img');
+    img.className = 'da-icon';
+    img.alt = 'DraftApply';
+    img.width = sizePx;
+    img.height = sizePx;
+    // Prefer high-res asset and size down for crispness
+    img.src = chrome.runtime.getURL('icons/icon128.png');
+    img.decoding = 'async';
+    img.loading = 'eager';
+    img.onerror = () => {
+      // Fallback if icons are blocked/unavailable
+      const fallback = document.createElement('span');
+      fallback.className = 'da-icon-fallback';
+      fallback.textContent = 'DA';
+      img.replaceWith(fallback);
+    };
+    return img;
   }
 
   getCvContext(rawText, maxChars) {
@@ -84,17 +97,9 @@ class DraftApplyExtension {
     try {
       this.pageContext = this.pageExtractor.extract();
       console.log('[DraftApply] Page context extracted:', this.pageExtractor.getSummary());
-
-      // #region agent log
-      this.agentLog({sessionId:'debug-session',runId:'run3',hypothesisId:'J',location:'extension-ready/content.js:extractPageContext',message:'Page context summary',data:{host:location.host,platform:this.pageContext?.platform||null,hasCompany:!!this.pageContext?.company,hasJobTitle:!!this.pageContext?.jobTitle,descriptionLen:(this.pageContext?.jobDescription||'').length,requirementsCount:(this.pageContext?.requirements||[]).length,urlPath:location.pathname},timestamp:Date.now()});
-      // #endregion
     } catch (e) {
       console.warn('[DraftApply] Failed to extract page context:', e);
       this.pageContext = null;
-
-      // #region agent log
-      this.agentLog({sessionId:'debug-session',runId:'run3',hypothesisId:'J',location:'extension-ready/content.js:extractPageContext:catch',message:'Page context extraction failed',data:{host:location.host,errorName:e?.name||null},timestamp:Date.now()});
-      // #endregion
     }
   }
 
@@ -110,9 +115,8 @@ class DraftApplyExtension {
     const content = document.createElement('div');
     content.className = 'da-indicator-content';
 
-    const icon = document.createElement('span');
-    icon.className = 'da-indicator-icon';
-    icon.textContent = '✨';
+    const icon = this.createDraftApplyIconImg(18);
+    icon.classList.add('da-indicator-icon');
 
     const text = document.createElement('span');
     text.className = 'da-indicator-text';
@@ -266,11 +270,14 @@ class DraftApplyExtension {
   observeFormFields() {
     // Use overlay buttons instead of wrapping fields (avoids breaking React)
     const buttonMap = new WeakMap(); // field -> button element
+
+    const BTN_SIZE = 40;
+    const BTN_INSET = 8;
     
     const positionButton = (field, btn) => {
       const rect = field.getBoundingClientRect();
-      btn.style.top = `${window.scrollY + rect.top + 8}px`;
-      btn.style.left = `${window.scrollX + rect.right - 40}px`;
+      btn.style.top = `${window.scrollY + rect.top + BTN_INSET}px`;
+      btn.style.left = `${window.scrollX + rect.right - BTN_SIZE - BTN_INSET}px`;
     };
 
     const addButtons = () => {
@@ -289,7 +296,7 @@ class DraftApplyExtension {
         
         const btn = document.createElement('button');
         btn.className = 'da-field-btn-overlay';
-        btn.innerHTML = '✨';
+        btn.replaceChildren(this.createDraftApplyIconImg(22));
         btn.title = 'Generate answer with DraftApply';
         btn.type = 'button';
         
@@ -419,6 +426,7 @@ class DraftApplyExtension {
     const length = this.modal.querySelector('#da-length-select').value;
     const stopBtn = this.modal.querySelector('#da-btn-stop');
     
+    this.lastQuestion = question;
     loading.hidden = false;
     stopBtn.disabled = false;
     output.textContent = '';
@@ -442,10 +450,6 @@ class DraftApplyExtension {
       // Call API via background with timeout
       const requestId = (globalThis.crypto?.randomUUID?.() || `req_${Date.now()}_${Math.random().toString(16).slice(2)}`);
       this.currentRequestId = requestId;
-
-      // #region agent log
-      this.agentLog({sessionId:'debug-session',runId:'run3',hypothesisId:'L',location:'extension-ready/content.js:generateAnswer',message:'Sending CALL_API',data:{host:location.host,requestId,questionLen:(question||'').length},timestamp:Date.now()});
-      // #endregion
       
       const timeoutPromise = new Promise((_, reject) => 
         setTimeout(() => reject(new Error('Request timed out after 2 minutes')), 120000)
@@ -719,10 +723,6 @@ RULES:
 
     const cvContext = this.getCvContext(cvData.rawText, 2500);
 
-    // #region agent log
-    this.agentLog({sessionId:'debug-session',runId:'run2',hypothesisId:'R',location:'extension-ready/content.js:buildExtractionPrompt',message:'CV context selected (extraction)',data:{host:location.host,strategy:cvContext.strategy,rawLen:cvContext.rawLen,headLen:cvContext.headLen,tailLen:cvContext.tailLen,sentLen:(cvContext.text||'').length},timestamp:Date.now()});
-    // #endregion
-
     const userPrompt = `CV:
 ${cvContext.text}
 
@@ -766,6 +766,19 @@ Return ONLY the value, nothing else.`;
     return dataPatterns.some(p => p.test(q));
   }
 
+  isWhyCompanyQuestion(question) {
+    const q = (question || '').trim().toLowerCase();
+    return (
+      q.includes('why do you want') ||
+      q.includes('why would you like') ||
+      q.includes('why are you applying') ||
+      q.includes('what draws you') ||
+      q.includes('why this company') ||
+      q.includes("company's mission") ||
+      q.includes('why our company')
+    );
+  }
+
   // Build prompt with automatic page context
   buildPrompt(cvData, question, length) {
     // For simple data extraction, use a direct extraction prompt
@@ -787,6 +800,13 @@ Before writing, scan the ENTIRE CV and identify ALL relevant experiences:
 - Find the BEST examples regardless of when they occurred
 - Older experiences are often MORE relevant than recent ones
 
+## MANDATORY: USE THE JOB DESCRIPTION (IF PROVIDED)
+If a job description / requirements are provided, you MUST:
+- Identify 3-5 key requirements/responsibilities that matter most
+- Map them to concrete CV evidence (specific roles/projects/skills) from anywhere in the CV
+- Use the role language naturally (tools, responsibilities) but do NOT copy/paste
+- If a requirement is not covered, either avoid claiming it or address it honestly ("I haven't done X directly, but I've done Y which is adjacent")
+
 ## ANSWER STRUCTURE
 Your answer MUST include experiences from at least 2 different time periods or roles when the CV has them. For example:
 - "In my role at [OLDER COMPANY], I... Later at [RECENT COMPANY], I built on this by..."
@@ -806,28 +826,16 @@ ${this.pageContext?.jobDescription ? '5. Tailor to the job description provided'
 
     const cvContext = this.getCvContext(cvData.rawText, 8000);
 
-    // #region agent log
-    this.agentLog({sessionId:'debug-session',runId:'run2',hypothesisId:'R',location:'extension-ready/content.js:buildPrompt',message:'CV context selected (answer)',data:{host:location.host,strategy:cvContext.strategy,rawLen:cvContext.rawLen,headLen:cvContext.headLen,tailLen:cvContext.tailLen,sentLen:(cvContext.text||'').length},timestamp:Date.now()});
-    // #endregion
-
     let userPrompt = `## CANDIDATE CV (use ALL relevant roles; older roles may be most relevant)
 ${cvContext.text}
 
 `;
 
-    // Add page context if available
-    if (this.pageContext?.jobDescription) {
+    // Add page context if available (job posting text or extracted page text)
+    if ((this.pageContext?.jobDescription && this.pageContext.jobDescription.length > 200) || (this.pageContext?.fullPageText && this.pageContext.fullPageText.length > 400)) {
       const ctx = this.pageExtractor.buildContext();
       userPrompt += ctx;
       userPrompt += '\n\n';
-
-      // #region agent log
-      this.agentLog({sessionId:'debug-session',runId:'run3',hypothesisId:'J',location:'extension-ready/content.js:buildPrompt:jobContext',message:'Job context included',data:{host:location.host,platform:this.pageContext?.platform||null,descriptionLen:(this.pageContext?.jobDescription||'').length,requirementsCount:(this.pageContext?.requirements||[]).length,contextLen:(ctx||'').length},timestamp:Date.now()});
-      // #endregion
-    } else {
-      // #region agent log
-      this.agentLog({sessionId:'debug-session',runId:'run3',hypothesisId:'J',location:'extension-ready/content.js:buildPrompt:noJobContext',message:'No job context available to include',data:{host:location.host,platform:this.pageContext?.platform||null,descriptionLen:(this.pageContext?.jobDescription||'').length,requirementsCount:(this.pageContext?.requirements||[]).length},timestamp:Date.now()});
-      // #endregion
     }
 
     userPrompt += `## QUESTION
@@ -839,11 +847,14 @@ ${question}
 - Do NOT focus only on the most recent role
 - ${this.pageContext?.jobDescription ? 'Tailor to the job requirements above' : 'Show breadth of experience across your career'}
 
-Write the answer now. First person, no preamble.`;
+${this.isWhyCompanyQuestion(question) ? `
+SPECIAL (WHY COMPANY):
+- Use 2-3 specific points from the job context (mission, responsibilities, requirements) to show you understand the role
+- Then connect each point to a concrete example from your CV (preferably from different roles/time periods)
+- End with 1 sentence explaining why this is a logical next step for you (no generic hype)
+` : ''}
 
-    // #region agent log
-    this.agentLog({sessionId:'debug-session',runId:'run2',hypothesisId:'R',location:'extension-ready/content.js:buildPrompt:finalLens',message:'Prompt lengths',data:{host:location.host,systemPromptLen:(systemPrompt||'').length,userPromptLen:(userPrompt||'').length,questionLen:(question||'').length},timestamp:Date.now()});
-    // #endregion
+Write the answer now. First person, no preamble.`;
 
     return { systemPrompt, userPrompt };
   }

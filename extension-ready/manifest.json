@@ -27,9 +27,8 @@
     "https://*.jobvite.com/*",
     "https://*.glassdoor.com/*",
     "https://*.glassdoor.co.uk/*",
-    "https://*.onrender.com/*",
-    "http://localhost:*/*",
-    "http://127.0.0.1:*/*"
+    "https://draftapply.onrender.com/*",
+    "https://api.groq.com/*"
   ],
   
   "background": {
@@ -70,6 +69,30 @@
       "js": ["page-extractor.js", "content.js"],
       "css": ["content.css"],
       "run_at": "document_idle"
+    }
+  ],
+
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/*.png"],
+      "matches": [
+        "https://*.indeed.com/*",
+        "https://*.otta.com/*",
+        "https://*.hiringcafe.com/*",
+        "https://*.greenhouse.io/*",
+        "https://*.lever.co/*",
+        "https://*.workable.com/*",
+        "https://*.linkedin.com/*",
+        "https://*.ashbyhq.com/*",
+        "https://*.breezy.hr/*",
+        "https://*.smartrecruiters.com/*",
+        "https://*.icims.com/*",
+        "https://*.myworkdayjobs.com/*",
+        "https://*.taleo.net/*",
+        "https://*.jobvite.com/*",
+        "https://*.glassdoor.com/*",
+        "https://*.glassdoor.co.uk/*"
+      ]
     }
   ],
   

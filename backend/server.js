@@ -257,11 +257,11 @@ app.listen(PORT, () => {
   console.log(`\nUsing: ${PROVIDER_CONFIG.name} (${PROVIDER_CONFIG.model})`);
   console.log(`Type: ${PROVIDERS[PROVIDER_NAME].type === 'local' ? 'Local (no API key)' : 'Cloud'}`);
   console.log(`\nAPI endpoints:`);
-  console.log(`  GET  /api/health     - Health check`);
-  console.log(`  GET  /api/providers  - List available providers`);
-  console.log(`  GET  /api/llm-status - Check LLM availability`);
-  console.log(`  POST /api/cv/upload  - Upload CV file`);
-  console.log(`  POST /api/generate   - Generate answer`);
+  console.log(`  GET  /api/health      - Health check`);
+  console.log(`  GET  /api/providers   - List available providers`);
+  console.log(`  GET  /api/llm-status  - Check LLM availability`);
+  console.log(`  POST /api/cv/upload   - Upload CV file`);
+  console.log(`  POST /api/generate    - Generate answer`);
 });
 
 export default app;

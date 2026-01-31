@@ -14,23 +14,31 @@
 
 const pendingRequests = new Map(); // requestId -> AbortController
 
-const DEFAULT_PROXY_URL = 'https://YOUR-RENDER-SERVICE.onrender.com';
+const DEFAULT_PROXY_URL = 'https://draftapply.onrender.com';
 
 async function getProxyUrl() {
-  const { proxyUrl } = await chrome.storage.local.get('proxyUrl');
-  if (typeof proxyUrl === 'string' && proxyUrl.startsWith('http')) {
-    return proxyUrl.replace(/\/+$/, '');
-  }
   return DEFAULT_PROXY_URL;
 }
 
 async function getInstallToken() {
-  const { installToken } = await chrome.storage.local.get('installToken');
-  return typeof installToken === 'string' ? installToken : null;
+  const { installToken, installTokenExpiresAt } = await chrome.storage.local.get([
+    'installToken',
+    'installTokenExpiresAt'
+  ]);
+  if (typeof installToken !== 'string' || !installToken) return null;
+  if (typeof installTokenExpiresAt === 'number' && Date.now() > installTokenExpiresAt - 24 * 60 * 60 * 1000) {
+    // refresh if expiring within 24h
+    return null;
+  }
+  return installToken;
 }
 
-async function setInstallToken(token) {
-  await chrome.storage.local.set({ installToken: token });
+async function setInstallToken(token, expiresAt) {
+  await chrome.storage.local.set({ installToken: token, installTokenExpiresAt: expiresAt || null });
+}
+
+async function clearInstallToken() {
+  await chrome.storage.local.remove(['installToken', 'installTokenExpiresAt']);
 }
 
 async function ensureInstallToken(proxyUrl) {
@@ -41,16 +49,30 @@ async function ensureInstallToken(proxyUrl) {
   if (!response.ok) throw new Error(`Register failed (${response.status})`);
   const data = await response.json().catch(() => ({}));
   if (!data.token) throw new Error('Register failed (no token)');
-  await setInstallToken(data.token);
+  await setInstallToken(data.token, data.expiresAt);
   return data.token;
 }
 
-// Create context menu on install
+// Create context menu on install/update (idempotent)
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
-    id: 'draftapply',
-    title: 'DraftApply - Answer using my CV',
-    contexts: ['selection']
+  // On extension reload/update, Chrome may keep old menu items.
+  // Ensure we don't throw "duplicate id" by removing first.
+  chrome.contextMenus.remove('draftapply', () => {
+    // Ignore "not found" errors
+    void chrome.runtime.lastError;
+
+    chrome.contextMenus.create(
+      {
+        id: 'draftapply',
+        title: 'DraftApply - Answer using my CV',
+        contexts: ['selection']
+      },
+      () => {
+        if (chrome.runtime.lastError) {
+          console.warn('contextMenus.create failed:', chrome.runtime.lastError.message);
+        }
+      }
+    );
   });
 });
 
@@ -165,7 +187,6 @@ async function checkProxy() {
  */
 async function handleAPICall(payload, requestId) {
   const proxyUrl = await getProxyUrl();
-  const token = await ensureInstallToken(proxyUrl);
   const controller = new AbortController();
   const effectiveRequestId = requestId || `req_${Date.now()}_${Math.random().toString(16).slice(2)}`;
   pendingRequests.set(effectiveRequestId, controller);
@@ -174,24 +195,36 @@ async function handleAPICall(payload, requestId) {
   const timeout = setTimeout(() => controller.abort(), 120000);
 
   try {
-    const response = await fetch(`${proxyUrl}/api/generate`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`
-      },
-      signal: controller.signal,
-      body: JSON.stringify({
-        systemPrompt: payload.systemPrompt,
-        userPrompt: payload.userPrompt,
-        temperature: 0.7,
-        stream: false
-      })
-    });
+    let token = await ensureInstallToken(proxyUrl);
+
+    const doRequest = async () =>
+      fetch(`${proxyUrl}/api/generate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          systemPrompt: payload.systemPrompt,
+          userPrompt: payload.userPrompt,
+          temperature: 0.7,
+          stream: false
+        })
+      });
+
+    let response = await doRequest();
+    if (response.status === 401) {
+      // Token expired/revoked → re-register once and retry
+      await clearInstallToken();
+      token = await ensureInstallToken(proxyUrl);
+      response = await doRequest();
+    }
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      throw new Error(error.error || `Proxy error: ${response.status}`);
+      const msg = error.error || `Proxy error: ${response.status}`;
+      throw new Error(msg);
     }
 
     return await response.json();

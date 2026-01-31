@@ -227,6 +227,69 @@
     [hidden] {
       display: none !important;
     }
+    
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    
+    .stat-card {
+      background: white;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      padding: 10px;
+      text-align: center;
+    }
+    
+    .stat-value {
+      font-size: 20px;
+      font-weight: 600;
+      color: #1e293b;
+    }
+    
+    .stat-label {
+      font-size: 10px;
+      color: #64748b;
+      text-transform: uppercase;
+      margin-top: 2px;
+    }
+    
+    .current-session {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      background: #fef3c7;
+      border-radius: 6px;
+      font-size: 12px;
+    }
+    
+    .session-indicator {
+      color: #f59e0b;
+      animation: pulse 2s infinite;
+    }
+    
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    
+    .btn-small {
+      padding: 4px 8px;
+      font-size: 11px;
+      border: none;
+      border-radius: 4px;
+      background: #2563eb;
+      color: white;
+      cursor: pointer;
+      margin-left: auto;
+    }
+    
+    .btn-small:hover {
+      background: #1d4ed8;
+    }
   </style>
 </head>
 <body>
@@ -243,12 +306,9 @@
     </div>
   </div>
 
-  <div class="section" id="proxy-section">
-    <div class="section-title">Proxy (Render)</div>
-    <textarea id="proxy-url" placeholder="https://your-service.onrender.com" style="min-height: 44px;"></textarea>
-    <button class="btn btn-secondary" id="save-proxy-btn">Save Proxy URL</button>
-    <p class="help">This is the hosted API that powers generation (keeps Groq key server-side).</p>
-  </div>
+  <p class="help">
+    <strong>Status:</strong> If "Proxy" is green, DraftApply can generate answers.
+  </p>
   
   <!-- CV Input Section -->
   <div class="section" id="cv-input-section">
@@ -277,7 +337,7 @@
     <strong>How to use:</strong> Highlight any question on a job application page, right-click, and select "DraftApply - Answer using my CV".
   </p>
   <p class="help">
-    <strong>Proxy required:</strong> Deploy `render-proxy/` to Render and paste the URL above.
+    <strong>Privacy:</strong> Your CV is stored locally in your browser. DraftApply does not store your CV or generated answers on our servers. When generating an answer, the prompt is sent to DraftApply’s server and then to the LLM provider (Groq with ZDR enabled) to generate a response.
   </p>
   
   <script src="popup.js"></script>

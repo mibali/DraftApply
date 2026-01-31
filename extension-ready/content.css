@@ -22,8 +22,22 @@
   gap: 8px;
 }
 
+.da-icon {
+  display: block;
+  width: 20px;
+  height: 20px;
+  object-fit: contain;
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: crisp-edges;
+}
+
 .da-indicator-icon {
-  font-size: 18px;
+  width: 18px;
+  height: 18px;
+  padding: 3px;
+  background: rgba(255, 255, 255, 0.9);
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
 }
 
 .da-indicator-meta {
@@ -286,11 +300,11 @@
 /* Field Button - Overlay approach (doesn't break React) */
 .da-field-btn-overlay {
   position: absolute;
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  border: none;
-  background: linear-gradient(135deg, #2563eb, #7c3aed);
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  border: 2px solid rgba(124, 58, 237, 0.9);
+  background: rgba(255, 255, 255, 0.96);
   color: white;
   font-size: 16px;
   cursor: pointer;
@@ -300,13 +314,25 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.4);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18), 0 4px 10px rgba(124, 58, 237, 0.22);
   pointer-events: none;
+}
+
+.da-field-btn-overlay .da-icon {
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.25));
+}
+
+.da-icon-fallback {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  color: #4c1d95;
+  user-select: none;
 }
 
 .da-field-btn-overlay:hover {
   transform: scale(1.1);
-  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.5);
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.22), 0 6px 14px rgba(124, 58, 237, 0.28);
 }
 
 /* Notification */
