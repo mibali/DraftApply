@@ -191,6 +191,10 @@ async function handleAPICall(payload, requestId) {
   const effectiveRequestId = requestId || `req_${Date.now()}_${Math.random().toString(16).slice(2)}`;
   pendingRequests.set(effectiveRequestId, controller);
 
+  // #region agent log
+  fetch('http://127.0.0.1:7243/ingest/dbe99d5f-16cc-4ee2-a0f8-9d35438d6c11',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:handleAPICall',message:'Payload sent to proxy',data:{question:payload.question,length:payload.length,hasCvText:!!payload.cvText,cvTextLen:payload.cvText?.length,hasJobDesc:!!payload.jobDescription,hasRequirements:!!payload.requirements,payloadKeys:Object.keys(payload)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C,D'})}).catch(()=>{});
+  // #endregion
+
   // Hard timeout so the UI never spins forever
   const timeout = setTimeout(() => controller.abort(), 120000);
 
@@ -218,11 +222,18 @@ async function handleAPICall(payload, requestId) {
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/dbe99d5f-16cc-4ee2-a0f8-9d35438d6c11',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:handleAPICall:error',message:'Proxy returned error',data:{status:response.status,error:error},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
       const msg = error.error || `Proxy error: ${response.status}`;
       throw new Error(msg);
     }
 
-    return await response.json();
+    const result = await response.json();
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/dbe99d5f-16cc-4ee2-a0f8-9d35438d6c11',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:handleAPICall:success',message:'Proxy response received',data:{answerLen:result.answer?.length,answerPreview:result.answer?.slice(0,120),provider:result.provider,model:result.model},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'A,B'})}).catch(()=>{});
+    // #endregion
+    return result;
   } catch (e) {
     if (e?.name === 'AbortError') {
       throw new Error('Cancelled');

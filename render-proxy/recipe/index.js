@@ -28,6 +28,39 @@
  * @param {Object} input - Structured generation input
  * @returns {{ systemPrompt: string, userPrompt: string, temperature?: number }}
  */
+/**
+ * Strip common form-field artifacts: required markers (*), colons, etc.
+ */
+function cleanFieldLabel(raw) {
+  return (raw || '')
+    .trim()
+    .replace(/[*:?\u2217\u2731]+$/g, '')
+    .replace(/^(please\s+(enter|provide|input|type|specify)\s+(your\s+)?)/i, '')
+    .replace(/^(enter\s+(your\s+)?)/i, '')
+    .replace(/^(your\s+)/i, '')
+    .trim();
+}
+
+/**
+ * Detect simple data-extraction questions (name, email, phone, linkedin, etc.)
+ */
+function isDataExtractionQuestion(question) {
+  const q = cleanFieldLabel(question);
+  const dataPatterns = [
+    /^(full\s*)?name$/i,
+    /^(first|last|middle|legal|preferred)\s*name$/i,
+    /^name\s*(first|last|middle|legal)?$/i,
+    /^linkedin/i, /^(email|e-mail)/i, /^phone/i, /^(mobile|cell)/i,
+    /^address/i, /^(city|state|zip|postal|country)/i, /^location$/i,
+    /^website/i, /^(personal\s*)?portfolio/i, /^github/i, /^twitter/i,
+    /^(current\s*)?(job\s*)?title$/i, /^(current\s*)?company$/i,
+    /^(current\s*)?employer$/i, /^(your\s*)?(date\s*of\s*)?birth/i,
+    /^nationality$/i, /^visa\s*status$/i, /^work\s*authori[sz]ation$/i,
+    /^salary/i, /^notice\s*period$/i, /^availability$/i, /^start\s*date$/i,
+  ];
+  return dataPatterns.some(p => p.test(q));
+}
+
 export function buildPrompts(input) {
   const {
     question,
@@ -39,6 +72,17 @@ export function buildPrompts(input) {
     requirements,
   } = input;
 
+  // ── Data-extraction shortcut ──────────────────────────────────────────
+  if (isDataExtractionQuestion(question)) {
+    const cleanQ = cleanFieldLabel(question);
+    return {
+      systemPrompt: `You are a data extraction assistant. Extract ONLY the requested information from the CV.\n\nRULES:\n- Return ONLY the exact value requested, nothing else\n- No sentences, no explanations, no formatting\n- If the information is not found, respond with: "Not found in CV"\n- For URLs, return the full URL\n- For names, return just the name\n- For phone numbers, include country code if present`,
+      userPrompt: `CV:\n${cvText.slice(0, 2500)}\n\nExtract: ${cleanQ}\n\nReturn ONLY the value, nothing else.`,
+      temperature: 0.1,
+    };
+  }
+
+  // ── General answer ────────────────────────────────────────────────────
   const lengthSpec = {
     short: '50-80 words',
     medium: '100-150 words',
