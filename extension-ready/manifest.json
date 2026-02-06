@@ -28,8 +28,7 @@
     "https://*.glassdoor.com/*",
     "https://*.glassdoor.co.uk/*",
     "https://draftapply.onrender.com/*",
-    "https://api.groq.com/*",
-    "http://127.0.0.1:*/*"
+    "https://api.groq.com/*"
   ],
   
   "background": {
