@@ -205,12 +205,7 @@ async function handleAPICall(payload, requestId) {
           Authorization: `Bearer ${token}`
         },
         signal: controller.signal,
-        body: JSON.stringify({
-          systemPrompt: payload.systemPrompt,
-          userPrompt: payload.userPrompt,
-          temperature: 0.7,
-          stream: false
-        })
+        body: JSON.stringify(payload)
       });
 
     let response = await doRequest();

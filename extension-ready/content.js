@@ -46,21 +46,7 @@ class DraftApplyExtension {
     return img;
   }
 
-  getCvContext(rawText, maxChars) {
-    const raw = rawText || '';
-    const max = Math.max(500, Number(maxChars) || 0);
-    if (raw.length <= max) {
-      return { text: raw, strategy: 'full', rawLen: raw.length, headLen: raw.length, tailLen: 0 };
-    }
-
-    // Include both start and end so older roles don't get truncated away.
-    const headLen = Math.floor(max * 0.6);
-    const tailLen = max - headLen;
-    const head = raw.slice(0, headLen);
-    const tail = raw.slice(-tailLen);
-    const text = `${head}\n\n...[snip - middle omitted to fit prompt]...\n\n${tail}`;
-    return { text, strategy: 'head_tail', rawLen: raw.length, headLen, tailLen };
-  }
+  // getCvContext is now handled server-side by the recipe module.
 
   init() {
     this.extractPageContext();
@@ -152,7 +138,7 @@ class DraftApplyExtension {
           <div class="da-question-label">Question:</div>
           <div class="da-question-preview" id="da-question-preview"></div>
           <div class="da-answer-label">Generated Answer:</div>
-          <div class="da-answer-output" id="da-answer-output"></div>
+          <textarea class="da-answer-output" id="da-answer-output" placeholder="Your answer will appear here. You can edit it before inserting."></textarea>
           <div class="da-modal-actions">
             <select class="da-length-select" id="da-length-select">
               <option value="short">Short</option>
@@ -409,7 +395,7 @@ class DraftApplyExtension {
   showModal(question) {
     const modal = this.modal;
     modal.querySelector('#da-question-preview').textContent = question;
-    modal.querySelector('#da-answer-output').textContent = '';
+    modal.querySelector('#da-answer-output').value = '';
     modal.querySelector('#da-loading').hidden = true;
     modal.style.display = 'flex';
   }
@@ -429,23 +415,31 @@ class DraftApplyExtension {
     this.lastQuestion = question;
     loading.hidden = false;
     stopBtn.disabled = false;
-    output.textContent = '';
+    output.value = '';
     
     try {
       // Get CV from storage
       const response = await chrome.runtime.sendMessage({ type: 'GET_CV' });
       
       if (!response.cvText) {
-        output.textContent = 'Please load your CV first. Click the DraftApply extension icon.';
+        output.value = 'Please load your CV first. Click the DraftApply extension icon.';
         loading.hidden = true;
         return;
       }
       
-      // Parse CV
-      const cvData = this.parseCV(response.cvText);
-      
-      // Build prompt with page context
-      const prompt = this.buildPrompt(cvData, question, length);
+      // Build structured payload — the proxy's recipe module builds prompts server-side
+      const ctx = this.pageContext || {};
+      const structuredPayload = {
+        question,
+        length,
+        cvText:         response.cvText,
+        jobTitle:       ctx.jobTitle || undefined,
+        company:        ctx.company || undefined,
+        jobDescription: ctx.jobDescription || ctx.fullPageText || undefined,
+        requirements:   (ctx.requirements && ctx.requirements.length > 0) ? ctx.requirements : undefined,
+        pageUrl:        ctx.url || window.location.href,
+        platform:       ctx.platform || undefined,
+      };
       
       // Call API via background with timeout
       const requestId = (globalThis.crypto?.randomUUID?.() || `req_${Date.now()}_${Math.random().toString(16).slice(2)}`);
@@ -459,7 +453,7 @@ class DraftApplyExtension {
         chrome.runtime.sendMessage({
           type: 'CALL_API',
           requestId,
-          payload: prompt
+          payload: structuredPayload
         }),
         timeoutPromise
       ]);
@@ -471,25 +465,25 @@ class DraftApplyExtension {
       }
       
       if (!result) {
-        output.textContent = 'Error: No response from backend. Is it running?';
+        output.value = 'Error: No response from backend. Is it running?';
       } else if (result.error) {
-        output.textContent = `Error: ${result.error}`;
+        output.value = `Error: ${result.error}`;
       } else if (result.answer) {
-        output.textContent = result.answer;
+        output.value = result.answer;
         this.lastAnswer = result.answer;
       } else {
         // Handle unexpected response format
-        output.textContent = result.text || result.content || JSON.stringify(result);
-        this.lastAnswer = output.textContent;
+        output.value = result.text || result.content || JSON.stringify(result);
+        this.lastAnswer = output.value;
       }
       
     } catch (error) {
       if (error.message.includes('Extension context invalidated')) {
-        output.textContent = 'Extension was updated. Please refresh this page.';
+        output.value = 'Extension was updated. Please refresh this page.';
       } else if (error.message === 'Cancelled') {
-        output.textContent = 'Cancelled.';
+        output.value = 'Cancelled.';
       } else {
-        output.textContent = `Error: ${error.message}`;
+        output.value = `Error: ${error.message}`;
       }
     } finally {
       if (this.currentRequestId) {
@@ -513,7 +507,7 @@ class DraftApplyExtension {
 
     if (stopBtn) stopBtn.disabled = true;
     if (loading) loading.hidden = true;
-    if (output && !output.textContent.trim()) output.textContent = 'Cancelled.';
+    if (output && !String(output.value || '').trim()) output.value = 'Cancelled.';
 
     const requestId = this.currentRequestId;
     this.currentRequestId = null;
@@ -610,7 +604,10 @@ class DraftApplyExtension {
   }
 
   insertAnswer() {
-    if (!this.lastAnswer) {
+    const current = String(this.modal?.querySelector?.('#da-answer-output')?.value || '').trim();
+    const answerToInsert = current || this.lastAnswer;
+
+    if (!answerToInsert) {
       this.showNotification('No answer to insert yet.', 'error');
       return;
     }
@@ -633,12 +630,12 @@ class DraftApplyExtension {
         // Prefer execCommand if available (works on many rich text editors)
         if (typeof document.execCommand === 'function') {
           document.execCommand('selectAll', false);
-          document.execCommand('insertText', false, this.lastAnswer);
+          document.execCommand('insertText', false, answerToInsert);
         } else {
-          target.textContent = this.lastAnswer;
+          target.textContent = answerToInsert;
         }
 
-        this.dispatchInputEvents(target, this.lastAnswer);
+        this.dispatchInputEvents(target, answerToInsert);
       } else {
         // Inputs/Textareas (React/Vue/Angular friendly)
         // Prefer selecting all first (helps on some controlled inputs)
@@ -650,8 +647,8 @@ class DraftApplyExtension {
           }
         }
 
-        this.setNativeValue(target, this.lastAnswer);
-        this.dispatchInputEvents(target, this.lastAnswer);
+        this.setNativeValue(target, answerToInsert);
+        this.dispatchInputEvents(target, answerToInsert);
       }
 
       this.currentField = target;
@@ -685,215 +682,9 @@ class DraftApplyExtension {
     }, 3000);
   }
 
-  // Simplified CV parser
-  parseCV(text) {
-    return {
-      summary: text.slice(0, 500),
-      experience: this.extractSection(text, 'experience'),
-      skills: this.extractSection(text, 'skills'),
-      rawText: text
-    };
-  }
-
-  extractSection(text, section) {
-    // Keep regexes literal to avoid ReDoS from dynamic RegExp construction
-    const patterns = {
-      experience: /experience[:\s]*\n([\s\S]*?)(?=\n\s*(?:education|skills|experience|certifications|$))/i,
-      skills: /skills[:\s]*\n([\s\S]*?)(?=\n\s*(?:education|skills|experience|certifications|$))/i,
-    };
-
-    const pattern = patterns[section];
-    if (!pattern) return '';
-
-    const match = text.match(pattern);
-    return match ? match[1].trim() : '';
-  }
-
-  // Build prompt for simple data extraction
-  buildExtractionPrompt(cvData, question) {
-    const systemPrompt = `You are a data extraction assistant. Extract ONLY the requested information from the CV.
-
-RULES:
-- Return ONLY the exact value requested, nothing else
-- No sentences, no explanations, no formatting
-- If the information is not found, respond with: "Not found in CV"
-- For URLs, return the full URL
-- For names, return just the name
-- For phone numbers, include country code if present`;
-
-    const cvContext = this.getCvContext(cvData.rawText, 2500);
-
-    const userPrompt = `CV:
-${cvContext.text}
-
-Extract: ${question}
-
-Return ONLY the value, nothing else.`;
-
-    return { systemPrompt, userPrompt };
-  }
-
-  // Check if question is asking for simple data extraction
-  isDataExtractionQuestion(question) {
-    const dataPatterns = [
-      /^(full\s*)?name$/i,
-      /^(first|last|middle|legal|preferred)\s*name$/i,
-      /^name\s*(first|last|middle|legal)?$/i,
-      /^linkedin/i,
-      /^(email|e-mail)/i,
-      /^phone/i,
-      /^(mobile|cell)/i,
-      /^address/i,
-      /^(city|state|zip|postal|country)/i,
-      /^location$/i,
-      /^website/i,
-      /^(personal\s*)?portfolio/i,
-      /^github/i,
-      /^twitter/i,
-      /^(current\s*)?(job\s*)?title$/i,
-      /^(current\s*)?company$/i,
-      /^(current\s*)?employer$/i,
-      /^(your\s*)?(date\s*of\s*)?birth/i,
-      /^nationality$/i,
-      /^visa\s*status$/i,
-      /^work\s*authori[sz]ation$/i,
-      /^salary/i,
-      /^notice\s*period$/i,
-      /^availability$/i,
-      /^start\s*date$/i,
-    ];
-    const q = question.trim();
-    return dataPatterns.some(p => p.test(q));
-  }
-
-  isWhyCompanyQuestion(question) {
-    const q = (question || '').trim().toLowerCase();
-    return (
-      q.includes('why do you want') ||
-      q.includes('why would you like') ||
-      q.includes('why are you applying') ||
-      q.includes('what draws you') ||
-      q.includes('why this company') ||
-      q.includes("company's mission") ||
-      q.includes('why our company')
-    );
-  }
-
-  isCoverLetterQuestion(question) {
-    const q = (question || '').trim().toLowerCase();
-    return (
-      q.includes('cover letter') ||
-      q.includes('coverletter') ||
-      q.includes('motivation letter') ||
-      q.includes('letter of interest') ||
-      q.includes('application letter') ||
-      q === 'cover letter' ||
-      q === 'coverletter'
-    );
-  }
-
-  // Build prompt with automatic page context
-  buildPrompt(cvData, question, length) {
-    // For simple data extraction, use a direct extraction prompt
-    if (this.isDataExtractionQuestion(question)) {
-      return this.buildExtractionPrompt(cvData, question);
-    }
-    const isCoverLetter = this.isCoverLetterQuestion(question);
-    const lengthSpec = isCoverLetter
-      ? ({
-          short: '150-220 words',
-          medium: '250-350 words',
-          long: '350-500 words'
-        }[length] || '250-350 words')
-      : ({
-          short: '50-80 words',
-          medium: '100-150 words',
-          long: '200-300 words'
-        }[length] || '100-150 words');
-
-    const systemPrompt = `You are helping a job candidate write authentic, tailored answers to application questions.
-
-## MANDATORY: USE THE FULL CV
-Before writing, scan the ENTIRE CV and identify ALL relevant experiences:
-- Look at EVERY job listed, not just the most recent
-- Check education, certifications, projects, volunteer work
-- Find the BEST examples regardless of when they occurred
-- Older experiences are often MORE relevant than recent ones
-
-## MANDATORY: USE THE JOB DESCRIPTION (IF PROVIDED)
-If a job description / requirements are provided, you MUST:
-- Identify 3-5 key requirements/responsibilities that matter most
-- Map them to concrete CV evidence (specific roles/projects/skills) from anywhere in the CV
-- Use the role language naturally (tools, responsibilities) but do NOT copy/paste
-- If a requirement is not covered, either avoid claiming it or address it honestly ("I haven't done X directly, but I've done Y which is adjacent")
-
-${isCoverLetter ? `## COVER LETTER MODE
-If the user asks for a cover letter (or the field is "Cover letter"), you MUST write a real cover letter:
-- Greeting ("Dear Hiring Manager," or "Dear [Company] team,")
-- 1st paragraph: specific hook showing you understand the role and why you fit
-- 2nd–3rd paragraphs: map at least 3 job requirements to concrete CV evidence (use different roles/time periods when possible)
-- Final paragraph: close confidently and add "Sincerely,\\n[Your Name]"
-- Do NOT write a generic summary of skills; this must be tailored to the job context
-` : ''}
-
-## ANSWER STRUCTURE
-Your answer MUST include experiences from at least 2 different time periods or roles when the CV has them. For example:
-- "In my role at [OLDER COMPANY], I... Later at [RECENT COMPANY], I built on this by..."
-- "My experience spans from [EARLY ROLE] where I learned X, through [MID ROLE] where I applied it to Y"
-
-## RULES
-1. Write in first person as the candidate
-2. NEVER focus only on the current/most recent role - this is the #1 mistake to avoid
-3. NEVER invent employers, degrees, dates, or metrics not in the CV
-4. Sound human and genuine - no corporate buzzwords
-${this.pageContext?.jobDescription ? '5. Tailor to the job description provided' : ''}
-
-## BANNED PHRASES
-- "I'm excited to..." / "I'm passionate about..."
-- "leverage", "synergy", "proven track record"
-- Starting with "As a [current title]..." (shows recency bias)`;
-
-    const cvContext = this.getCvContext(cvData.rawText, 8000);
-
-    let userPrompt = `## CANDIDATE CV (use ALL relevant roles; older roles may be most relevant)
-${cvContext.text}
-
-`;
-
-    // Add page context if available (job posting text or extracted page text)
-    if (this.pageContext?.jobDescription || this.pageContext?.fullPageText || this.pageContext?.requirements?.length) {
-      const ctx = this.pageExtractor.buildContext();
-      userPrompt += ctx;
-      userPrompt += '\n\n';
-    }
-
-    userPrompt += `## QUESTION
-${question}
-
-## INSTRUCTIONS
-- Length: approximately ${lengthSpec}
-- IMPORTANT: Reference experiences from AT LEAST 2 different roles/time periods in your answer
-- Do NOT focus only on the most recent role
-- ${this.pageContext?.jobDescription ? 'Tailor to the job requirements above' : 'Show breadth of experience across your career'}
-
-${this.isWhyCompanyQuestion(question) ? `
-SPECIAL (WHY COMPANY):
-- Use 2-3 specific points from the job context (mission, responsibilities, requirements) to show you understand the role
-- Then connect each point to a concrete example from your CV (preferably from different roles/time periods)
-- End with 1 sentence explaining why this is a logical next step for you (no generic hype)
-` : ''}
-
-${isCoverLetter ? `
-SPECIAL (COVER LETTER):
-- Output must be a complete cover letter with greeting + 3–4 paragraphs + closing.
-- Explicitly mention the role (${this.pageContext?.jobTitle ? this.pageContext.jobTitle : 'the role'})${this.pageContext?.company ? ` at ${this.pageContext.company}` : ''}.
-- Include at least 3 specific job requirements from the job context and map each to CV evidence.
-` : ''}
-
-Write the answer now. First person, no preamble.`;
-
-    return { systemPrompt, userPrompt };
-  }
+  // ── Prompt building is now handled server-side by the recipe module. ──
+  // The extension sends structured inputs (question, cvText, job context)
+  // to the proxy, which builds the prompts using the loaded recipe.
 }
 
 // Singleton guard - prevent duplicate instances on SPA navigation or extension reload

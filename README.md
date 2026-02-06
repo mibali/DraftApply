@@ -45,13 +45,14 @@ See `PRIVACY_POLICY.md`. In short:
 
 ## Hosted proxy (Render)
 
-If you want to run your own proxy (recommended for production distribution):
+The proxy is the open-source **engine** that handles auth, rate limiting, CV extraction, and LLM calls. It has a **pluggable recipe interface** — the prompt engineering / tailoring logic is loaded as a separate module at startup.
 
-- See `render-proxy/README.md`
+- See `render-proxy/README.md` for full documentation (API contract, recipe interface, deploy steps).
 - Required env vars:
   - `GROQ_API_KEY`
   - `TOKEN_SECRET`
   - (optional) `GROQ_MODEL`
+  - (optional) `RECIPE_PATH` — path to your custom recipe module (defaults to the bundled example)
 
 ## Local web app (optional)
 
@@ -125,8 +126,10 @@ Cloud:
 |----------|--------|-------------|
 | `/api/health` | GET | Health check |
 | `/api/register` | POST | Get install token |
-| `/api/generate` | POST | Generate via Groq |
+| `/api/generate` | POST | Generate answer (structured payload or legacy prompts) |
 | `/api/cv/upload` | POST | Extract text from PDF/DOCX/TXT |
+
+The extension sends a **structured payload** (question, CV text, job context) to `/api/generate`. The proxy's recipe module builds the LLM prompts server-side. See `render-proxy/README.md` for the full API contract.
 
 ## Store listing assets
 

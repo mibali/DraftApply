@@ -197,17 +197,26 @@
 }
 
 .da-answer-output {
-  padding: 16px;
-  background: #fafafa;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 14px;
+  background: #ffffff;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
   min-height: 120px;
-  max-height: 300px;
-  overflow-y: auto;
+  max-height: 260px;
   font-size: 14px;
-  line-height: 1.7;
-  white-space: pre-wrap;
+  line-height: 1.6;
   color: #1e293b;
+  resize: vertical;
+  outline: none;
+  font-family: inherit;
+  overflow-y: auto;
+}
+
+.da-answer-output:focus {
+  border-color: rgba(37, 99, 235, 0.6);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
 }
 
 .da-modal-actions {

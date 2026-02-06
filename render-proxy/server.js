@@ -6,11 +6,27 @@ import crypto from 'crypto';
 import multer from 'multer';
 import pdfParse from 'pdf-parse/lib/pdf-parse.js';
 import mammoth from 'mammoth';
+import { resolve } from 'path';
+import { pathToFileURL } from 'url';
 
 const PORT = Number(process.env.PORT || 10000);
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
 const TOKEN_SECRET = process.env.TOKEN_SECRET;
+
+// Recipe module – override with RECIPE_PATH env var to plug in a private recipe.
+// Falls back to the bundled example recipe.
+const RECIPE_PATH = process.env.RECIPE_PATH || './recipe/index.js';
+let recipe;
+try {
+  const absPath = resolve(RECIPE_PATH);
+  recipe = await import(pathToFileURL(absPath).href);
+  console.log(`Recipe loaded from ${RECIPE_PATH}`);
+} catch (err) {
+  console.error(`Failed to load recipe from ${RECIPE_PATH}: ${err.message}`);
+  console.error('Falling back to built-in example recipe.');
+  recipe = await import('./recipe/index.js');
+}
 
 if (!GROQ_API_KEY) {
   // Avoid printing secrets; just a clear startup error
@@ -119,12 +135,51 @@ app.post('/api/register', registerLimiter, (req, res) => {
 app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
   if (!GROQ_API_KEY) return res.status(500).json({ error: 'Server misconfigured' });
 
-  const { systemPrompt, userPrompt, temperature } = req.body || {};
-  if (typeof systemPrompt !== 'string' || typeof userPrompt !== 'string') {
-    return res.status(400).json({ error: 'Missing prompt data' });
+  const body = req.body || {};
+
+  let systemPrompt, userPrompt, temperature;
+
+  // Detect payload format:
+  //   Structured (new): body.question exists  →  run through recipe
+  //   Legacy:           body.systemPrompt + body.userPrompt  →  pass through
+  if (typeof body.question === 'string' && body.question.length > 0) {
+    // ── Structured payload → recipe builds the prompts ──
+    if (typeof body.cvText !== 'string' || body.cvText.length < 5) {
+      return res.status(400).json({ error: 'Missing or empty cvText' });
+    }
+    try {
+      const result = recipe.buildPrompts({
+        question:       body.question,
+        length:         body.length || 'medium',
+        cvText:         body.cvText,
+        jobTitle:       body.jobTitle || undefined,
+        company:        body.company || undefined,
+        jobDescription: body.jobDescription || undefined,
+        requirements:   Array.isArray(body.requirements) ? body.requirements : undefined,
+        pageUrl:        body.pageUrl || undefined,
+        platform:       body.platform || undefined,
+      });
+      systemPrompt = result.systemPrompt;
+      userPrompt   = result.userPrompt;
+      temperature  = typeof result.temperature === 'number' ? result.temperature : 0.7;
+    } catch (err) {
+      return res.status(500).json({ error: 'Recipe error', details: String(err.message).slice(0, 200) });
+    }
+  } else if (typeof body.systemPrompt === 'string' && typeof body.userPrompt === 'string') {
+    // ── Legacy raw prompt payload (backward-compat) ──
+    systemPrompt = body.systemPrompt;
+    userPrompt   = body.userPrompt;
+    temperature  = typeof body.temperature === 'number' ? body.temperature : 0.7;
+  } else {
+    return res.status(400).json({ error: 'Missing prompt data. Send either structured (question + cvText) or legacy (systemPrompt + userPrompt).' });
   }
-  if (systemPrompt.length < 10 || userPrompt.length < 10) {
-    return res.status(400).json({ error: 'Prompt too short' });
+
+  // Validate prompt sizes
+  if (typeof systemPrompt !== 'string' || systemPrompt.length < 10) {
+    return res.status(400).json({ error: 'System prompt too short' });
+  }
+  if (typeof userPrompt !== 'string' || userPrompt.length < 10) {
+    return res.status(400).json({ error: 'User prompt too short' });
   }
   if (systemPrompt.length > 30000 || userPrompt.length > 120000) {
     return res.status(413).json({ error: 'Prompt too large' });
@@ -138,7 +193,7 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
     },
     body: JSON.stringify({
       model: GROQ_MODEL,
-      temperature: typeof temperature === 'number' ? temperature : 0.7,
+      temperature,
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt }
