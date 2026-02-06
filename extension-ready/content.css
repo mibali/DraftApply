@@ -308,54 +308,43 @@
 
 /* Field Button - Overlay approach (doesn't break React) */
 .da-field-btn-overlay {
-  position: absolute;
-  width: 40px;
-  height: 40px;
-  border-radius: 12px;
+  position: fixed;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
   border: 2px solid rgba(124, 58, 237, 0.9);
-  background: rgba(255, 255, 255, 0.96);
-  color: white;
-  font-size: 16px;
+  background: rgba(255, 255, 255, 0.97);
   cursor: pointer;
-  opacity: 0.45;
-  transition: opacity 0.2s, transform 0.2s, box-shadow 0.2s;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease, transform 0.15s ease;
   z-index: 999990;
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(124, 58, 237, 0.18);
-  pointer-events: auto;
-  animation: da-btn-entrance 0.6s ease-out;
-}
-
-@keyframes da-btn-entrance {
-  0%   { opacity: 0; transform: scale(0.6); }
-  60%  { opacity: 0.6; transform: scale(1.08); }
-  100% { opacity: 0.45; transform: scale(1); }
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15), 0 2px 6px rgba(124, 58, 237, 0.2);
+  padding: 0;
 }
 
 .da-field-btn-overlay .da-icon {
-  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.25));
+  pointer-events: none;
 }
 
-.da-icon-fallback {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.2px;
-  color: #4c1d95;
-  user-select: none;
-}
-
-/* Active state: field focused or hovered */
-.da-field-btn-overlay.da-btn-active {
+/* Visible state: when field is focused or hovered */
+.da-field-btn-overlay.da-btn-visible {
   opacity: 1;
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18), 0 4px 10px rgba(124, 58, 237, 0.22);
+  pointer-events: auto;
+  animation: da-btn-pop 0.2s ease-out;
+}
+
+@keyframes da-btn-pop {
+  from { opacity: 0; transform: scale(0.8); }
+  to   { opacity: 1; transform: scale(1); }
 }
 
 .da-field-btn-overlay:hover {
-  opacity: 1;
-  transform: scale(1.1);
-  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.22), 0 6px 14px rgba(124, 58, 237, 0.28);
+  transform: scale(1.12);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.2), 0 4px 10px rgba(124, 58, 237, 0.25);
 }
 
 /* Notification */

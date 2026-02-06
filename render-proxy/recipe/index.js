@@ -77,7 +77,7 @@ export function buildPrompts(input) {
     const cleanQ = cleanFieldLabel(question);
     return {
       systemPrompt: `You are a data extraction assistant. Extract ONLY the requested information from the CV.\n\nRULES:\n- Return ONLY the exact value requested, nothing else\n- No sentences, no explanations, no formatting\n- If the information is not found, respond with: "Not found in CV"\n- For URLs, return the full URL\n- For names, return just the name\n- For phone numbers, include country code if present`,
-      userPrompt: `CV:\n${cvText.slice(0, 2500)}\n\nExtract: ${cleanQ}\n\nReturn ONLY the value, nothing else.`,
+      userPrompt: `CV:\n${cvText.slice(0, 10000)}\n\nExtract: ${cleanQ}\n\nReturn ONLY the value, nothing else.`,
       temperature: 0.1,
     };
   }
@@ -97,7 +97,7 @@ Rules:
 3. Do not invent facts not present in the CV.
 4. Sound natural and human.`;
 
-  let userPrompt = `## CV\n${cvText.slice(0, 6000)}\n\n`;
+  let userPrompt = `## CV\n${cvText.slice(0, 10000)}\n\n`;
 
   if (jobDescription) {
     userPrompt += `## Job Description\n`;

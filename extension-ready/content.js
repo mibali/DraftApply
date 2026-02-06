@@ -32,16 +32,36 @@ class DraftApplyExtension {
     img.alt = 'DraftApply';
     img.width = sizePx;
     img.height = sizePx;
-    // Prefer high-res asset and size down for crispness
+    img.style.pointerEvents = 'none'; // Clicks pass through to parent button
     img.src = chrome.runtime.getURL('icons/icon128.png');
     img.decoding = 'async';
     img.loading = 'eager';
     img.onerror = () => {
-      // Fallback if icons are blocked/unavailable
-      const fallback = document.createElement('span');
-      fallback.className = 'da-icon-fallback';
-      fallback.textContent = 'DA';
-      img.replaceWith(fallback);
+      // Fallback: inline SVG if image can't load (e.g. cross-origin iframe)
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('width', sizePx);
+      svg.setAttribute('height', sizePx);
+      svg.setAttribute('viewBox', '0 0 32 32');
+      svg.setAttribute('fill', 'none');
+      svg.className.baseVal = 'da-icon';
+      svg.style.pointerEvents = 'none';
+      const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      rect.setAttribute('width', '32');
+      rect.setAttribute('height', '32');
+      rect.setAttribute('rx', '6');
+      rect.setAttribute('fill', '#7c3aed');
+      const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      text.setAttribute('x', '16');
+      text.setAttribute('y', '22');
+      text.setAttribute('text-anchor', 'middle');
+      text.setAttribute('fill', 'white');
+      text.setAttribute('font-family', '-apple-system, BlinkMacSystemFont, sans-serif');
+      text.setAttribute('font-size', '14');
+      text.setAttribute('font-weight', '700');
+      text.textContent = 'DA';
+      svg.appendChild(rect);
+      svg.appendChild(text);
+      img.replaceWith(svg);
     };
     return img;
   }
@@ -163,13 +183,9 @@ class DraftApplyExtension {
     `;
     
     modal.style.display = 'none';
-    document.body.appendChild(modal);
     this.modal = modal;
 
-    // Update context badge
-    this.updateContextBadge();
-
-    // Bind events
+    // Bind events first (they persist even if modal is detached from DOM)
     modal.querySelector('.da-modal-close').onclick = () => this.hideModal();
     modal.querySelector('#da-btn-insert').onclick = () => this.insertAnswer();
     modal.querySelector('#da-btn-regenerate').onclick = () => this.regenerate();
@@ -185,9 +201,18 @@ class DraftApplyExtension {
         this.hideModal();
       }
     });
+
+    // Append to DOM (may be re-attached later if React removes it)
+    if (document.body) {
+      document.body.appendChild(modal);
+    }
+
+    // Update context badge
+    this.updateContextBadge();
   }
 
   updateContextBadge() {
+    if (!this.modal) return;
     const badge = this.modal.querySelector('#da-context-badge');
     const info = this.modal.querySelector('#da-context-info');
     
@@ -267,13 +292,14 @@ class DraftApplyExtension {
     // Use overlay buttons instead of wrapping fields (avoids breaking React)
     const buttonMap = new WeakMap(); // field -> button element
 
-    const BTN_SIZE = 40;
-    const BTN_INSET = 8;
+    const BTN_SIZE = 36;
+    const BTN_INSET = 6;
     
+    // Use fixed positioning — more reliable inside iframes and scrollable containers
     const positionButton = (field, btn) => {
       const rect = field.getBoundingClientRect();
-      btn.style.top = `${window.scrollY + rect.top + BTN_INSET}px`;
-      btn.style.left = `${window.scrollX + rect.right - BTN_SIZE - BTN_INSET}px`;
+      btn.style.top = `${rect.top + BTN_INSET}px`;
+      btn.style.left = `${rect.right - BTN_SIZE - BTN_INSET}px`;
     };
 
     const addButtons = () => {
@@ -295,47 +321,66 @@ class DraftApplyExtension {
         
         const btn = document.createElement('button');
         btn.className = 'da-field-btn-overlay';
-        btn.replaceChildren(this.createDraftApplyIconImg(22));
+        btn.replaceChildren(this.createDraftApplyIconImg(20));
         btn.title = 'Generate answer with DraftApply';
         btn.type = 'button';
+        btn.tabIndex = -1; // Focusable (fixes macOS relatedTarget) but not in tab order
         
-        btn.onclick = (e) => {
+        // Track whether a click is in progress to prevent premature hiding
+        let clickPending = false;
+        
+        // Use mousedown — fires before blur, avoids race with hide timer
+        btn.addEventListener('mousedown', (e) => {
+          e.preventDefault(); // Prevent field from losing focus prematurely
+          e.stopPropagation();
+          clickPending = true;
+        });
+        
+        btn.addEventListener('click', (e) => {
           e.preventDefault();
           e.stopPropagation();
+          clickPending = false;
           this.currentField = field;
           
           const label = this.findFieldLabel(field);
           const question = label || field.placeholder || 'Answer this question';
           
+          console.log('[DraftApply] Button clicked for:', question);
           this.handleGenerateRequest(question);
-        };
+        });
         
         document.body.appendChild(btn);
         buttonMap.set(field, btn);
         btn._draftapplyField = field; // Store reference for orphan cleanup
         
-        // Position immediately and keep positioned
-        positionButton(field, btn);
-        
-        // Highlight on focus/hover, dim on blur/leave (always visible)
-        const activateBtn = () => {
+        // Show button only when field is focused or hovered
+        const showBtn = () => {
           positionButton(field, btn);
-          btn.classList.add('da-btn-active');
+          btn.classList.add('da-btn-visible');
         };
-        const deactivateBtn = () => {
-          btn.classList.remove('da-btn-active');
+        const hideBtn = () => {
+          // Don't hide while a click is in progress
+          if (clickPending) return;
+          btn.classList.remove('da-btn-visible');
         };
         
-        field.addEventListener('focus', activateBtn);
-        field.addEventListener('mouseenter', activateBtn);
+        field.addEventListener('focus', showBtn);
+        field.addEventListener('mouseenter', showBtn);
         field.addEventListener('blur', (e) => {
-          // Don't deactivate if clicking the button itself
+          // Don't hide if focus moved to the button
           if (e.relatedTarget === btn) return;
-          setTimeout(deactivateBtn, 200);
+          setTimeout(hideBtn, 400);
         });
         field.addEventListener('mouseleave', (e) => {
           if (document.activeElement === field) return;
-          setTimeout(deactivateBtn, 200);
+          setTimeout(hideBtn, 400);
+        });
+        // Keep button visible while hovering/interacting with it
+        btn.addEventListener('mouseenter', showBtn);
+        btn.addEventListener('mouseleave', () => {
+          if (document.activeElement !== field) {
+            setTimeout(hideBtn, 400);
+          }
         });
       });
       
@@ -354,6 +399,15 @@ class DraftApplyExtension {
       debounceTimer = setTimeout(addButtons, 150);
     };
 
+    // Reposition visible buttons on scroll/resize (don't re-scan DOM)
+    const repositionVisible = () => {
+      document.querySelectorAll('.da-field-btn-overlay.da-btn-visible').forEach(btn => {
+        if (btn._draftapplyField?.isConnected) {
+          positionButton(btn._draftapplyField, btn);
+        }
+      });
+    };
+
     addButtons();
 
     // Expose for delayed re-scan from init()
@@ -367,9 +421,9 @@ class DraftApplyExtension {
       });
     }
     
-    // Reposition on scroll/resize
-    window.addEventListener('scroll', debouncedAddButtons, { passive: true });
-    window.addEventListener('resize', debouncedAddButtons, { passive: true });
+    // Reposition on scroll/resize (lightweight — only moves visible buttons)
+    window.addEventListener('scroll', repositionVisible, { passive: true });
+    window.addEventListener('resize', repositionVisible, { passive: true });
   }
 
   findFieldLabel(field) {
@@ -404,22 +458,41 @@ class DraftApplyExtension {
   }
 
   async handleGenerateRequest(question) {
+    if (!this.modal) {
+      console.warn('[DraftApply] Modal not ready — cannot generate.');
+      return;
+    }
     this.showModal(question);
     await this.generateAnswer(question);
   }
 
   showModal(question) {
     const modal = this.modal;
+    // Re-attach if React hydration or page re-render removed it from DOM
+    if (!modal.isConnected) {
+      console.log('[DraftApply] Modal was detached — re-attaching to body.');
+      document.body.appendChild(modal);
+    }
     modal.querySelector('#da-question-preview').textContent = question;
     modal.querySelector('#da-answer-output').value = '';
     modal.querySelector('#da-loading').hidden = true;
-    modal.style.display = 'flex';
+    // Force-show with max-priority inline styles to override any page CSS
+    modal.setAttribute('style',
+      'display:flex !important;position:fixed !important;' +
+      'top:0 !important;left:0 !important;right:0 !important;bottom:0 !important;' +
+      'z-index:2147483647 !important;background:rgba(0,0,0,0.6) !important;' +
+      'align-items:center !important;justify-content:center !important;' +
+      'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif !important;' +
+      'backdrop-filter:blur(4px) !important;visibility:visible !important;' +
+      'opacity:1 !important;pointer-events:auto !important;'
+    );
+    console.log('[DraftApply] Modal shown. isConnected:', modal.isConnected, 'parent:', modal.parentElement?.tagName);
   }
 
   hideModal() {
     // If a generation is in-flight, cancel it to avoid "infinite spinner" behavior.
     this.cancelGeneration({ silent: true });
-    this.modal.style.display = 'none';
+    if (this.modal) this.modal.setAttribute('style', 'display:none !important;');
   }
 
   async generateAnswer(question) {
