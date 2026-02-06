@@ -55,11 +55,15 @@ class DraftApplyExtension {
     this.observeFormFields();
     this.showPageContextIndicator();
     
-    // Re-extract context after delay (for SPAs that load content async)
+    // Re-extract context and re-scan fields after delay (for SPAs that load content async)
     setTimeout(() => {
       this.extractPageContext();
       this.updateContextBadge();
     }, 2000);
+    // Some pages render fields late; force a second scan
+    setTimeout(() => {
+      if (this._rescanFields) this._rescanFields();
+    }, 1500);
     
     // Re-extract on SPA navigation
     window.addEventListener('popstate', () => {
@@ -276,13 +280,14 @@ class DraftApplyExtension {
         'textarea,' +
         'input:not([type]),' +
         'input[type="text"],input[type="email"],input[type="tel"],input[type="search"],input[type="url"],' +
-        'input[type="number"]'
+        'input[type="number"],' +
+        '[contenteditable="true"],[role="textbox"]'
       );
       
       fields.forEach(field => {
         // Skip if already has button or is too small/hidden
         if (buttonMap.has(field)) return;
-        if (field.tagName === 'INPUT' && field.offsetWidth < 200) return;
+        if (field.tagName === 'INPUT' && field.offsetWidth < 100) return;
         if (field.type === 'hidden' || !field.offsetParent) return;
         
         const btn = document.createElement('button');
@@ -349,6 +354,9 @@ class DraftApplyExtension {
     };
 
     addButtons();
+
+    // Expose for delayed re-scan from init()
+    this._rescanFields = addButtons;
 
     this.observer = new MutationObserver(debouncedAddButtons);
     this.observer.observe(document.body, {
