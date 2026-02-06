@@ -62,18 +62,20 @@ async function ensureContentScriptInjected(tabId) {
   try {
     // Ping the content script to see if it's already there
     const response = await chrome.tabs.sendMessage(tabId, { type: 'PING' });
-    if (response?.pong) return; // already injected
+    if (response?.pong) return; // already injected in main frame
   } catch {
     // No listener → content script not present, inject it
   }
 
   try {
+    // Inject into all frames so DraftApply works inside ATS iframes
+    // (e.g. Greenhouse form embedded on a company careers page)
     await chrome.scripting.insertCSS({
-      target: { tabId },
+      target: { tabId, allFrames: true },
       files: ['content.css']
     });
     await chrome.scripting.executeScript({
-      target: { tabId },
+      target: { tabId, allFrames: true },
       files: ['page-extractor.js', 'content.js']
     });
   } catch (err) {

@@ -233,6 +233,8 @@ class PageExtractor {
    * Extract and clean all page text as fallback
    */
   extractCleanPageText() {
+    if (!document.body) return '';
+
     // Remove script, style, nav, footer, header elements
     const clone = document.body.cloneNode(true);
     const removeSelectors = ['script', 'style', 'nav', 'footer', 'header', 
