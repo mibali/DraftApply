@@ -139,6 +139,18 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
 
   let systemPrompt, userPrompt, temperature;
 
+  // #region agent log
+  console.log('[DEBUG] /api/generate hit', JSON.stringify({
+    hasQuestion: typeof body.question === 'string',
+    questionPreview: typeof body.question === 'string' ? body.question.slice(0, 80) : null,
+    hasCvText: typeof body.cvText === 'string',
+    hasSystemPrompt: typeof body.systemPrompt === 'string',
+    hasUserPrompt: typeof body.userPrompt === 'string',
+    payloadKeys: Object.keys(body),
+    recipeFn: typeof recipe?.buildPrompts,
+  }));
+  // #endregion
+
   // Detect payload format:
   //   Structured (new): body.question exists  →  run through recipe
   //   Legacy:           body.systemPrompt + body.userPrompt  →  pass through
@@ -162,7 +174,18 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
       systemPrompt = result.systemPrompt;
       userPrompt   = result.userPrompt;
       temperature  = typeof result.temperature === 'number' ? result.temperature : 0.7;
+      // #region agent log
+      console.log('[DEBUG] Recipe result', JSON.stringify({
+        temperature,
+        systemPromptPreview: systemPrompt?.slice(0, 100),
+        userPromptPreview: userPrompt?.slice(0, 100),
+        isExtraction: temperature < 0.5,
+      }));
+      // #endregion
     } catch (err) {
+      // #region agent log
+      console.log('[DEBUG] Recipe error', err.message);
+      // #endregion
       return res.status(500).json({ error: 'Recipe error', details: String(err.message).slice(0, 200) });
     }
   } else if (typeof body.systemPrompt === 'string' && typeof body.userPrompt === 'string') {
