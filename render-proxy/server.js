@@ -113,7 +113,7 @@ function authRequired(req, res, next) {
 }
 
 app.get('/api/health', (req, res) => {
-  res.json({ ok: true, provider: 'groq', model: GROQ_MODEL });
+  res.json({ ok: true, provider: 'groq', model: GROQ_MODEL, version: 4, recipePath: RECIPE_PATH });
 });
 
 app.post('/api/register', registerLimiter, (req, res) => {
