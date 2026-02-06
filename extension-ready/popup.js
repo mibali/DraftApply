@@ -20,6 +20,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     message: document.getElementById('message'),
     uploadArea: document.getElementById('upload-area'),
     cvFile: document.getElementById('cv-file'),
+    pageStatusDot: document.getElementById('page-status-dot'),
+    pageStatusText: document.getElementById('page-status-text'),
+    activateBtn: document.getElementById('activate-btn'),
   };
 
   let proxyUrl = null; // Will be set by checkProxy()
@@ -27,10 +30,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Load saved state
   await loadState();
   await checkProxy();
+  await checkPageStatus();
 
   // Event listeners
   elements.saveCvBtn.addEventListener('click', saveCV);
   elements.changeCvBtn.addEventListener('click', showCVInput);
+
+  // Activate on this page
+  if (elements.activateBtn) {
+    elements.activateBtn.addEventListener('click', activateOnPage);
+  }
   
   // File upload handling
   elements.uploadArea.addEventListener('click', () => elements.cvFile.click());
@@ -184,5 +193,55 @@ document.addEventListener('DOMContentLoaded', async () => {
     setTimeout(() => {
       elements.message.hidden = true;
     }, 4000);
+  }
+
+  /**
+   * Check if DraftApply is active on the current page.
+   */
+  async function checkPageStatus() {
+    try {
+      const result = await chrome.runtime.sendMessage({ type: 'CHECK_PAGE_ACTIVE' });
+      if (result?.active) {
+        setPageActive();
+      } else {
+        setPageInactive();
+      }
+    } catch {
+      setPageInactive();
+    }
+  }
+
+  function setPageActive() {
+    elements.pageStatusDot.classList.add('ready');
+    elements.pageStatusDot.classList.remove('error');
+    elements.pageStatusText.textContent = 'DraftApply is active';
+    elements.activateBtn.hidden = true;
+  }
+
+  function setPageInactive() {
+    elements.pageStatusDot.classList.remove('ready');
+    elements.pageStatusText.textContent = 'Not active on this page';
+    elements.activateBtn.hidden = false;
+  }
+
+  async function activateOnPage() {
+    elements.activateBtn.disabled = true;
+    elements.activateBtn.textContent = 'Activating...';
+
+    try {
+      const result = await chrome.runtime.sendMessage({ type: 'ACTIVATE_PAGE' });
+      if (result?.success) {
+        setPageActive();
+        showMessage('DraftApply activated on this page');
+      } else {
+        elements.activateBtn.disabled = false;
+        elements.activateBtn.textContent = 'Activate on this page';
+        showMessage(result?.error || 'Could not activate on this page', 'error');
+      }
+    } catch (err) {
+      elements.activateBtn.disabled = false;
+      elements.activateBtn.textContent = 'Activate on this page';
+      showMessage('Could not activate: ' + err.message, 'error');
+    }
   }
 });

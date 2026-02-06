@@ -53,6 +53,35 @@ async function ensureInstallToken(proxyUrl) {
   return data.token;
 }
 
+/**
+ * Ensure the content script is injected into a tab.
+ * On known ATS sites the manifest auto-injects; on any other page
+ * we use chrome.scripting (requires 'activeTab' + 'scripting' permissions).
+ */
+async function ensureContentScriptInjected(tabId) {
+  try {
+    // Ping the content script to see if it's already there
+    const response = await chrome.tabs.sendMessage(tabId, { type: 'PING' });
+    if (response?.pong) return; // already injected
+  } catch {
+    // No listener → content script not present, inject it
+  }
+
+  try {
+    await chrome.scripting.insertCSS({
+      target: { tabId },
+      files: ['content.css']
+    });
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ['page-extractor.js', 'content.js']
+    });
+  } catch (err) {
+    console.warn('Could not inject content script:', err.message);
+    throw new Error('Cannot activate DraftApply on this page.');
+  }
+}
+
 // Create context menu on install/update (idempotent)
 chrome.runtime.onInstalled.addListener(() => {
   // On extension reload/update, Chrome may keep old menu items.
@@ -85,6 +114,8 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     const { cvText } = await chrome.storage.local.get('cvText');
     
     if (!cvText) {
+      // Try to inject first so the notification can be shown
+      try { await ensureContentScriptInjected(tab.id); } catch {}
       chrome.tabs.sendMessage(tab.id, {
         type: 'SHOW_NOTIFICATION',
         message: 'Please load your CV first (click the extension icon)'
@@ -93,6 +124,14 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
           console.warn('sendMessage failed:', chrome.runtime.lastError.message);
         }
       });
+      return;
+    }
+
+    // Ensure content script is present (injects on-demand for non-listed sites)
+    try {
+      await ensureContentScriptInjected(tab.id);
+    } catch (err) {
+      console.warn('Cannot inject on this page:', err.message);
       return;
     }
 
@@ -167,6 +206,40 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     checkProxy()
       .then(sendResponse)
       .catch(error => sendResponse({ available: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === 'ACTIVATE_PAGE') {
+    (async () => {
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab?.id) {
+          sendResponse({ success: false, error: 'No active tab' });
+          return;
+        }
+        await ensureContentScriptInjected(tab.id);
+        sendResponse({ success: true });
+      } catch (err) {
+        sendResponse({ success: false, error: err.message });
+      }
+    })();
+    return true;
+  }
+
+  if (message.type === 'CHECK_PAGE_ACTIVE') {
+    (async () => {
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab?.id) {
+          sendResponse({ active: false });
+          return;
+        }
+        const response = await chrome.tabs.sendMessage(tab.id, { type: 'PING' });
+        sendResponse({ active: !!response?.pong });
+      } catch {
+        sendResponse({ active: false });
+      }
+    })();
     return true;
   }
 });

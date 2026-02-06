@@ -7,7 +7,8 @@
   "permissions": [
     "storage",
     "contextMenus",
-    "activeTab"
+    "activeTab",
+    "scripting"
   ],
   
   "host_permissions": [
@@ -75,24 +76,7 @@
   "web_accessible_resources": [
     {
       "resources": ["icons/*.png"],
-      "matches": [
-        "https://*.indeed.com/*",
-        "https://*.otta.com/*",
-        "https://*.hiringcafe.com/*",
-        "https://*.greenhouse.io/*",
-        "https://*.lever.co/*",
-        "https://*.workable.com/*",
-        "https://*.linkedin.com/*",
-        "https://*.ashbyhq.com/*",
-        "https://*.breezy.hr/*",
-        "https://*.smartrecruiters.com/*",
-        "https://*.icims.com/*",
-        "https://*.myworkdayjobs.com/*",
-        "https://*.taleo.net/*",
-        "https://*.jobvite.com/*",
-        "https://*.glassdoor.com/*",
-        "https://*.glassdoor.co.uk/*"
-      ]
+      "matches": ["<all_urls>"]
     }
   ],
   

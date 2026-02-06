@@ -333,8 +333,18 @@
   
   <div class="message" id="message" hidden></div>
   
+  <!-- Activate on this page -->
+  <div class="section" id="activate-section">
+    <div class="section-title">Current Page</div>
+    <div class="status" id="page-status" style="margin-bottom: 8px;">
+      <div class="status-dot" id="page-status-dot"></div>
+      <span class="status-text" id="page-status-text">Checking...</span>
+    </div>
+    <button class="btn btn-primary" id="activate-btn" hidden>Activate on this page</button>
+  </div>
+
   <p class="help">
-    <strong>How to use:</strong> Highlight any question on a job application page, right-click, and select "DraftApply - Answer using my CV".
+    <strong>How to use:</strong> On known job sites DraftApply activates automatically. On other pages, click "Activate on this page" above, or highlight any question, right-click, and select "DraftApply - Answer using my CV".
   </p>
   <p class="help">
     <strong>Privacy:</strong> Your CV is stored locally in your browser. DraftApply does not store your CV or generated answers on our servers. When generating an answer, the prompt is sent to DraftApply’s server and then to the LLM provider (Groq with ZDR enabled) to generate a response.

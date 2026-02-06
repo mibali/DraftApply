@@ -235,6 +235,11 @@ class DraftApplyExtension {
     });
 
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (message.type === 'PING') {
+        sendResponse({ pong: true });
+        return;
+      }
+
       if (message.type === 'GENERATE_ANSWER') {
         // Set currentField from lastFocusedField if not already set
         if (!this.currentField && this.lastFocusedField) {
