@@ -118,6 +118,7 @@ class DraftApplyExtension {
 
     content.append(icon, text, meta);
     indicator.appendChild(content);
+    if (!document.body) return;
     document.body.appendChild(indicator);
 
     // Auto-hide after 5 seconds
@@ -276,6 +277,8 @@ class DraftApplyExtension {
     };
 
     const addButtons = () => {
+      if (!document.body) return; // Not ready yet (iframe still loading)
+
       const fields = document.querySelectorAll(
         'textarea,' +
         'input:not([type]),' +
@@ -311,31 +314,29 @@ class DraftApplyExtension {
         buttonMap.set(field, btn);
         btn._draftapplyField = field; // Store reference for orphan cleanup
         
-        // Position on focus/hover
-        const showBtn = () => {
+        // Position immediately and keep positioned
+        positionButton(field, btn);
+        
+        // Highlight on focus/hover, dim on blur/leave (always visible)
+        const activateBtn = () => {
           positionButton(field, btn);
-          btn.style.opacity = '1';
-          btn.style.pointerEvents = 'auto';
+          btn.classList.add('da-btn-active');
         };
-        const hideBtn = () => {
-          btn.style.opacity = '0';
-          btn.style.pointerEvents = 'none';
+        const deactivateBtn = () => {
+          btn.classList.remove('da-btn-active');
         };
         
-        field.addEventListener('focus', showBtn);
-        field.addEventListener('mouseenter', showBtn);
+        field.addEventListener('focus', activateBtn);
+        field.addEventListener('mouseenter', activateBtn);
         field.addEventListener('blur', (e) => {
-          // Don't hide if clicking the button
+          // Don't deactivate if clicking the button itself
           if (e.relatedTarget === btn) return;
-          setTimeout(hideBtn, 200);
+          setTimeout(deactivateBtn, 200);
         });
         field.addEventListener('mouseleave', (e) => {
           if (document.activeElement === field) return;
-          setTimeout(hideBtn, 200);
+          setTimeout(deactivateBtn, 200);
         });
-        
-        // Initially hidden
-        hideBtn();
       });
       
       // Clean up orphaned buttons (check if their field is still connected)
@@ -359,10 +360,12 @@ class DraftApplyExtension {
     this._rescanFields = addButtons;
 
     this.observer = new MutationObserver(debouncedAddButtons);
-    this.observer.observe(document.body, {
-      childList: true,
-      subtree: true
-    });
+    if (document.body) {
+      this.observer.observe(document.body, {
+        childList: true,
+        subtree: true
+      });
+    }
     
     // Reposition on scroll/resize
     window.addEventListener('scroll', debouncedAddButtons, { passive: true });

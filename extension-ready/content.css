@@ -317,14 +317,21 @@
   color: white;
   font-size: 16px;
   cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.15s, transform 0.15s;
+  opacity: 0.45;
+  transition: opacity 0.2s, transform 0.2s, box-shadow 0.2s;
   z-index: 999990;
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18), 0 4px 10px rgba(124, 58, 237, 0.22);
-  pointer-events: none;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(124, 58, 237, 0.18);
+  pointer-events: auto;
+  animation: da-btn-entrance 0.6s ease-out;
+}
+
+@keyframes da-btn-entrance {
+  0%   { opacity: 0; transform: scale(0.6); }
+  60%  { opacity: 0.6; transform: scale(1.08); }
+  100% { opacity: 0.45; transform: scale(1); }
 }
 
 .da-field-btn-overlay .da-icon {
@@ -339,7 +346,14 @@
   user-select: none;
 }
 
+/* Active state: field focused or hovered */
+.da-field-btn-overlay.da-btn-active {
+  opacity: 1;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18), 0 4px 10px rgba(124, 58, 237, 0.22);
+}
+
 .da-field-btn-overlay:hover {
+  opacity: 1;
   transform: scale(1.1);
   box-shadow: 0 14px 32px rgba(0, 0, 0, 0.22), 0 6px 14px rgba(124, 58, 237, 0.28);
 }
