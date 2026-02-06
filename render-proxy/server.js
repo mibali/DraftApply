@@ -132,6 +132,20 @@ app.post('/api/register', registerLimiter, (req, res) => {
   res.json({ token, expiresAt: exp * 1000 });
 });
 
+/**
+ * Strip common form-field artifacts (*, :, ?) so recipe patterns match cleanly.
+ * This runs engine-side so every recipe benefits without duplicating the logic.
+ */
+function cleanFieldLabel(raw) {
+  return (raw || '')
+    .trim()
+    .replace(/[*:?\u2217\u2731]+$/g, '')   // trailing *, :, ?, unicode asterisks
+    .replace(/^(please\s+(enter|provide|input|type|specify)\s+(your\s+)?)/i, '')
+    .replace(/^(enter\s+(your\s+)?)/i, '')
+    .replace(/^(your\s+)/i, '')
+    .trim();
+}
+
 app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
   if (!GROQ_API_KEY) return res.status(500).json({ error: 'Server misconfigured' });
 
@@ -142,10 +156,9 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
   // #region agent log
   console.log('[DEBUG] /api/generate hit', JSON.stringify({
     hasQuestion: typeof body.question === 'string',
-    questionPreview: typeof body.question === 'string' ? body.question.slice(0, 80) : null,
+    questionRaw: typeof body.question === 'string' ? body.question.slice(0, 80) : null,
+    questionCleaned: typeof body.question === 'string' ? cleanFieldLabel(body.question) : null,
     hasCvText: typeof body.cvText === 'string',
-    hasSystemPrompt: typeof body.systemPrompt === 'string',
-    hasUserPrompt: typeof body.userPrompt === 'string',
     payloadKeys: Object.keys(body),
     recipeFn: typeof recipe?.buildPrompts,
   }));
@@ -159,9 +172,11 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
     if (typeof body.cvText !== 'string' || body.cvText.length < 5) {
       return res.status(400).json({ error: 'Missing or empty cvText' });
     }
+    // Clean the question label (strip *, :, "Please enter your...", etc.)
+    const cleanedQuestion = cleanFieldLabel(body.question);
     try {
       const result = recipe.buildPrompts({
-        question:       body.question,
+        question:       cleanedQuestion,
         length:         body.length || 'medium',
         cvText:         body.cvText,
         jobTitle:       body.jobTitle || undefined,
