@@ -228,6 +228,57 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  // Relay: iframe content script asks us to show the modal in the parent frame
+  if (message.type === 'RELAY_GENERATE_TO_PARENT') {
+    (async () => {
+      const tabId = sender.tab?.id;
+      const sourceFrameId = sender.frameId;
+      if (!tabId) { sendResponse({ success: false }); return; }
+      
+      // Ensure the main frame (frameId 0) has the content script
+      try {
+        await chrome.scripting.insertCSS({ target: { tabId, frameIds: [0] }, files: ['content.css'] });
+        await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, files: ['page-extractor.js', 'content.js'] });
+      } catch {
+        // May already be injected — that's fine
+      }
+      
+      // Brief delay for content script to initialize
+      await new Promise(r => setTimeout(r, 300));
+      
+      // Forward to the main frame
+      chrome.tabs.sendMessage(tabId, {
+        type: 'GENERATE_FROM_IFRAME',
+        question: message.question,
+        iframePageContext: message.pageContext,
+        sourceFrameId
+      }, { frameId: 0 }, () => {
+        if (chrome.runtime.lastError) {
+          console.warn('Relay to main frame failed:', chrome.runtime.lastError.message);
+        }
+      });
+      sendResponse({ success: true });
+    })();
+    return true;
+  }
+
+  // Relay: parent frame sends generated answer back to the iframe for insertion
+  if (message.type === 'RELAY_INSERT_TO_IFRAME') {
+    const tabId = sender.tab?.id;
+    if (tabId && message.targetFrameId != null) {
+      chrome.tabs.sendMessage(tabId, {
+        type: 'INSERT_FROM_PARENT',
+        answer: message.answer
+      }, { frameId: message.targetFrameId }, () => {
+        if (chrome.runtime.lastError) {
+          console.warn('Relay to iframe failed:', chrome.runtime.lastError.message);
+        }
+      });
+    }
+    sendResponse({ success: true });
+    return true;
+  }
+
   if (message.type === 'CHECK_PAGE_ACTIVE') {
     (async () => {
       try {
