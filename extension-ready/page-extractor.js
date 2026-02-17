@@ -66,6 +66,11 @@ class PageExtractor {
       if (host.includes(domain)) return platform;
     }
 
+    // Detect embedded Greenhouse pages on company domains (e.g. lattice.com/job?gh_jid=...)
+    const url = window.location.href;
+    if (url.includes('gh_jid=') || url.includes('greenhouse')) return 'greenhouse';
+    if (url.includes('lever')) return 'lever';
+
     return 'generic';
   }
 

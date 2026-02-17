@@ -84,6 +84,42 @@ async function ensureContentScriptInjected(tabId) {
   }
 }
 
+/**
+ * Auto-inject on company career pages that embed ATS forms
+ * (e.g. lattice.com/job?gh_jid=..., stripe.com/jobs/..., etc.)
+ */
+const ATS_URL_PATTERNS = [
+  /[?&]gh_jid=/,           // Greenhouse embedded (e.g. lattice.com/job?gh_jid=...)
+  /\/jobs?\//i,             // Generic /job/ or /jobs/ paths on company sites
+  /\/careers?\//i,          // Generic /career/ or /careers/ paths
+  /\/apply\//i,             // Apply pages
+];
+
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (changeInfo.status !== 'complete' || !tab.url) return;
+  // Skip if it's already a known ATS domain (content script auto-injects)
+  const knownDomains = [
+    'indeed.com', 'otta.com', 'hiringcafe.com', 'greenhouse.io',
+    'lever.co', 'workable.com', 'linkedin.com', 'ashbyhq.com',
+    'breezy.hr', 'smartrecruiters.com', 'icims.com',
+    'myworkdayjobs.com', 'taleo.net', 'jobvite.com',
+    'glassdoor.com', 'glassdoor.co.uk'
+  ];
+  try {
+    const host = new URL(tab.url).hostname;
+    if (knownDomains.some(d => host.includes(d))) return;
+  } catch { return; }
+
+  // Check if URL matches ATS embed patterns
+  if (!ATS_URL_PATTERNS.some(re => re.test(tab.url))) return;
+
+  try {
+    await ensureContentScriptInjected(tabId);
+  } catch {
+    // Not injectable (e.g. chrome:// pages) — ignore
+  }
+});
+
 // Create context menu on install/update (idempotent)
 chrome.runtime.onInstalled.addListener(() => {
   // On extension reload/update, Chrome may keep old menu items.
