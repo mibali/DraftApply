@@ -42,13 +42,21 @@ export class CVParser {
     const lines = text.split('\n').slice(0, 10);
     const emailMatch = text.match(/[\w.-]+@[\w.-]+\.\w+/);
     const phoneMatch = text.match(/[\+]?[(]?[0-9]{1,3}[)]?[-\s.]?[0-9]{1,4}[-\s.]?[0-9]{1,4}[-\s.]?[0-9]{1,9}/);
-    const linkedinMatch = text.match(/linkedin\.com\/in\/[\w-]+/i);
-    
+    const linkedinMatch = text.match(/(?:https?:\/\/)?(?:www\.)?linkedin\.com\/in\/[\w-]+\/?/i);
+    const githubMatch = text.match(/(?:https?:\/\/)?(?:www\.)?github\.com\/[\w-]+\/?/i);
+    const websiteMatch = text.match(/(?:https?:\/\/)?(?:www\.)?(?!linkedin\.com|github\.com)[\w-]+\.[\w.-]+(?:\/[\w./-]*)?/i);
+    const twitterMatch = text.match(/(?:https?:\/\/)?(?:www\.)?(?:twitter\.com|x\.com)\/[\w-]+\/?/i);
+    const portfolioMatch = text.match(/(?:portfolio|behance\.net|dribbble\.com|kaggle\.com)[:\s]*(?:https?:\/\/)?[\w./-]+/i);
+
     return {
       name: lines[0]?.trim() || '',
       email: emailMatch?.[0] || '',
       phone: phoneMatch?.[0] || '',
-      linkedin: linkedinMatch?.[0] || ''
+      linkedin: linkedinMatch?.[0] || '',
+      github: githubMatch?.[0] || '',
+      website: websiteMatch?.[0] || '',
+      twitter: twitterMatch?.[0] || '',
+      portfolio: portfolioMatch?.[0] || ''
     };
   }
 

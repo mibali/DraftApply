@@ -32,6 +32,3 @@ coverage/
 # Chrome extension packaging (do not commit private keys)
 *.crx
 *.pem
-
-# Private recipe module (proprietary prompt/ranking logic - never publish)
-render-proxy/recipe-private/

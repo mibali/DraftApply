@@ -145,6 +145,20 @@ The answer should feel like something the candidate would naturally write themse
   buildCVContext(cvData, questionType) {
     let context = '## CANDIDATE CV DATA\n\n';
 
+    if (cvData.contactInfo) {
+      const ci = cvData.contactInfo;
+      const links = [
+        ci.linkedin && `LinkedIn: ${ci.linkedin}`,
+        ci.github && `GitHub: ${ci.github}`,
+        ci.website && `Website: ${ci.website}`,
+        ci.twitter && `Twitter/X: ${ci.twitter}`,
+        ci.portfolio && `Portfolio: ${ci.portfolio}`,
+      ].filter(Boolean);
+      if (links.length > 0) {
+        context += `### Contact & Links\n${links.join('\n')}\n\n`;
+      }
+    }
+
     if (cvData.summary) {
       context += `### Professional Summary\n${cvData.summary}\n\n`;
     }

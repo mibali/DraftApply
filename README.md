@@ -1,6 +1,6 @@
 # DraftApply
 
-Generate tailored, human-sounding job application answers using your CV and the job posting context — directly on any job application page.
+**Fully open source.** Generate tailored, human-sounding job application answers using your CV and the job posting context — directly on any job application page. See [LICENSE](LICENSE) for terms.
 
 ## How it works
 
@@ -58,7 +58,7 @@ See [`PRIVACY_POLICY.md`](PRIVACY_POLICY.md). In short:
 
 ## Hosted proxy (Render)
 
-The proxy is the open-source **engine** that handles authentication, rate limiting, CV file extraction, and LLM calls. It uses a **pluggable recipe interface** — the prompt engineering logic is loaded as a separate module at startup.
+The proxy is the open-source **engine** that handles authentication, rate limiting, CV file extraction, and LLM calls. The default **recipe** (`recipe/index.js`) is included in the repo and covers data extraction, cover letters, "why company" questions, and full-CV context; you can override it with `RECIPE_PATH` if needed.
 
 See [`render-proxy/README.md`](render-proxy/README.md) for the full API contract, recipe interface, and deployment steps.
 
@@ -69,7 +69,7 @@ See [`render-proxy/README.md`](render-proxy/README.md) for the full API contract
 | `GROQ_API_KEY` | Yes | Groq API key |
 | `TOKEN_SECRET` | Yes | Secret for signing install tokens |
 | `GROQ_MODEL` | No | Model name (default: `llama-3.3-70b-versatile`) |
-| `RECIPE_PATH` | No | Path to custom recipe module (default: bundled example) |
+| `RECIPE_PATH` | No | Path to custom recipe module (default: bundled `recipe/index.js`) |
 
 ### API endpoints
 
@@ -177,4 +177,4 @@ Open `http://localhost:3001`
 
 ## License
 
-MIT
+This project is fully open source under the [MIT License](LICENSE).

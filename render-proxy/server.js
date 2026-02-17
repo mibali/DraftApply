@@ -14,8 +14,7 @@ const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
 const TOKEN_SECRET = process.env.TOKEN_SECRET;
 
-// Recipe module – override with RECIPE_PATH env var to plug in a private recipe.
-// Falls back to the bundled example recipe.
+// Recipe module – default is the bundled open-source recipe. Set RECIPE_PATH to override.
 const RECIPE_PATH = process.env.RECIPE_PATH || './recipe/index.js';
 let recipe;
 try {
@@ -24,7 +23,7 @@ try {
   console.log(`Recipe loaded from ${RECIPE_PATH}`);
 } catch (err) {
   console.error(`Failed to load recipe from ${RECIPE_PATH}: ${err.message}`);
-  console.error('Falling back to built-in example recipe.');
+  console.error('Falling back to bundled recipe.');
   recipe = await import('./recipe/index.js');
 }
 

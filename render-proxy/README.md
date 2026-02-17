@@ -2,7 +2,7 @@
 
 This service keeps your **Groq API key server-side** and exposes a small HTTPS API that the DraftApply Chrome extension calls to generate answers.
 
-The proxy has a **pluggable recipe interface** so you can swap the prompt-engineering / tailoring logic without modifying the engine itself.
+The proxy uses a **pluggable recipe interface**: the default recipe (`recipe/index.js`) is fully open source and includes prompt logic for data extraction, cover letters, "why company" questions, and anti-recency-bias answers. You can override it with `RECIPE_PATH` to use a custom module.
 
 ---
 
@@ -10,15 +10,14 @@ The proxy has a **pluggable recipe interface** so you can swap the prompt-engine
 
 ```
 Extension  ──(structured JSON)──▶  Proxy Engine  ──▶  Recipe Module  ──▶  LLM (Groq)
-                                     (public)          (pluggable)
+                                     (open source)      (default: recipe/index.js)
 ```
 
-| Component | Visibility | Responsibility |
-|-----------|-----------|----------------|
-| **Proxy engine** (`server.js`) | Public / open source | Auth, rate limits, CV upload, LLM call, request validation |
-| **Example recipe** (`recipe/index.js`) | Public / open source | Basic non-proprietary prompt builder (sample) |
-| **Private recipe** (`recipe-private/`) | **Private** / `.gitignore`'d | Your proprietary prompt engineering, ranking, and tailoring logic |
-| **Extension** | Distributed (Chrome Web Store) | UI, page extraction, sends structured data to proxy |
+| Component | Description |
+|-----------|-------------|
+| **Proxy engine** (`server.js`) | Auth, rate limits, CV upload, LLM call, request validation |
+| **Recipe** (`recipe/index.js`) | Default prompt builder: data extraction, cover letters, why-company, full-CV context |
+| **Extension** | UI, page extraction, sends structured data to proxy |
 
 ---
 
@@ -98,15 +97,22 @@ export function buildPrompts(input) {
 }
 ```
 
+The default recipe at `recipe/index.js` handles:
+
+- **Data extraction** (name, email, phone, LinkedIn, etc.) – returns only the value
+- **Cover letter** – full letter with greeting, paragraphs, closing
+- **"Why company"** – tailored to job context and CV
+- **General questions** – uses full CV (head + tail to avoid recency bias) and job description
+
 ### Using a custom recipe
 
 Set the `RECIPE_PATH` environment variable to the path of your recipe module:
 
 ```bash
-RECIPE_PATH=./recipe-private/index.js npm start
+RECIPE_PATH=./my-recipe/index.js npm start
 ```
 
-If `RECIPE_PATH` is not set (or fails to load), the proxy falls back to the bundled example recipe at `recipe/index.js`.
+If `RECIPE_PATH` is not set (or fails to load), the proxy uses the bundled recipe at `recipe/index.js`.
 
 ---
 
@@ -117,7 +123,7 @@ If `RECIPE_PATH` is not set (or fails to load), the proxy falls back to the bund
 | `GROQ_API_KEY` | Yes | — | Groq API key |
 | `TOKEN_SECRET` | Yes | — | Random long string for signing install tokens |
 | `GROQ_MODEL` | No | `llama-3.3-70b-versatile` | Groq model identifier |
-| `RECIPE_PATH` | No | `./recipe/index.js` | Path to your recipe module |
+| `RECIPE_PATH` | No | `./recipe/index.js` | Path to recipe module (optional override) |
 | `PORT` | No | `10000` | Server listen port |
 
 ---
@@ -129,18 +135,7 @@ If `RECIPE_PATH` is not set (or fails to load), the proxy falls back to the bund
 3. Root directory: `render-proxy`
 4. Build command: `npm install`
 5. Start command: `npm start`
-6. Add env vars: `GROQ_API_KEY`, `TOKEN_SECRET`, and `RECIPE_PATH=./recipe-private/index.js`.
-
-### Using a private recipe in deployment
-
-**Option A – Private file in repo (`.gitignore`'d, copied at build time):**
-Place your recipe in `render-proxy/recipe-private/index.js` and set `RECIPE_PATH=./recipe-private/index.js`. On Render, either include the file in a private fork or use a build script that fetches it.
-
-**Option B – Private npm package:**
-Publish your recipe as a private npm package, add it to `package.json`, and set `RECIPE_PATH=./node_modules/@your-org/draftapply-recipe/index.js`.
-
-**Option C – Git submodule:**
-Add your private recipe repo as a submodule under `render-proxy/recipe-private/`.
+6. Add env vars: `GROQ_API_KEY`, `TOKEN_SECRET`. No need to set `RECIPE_PATH` unless you use a custom recipe.
 
 ---
 
@@ -148,7 +143,7 @@ Add your private recipe repo as a submodule under `render-proxy/recipe-private/`
 
 - **No logging of CV text, job descriptions, or generated answers** in the proxy engine.
 - **GROQ_API_KEY** and **TOKEN_SECRET** are read from env vars only — never committed.
-- **Rate limiting** and **token auth** are built into the public engine.
+- **Rate limiting** and **token auth** are built into the engine.
 - The extension stores the CV locally in `chrome.storage.local` — it is never persisted server-side.
 - Groq is configured with **Zero Data Retention (ZDR)** — prompts and completions are not stored by the LLM provider.
 

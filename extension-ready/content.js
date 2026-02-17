@@ -106,7 +106,6 @@ class DraftApplyExtension {
   extractPageContext() {
     try {
       this.pageContext = this.pageExtractor.extract();
-      console.log('[DraftApply] Page context extracted:', this.pageExtractor.getSummary());
     } catch (e) {
       console.warn('[DraftApply] Failed to extract page context:', e);
       this.pageContext = null;
@@ -282,7 +281,6 @@ class DraftApplyExtension {
       if (message.type === 'GENERATE_FROM_IFRAME') {
         // Only handle in the top frame
         if (window !== window.top) return;
-        console.log('[DraftApply] Received relay from iframe. Question:', message.question);
         // Use the iframe's page context (it has the job description)
         if (message.iframePageContext) {
           this.pageContext = message.iframePageContext;
@@ -296,7 +294,6 @@ class DraftApplyExtension {
       // Iframe receives this when the parent frame's user clicks "Insert Answer"
       if (message.type === 'INSERT_FROM_PARENT') {
         if (window === window.top) return; // Only handle in iframes
-        console.log('[DraftApply] Received answer from parent. Inserting...');
         const target = this.currentField || this.lastFocusedField;
         if (target?.isConnected) {
           try {
@@ -377,8 +374,6 @@ class DraftApplyExtension {
           
           const label = this.findFieldLabel(field);
           const question = label || field.placeholder || 'Answer this question';
-          
-          console.log('[DraftApply] Button clicked for:', question);
           this.handleGenerateRequest(question);
         });
         
@@ -499,7 +494,6 @@ class DraftApplyExtension {
     // If running inside an iframe, relay to the parent frame for modal display
     // (modals inside iframes are often invisible due to viewport clipping)
     if (window !== window.top) {
-      console.log('[DraftApply] In iframe — relaying to parent frame.');
       chrome.runtime.sendMessage({
         type: 'RELAY_GENERATE_TO_PARENT',
         question,
@@ -516,7 +510,6 @@ class DraftApplyExtension {
     const modal = this.modal;
     // Re-attach if React hydration or page re-render removed it from DOM
     if (!modal.isConnected) {
-      console.log('[DraftApply] Modal was detached — re-attaching to body.');
       document.body.appendChild(modal);
     }
     modal.querySelector('#da-question-preview').textContent = question;
@@ -532,7 +525,6 @@ class DraftApplyExtension {
       'backdrop-filter:blur(4px) !important;visibility:visible !important;' +
       'opacity:1 !important;pointer-events:auto !important;'
     );
-    console.log('[DraftApply] Modal shown. isConnected:', modal.isConnected, 'parent:', modal.parentElement?.tagName);
   }
 
   hideModal() {
