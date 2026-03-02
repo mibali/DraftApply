@@ -27,12 +27,9 @@ try {
   recipe = await import('./recipe/index.js');
 }
 
-if (!GROQ_API_KEY) {
-  // Avoid printing secrets; just a clear startup error
-  console.error('Missing GROQ_API_KEY env var.');
-}
-if (!TOKEN_SECRET) {
-  console.error('Missing TOKEN_SECRET env var.');
+if (!GROQ_API_KEY || !TOKEN_SECRET) {
+  console.error('Missing required env vars: GROQ_API_KEY and TOKEN_SECRET must be set. Exiting.');
+  process.exit(1);
 }
 
 const app = express();
@@ -200,32 +197,49 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
     return res.status(413).json({ error: 'Prompt too large' });
   }
 
-  const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${GROQ_API_KEY}`
-    },
-    body: JSON.stringify({
-      model: GROQ_MODEL,
-      temperature,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
-      ]
-    })
-  });
+  const groqController = new AbortController();
+  const groqTimeout = setTimeout(() => groqController.abort(), 60000);
 
-  if (!response.ok) {
-    const text = await response.text().catch(() => '');
-    return res.status(502).json({ error: 'Upstream error', status: response.status, details: text.slice(0, 400) });
+  try {
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${GROQ_API_KEY}`
+      },
+      signal: groqController.signal,
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        temperature,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
+        ]
+      })
+    });
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      console.error(`[DraftApply] Groq error ${response.status}:`, text.slice(0, 400));
+      // Map Groq rate-limit to 429 so the extension can surface it meaningfully
+      const status = response.status === 429 ? 429 : 502;
+      return res.status(status).json({ error: status === 429 ? 'Rate limit reached — please try again shortly.' : 'Service temporarily unavailable.' });
+    }
+
+    const data = await response.json();
+    const answer = data?.choices?.[0]?.message?.content;
+    if (!answer) return res.status(502).json({ error: 'No answer from provider' });
+
+    res.json({ answer, provider: 'groq', model: GROQ_MODEL });
+  } catch (e) {
+    if (e?.name === 'AbortError') {
+      return res.status(504).json({ error: 'AI service timed out. Please try again.' });
+    }
+    console.error('[DraftApply] Generate error:', e.message);
+    return res.status(500).json({ error: 'Failed to generate answer.' });
+  } finally {
+    clearTimeout(groqTimeout);
   }
-
-  const data = await response.json();
-  const answer = data?.choices?.[0]?.message?.content;
-  if (!answer) return res.status(502).json({ error: 'No answer from provider' });
-
-  res.json({ answer, provider: 'groq', model: GROQ_MODEL });
 });
 
 // Optional: keep file upload UX working (PDF/DOCX/TXT)

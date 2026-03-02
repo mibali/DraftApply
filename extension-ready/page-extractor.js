@@ -264,59 +264,6 @@ class PageExtractor {
       .slice(0, 20000); // Limit for token management
   }
 
-  /**
-   * Get a summary suitable for display
-   */
-  getSummary() {
-    const content = this.extract();
-    return {
-      platform: content.platform,
-      jobTitle: content.jobTitle,
-      company: content.company,
-      hasDescription: content.jobDescription.length > 100,
-      requirementsCount: content.requirements.length,
-      descriptionLength: content.jobDescription.length
-    };
-  }
-
-  /**
-   * Build context string for LLM prompt
-   */
-  buildContext() {
-    const content = this.extract();
-    
-    let context = `## JOB CONTEXT (Auto-extracted from ${content.platform})\n\n`;
-    
-    if (content.jobTitle) {
-      context += `**Position:** ${content.jobTitle}\n`;
-    }
-    if (content.company) {
-      context += `**Company:** ${content.company}\n`;
-    }
-    context += '\n';
-
-    if (content.requirements.length > 0) {
-      context += '### Key Requirements\n';
-      for (const req of content.requirements.slice(0, 10)) {
-        context += `- ${req}\n`;
-      }
-      context += '\n';
-    }
-
-    context += '### Job Description\n';
-    // Prefer job description, but fall back to cleaned page text if needed (some application pages hide the full posting).
-    const jd = (content.jobDescription && content.jobDescription.length > 200)
-      ? content.jobDescription
-      : content.fullPageText;
-
-    context += jd.slice(0, 10000);
-    
-    if (jd.length > 10000) {
-      context += '\n[...truncated...]';
-    }
-
-    return context;
-  }
 }
 
 // Export for use in content script

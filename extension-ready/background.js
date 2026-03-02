@@ -44,6 +44,10 @@ async function clearInstallToken() {
   await chrome.storage.local.remove(['installToken', 'installTokenExpiresAt']);
 }
 
+// Mutex: if a registration is already in-flight, queue up behind it rather than
+// firing a second concurrent request (which could cause a duplicate-token race).
+let _tokenRefreshPromise = null;
+
 async function ensureInstallToken(proxyUrl) {
   const result = await getInstallToken();
   const existing = result?.token ?? null;
@@ -51,21 +55,30 @@ async function ensureInstallToken(proxyUrl) {
 
   if (existing && !expiring) return existing;
 
-  try {
-    const response = await fetch(`${proxyUrl}/api/register`, { method: 'POST' });
-    if (!response.ok) throw new Error(`Register failed (${response.status})`);
-    const data = await response.json().catch(() => ({}));
-    if (!data.token) throw new Error('Register failed (no token)');
-    await setInstallToken(data.token, data.expiresAt);
-    return data.token;
-  } catch (e) {
-    if (existing) {
-      // Re-registration failed but old token still valid — use it
-      console.warn('[DraftApply] Token refresh failed, using existing token:', e.message);
-      return existing;
+  // Re-use an in-flight registration if one is already running
+  if (_tokenRefreshPromise) return _tokenRefreshPromise;
+
+  _tokenRefreshPromise = (async () => {
+    try {
+      const response = await fetch(`${proxyUrl}/api/register`, { method: 'POST' });
+      if (!response.ok) throw new Error(`Register failed (${response.status})`);
+      const data = await response.json().catch(() => ({}));
+      if (!data.token) throw new Error('Register failed (no token)');
+      await setInstallToken(data.token, data.expiresAt);
+      return data.token;
+    } catch (e) {
+      if (existing) {
+        // Re-registration failed but old token still valid — use it
+        console.warn('[DraftApply] Token refresh failed, using existing token:', e.message);
+        return existing;
+      }
+      throw e;
+    } finally {
+      _tokenRefreshPromise = null;
     }
-    throw e;
-  }
+  })();
+
+  return _tokenRefreshPromise;
 }
 
 /**

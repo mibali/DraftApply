@@ -9,7 +9,7 @@
 3. DraftApply extracts the job title, company, description, and requirements from the page, combines them with your full CV, and generates a tailored answer.
 4. Edit the answer if you like, then click **Insert Answer** to fill the form field.
 
-For simple fields (name, email, phone, LinkedIn), DraftApply extracts the exact value from your CV instead of generating a paragraph.
+DraftApply classifies each question and generates the right kind of answer — a direct sentence for factual fields (notice period, availability), a STAR-method story for behavioural questions, a company-specific paragraph for "why us?", or a full cover letter. For plain fields (name, email, phone, LinkedIn), it extracts the exact value from your CV.
 
 ## What this repo contains
 
@@ -98,6 +98,20 @@ The extension sends a **structured payload** to `/api/generate`:
 
 The proxy's recipe module builds the LLM prompts server-side — the extension never sees or constructs the actual prompts.
 
+The recipe classifies each question into one of these types and applies a tailored prompt strategy:
+
+| Type | Examples | Strategy |
+|------|----------|----------|
+| `data_extraction` | Name, Email, LinkedIn URL | Extract exact value from CV |
+| `short_factual` | Notice period, Start date | 1–2 sentence current-situation answer |
+| `yes_no` | "Do you have X experience?" | Clear yes/no + 1 supporting sentence |
+| `behavioral` | "Tell me about a time..." | STAR method, one specific story |
+| `why_company` | "Why Anthropic?", "Why us?" | Company-specific opening, then CV evidence |
+| `motivation` | "What interests you about this role?" | Career-direction reasoning, not enthusiasm |
+| `strength_weakness` | "What's your greatest strength?" | Named + proven with CV evidence |
+| `cover_letter` | "Cover letter", "Motivation letter" | Full structured letter |
+| `general` | Everything else | Direct answer first, then supporting evidence |
+
 ## Local web app (optional)
 
 The local web app is useful for development, testing, or running fully offline.
@@ -150,10 +164,11 @@ Open `http://localhost:3001`
 
 1. **Extension** extracts job context from the page (title, company, description, requirements)
 2. **Extension** sends structured payload (question + CV + job context) to the proxy
-3. **Proxy** authenticates via install token, cleans the question label, and passes to the recipe module
-4. **Recipe** detects the question type (data extraction vs. general answer) and builds appropriate prompts
-5. **Proxy** calls Groq API and returns the answer
-6. **Extension** displays the answer in a modal for review/editing, then inserts into the form field
+3. **Proxy** authenticates via 90-day install token, cleans the question label, passes to recipe
+4. **Recipe** classifies the question type and builds a tailored prompt (9 distinct strategies)
+5. **Proxy** calls Groq API with a 60s timeout and returns the answer
+6. **Extension** shows progressive status messages while waiting, then displays the answer in a modal
+7. **Extension** inserts the answer into the form field using framework-compatible native events (React/Vue/Angular safe)
 
 ## Store listing assets
 
@@ -169,11 +184,14 @@ Open `http://localhost:3001`
 | Issue | Fix |
 |-------|-----|
 | DraftApply buttons not appearing | Click the extension icon → **Activate on this page** |
-| Embedded form (iframe) modal not visible | Updated: modal now relays to the parent page automatically |
-| "Not found in CV" for fields like LinkedIn | Ensure your LinkedIn URL is in your saved CV text |
+| Embedded form (iframe) modal not visible | Modal automatically relays to the parent page — reload the page if it doesn't appear |
+| "Not found in CV" for LinkedIn / GitHub | Re-upload your CV — the extractor now captures hyperlinked URLs (not just visible text) |
+| Notice period / availability answer too long | Re-generate — these questions now use a short factual prompt (1–2 sentences) |
+| "Why [Company]?" answer feels generic | Ensure job context is detected (green badge) — the answer opens with company specifics from the JD |
+| Loading spinner with no feedback | Status message now updates every few seconds ("Connecting to AI service…", "Service may be waking up…") |
 | Context menu missing | Reload the extension at `chrome://extensions` |
 | Ollama not responding (local) | Run `ollama serve` in a terminal |
-| Proxy returning errors | Check Render dashboard; the free tier sleeps after inactivity (first request may take ~30s) |
+| Proxy cold start / first request slow | Free Render tier sleeps after inactivity — first request may take ~30s; subsequent ones are fast |
 
 ## License
 
