@@ -242,11 +242,53 @@ app.post('/api/cv/upload', authRequired, generateLimiter, upload.single('cv'), a
 
     let text = '';
     if (mimetype === 'application/pdf') {
-      const pdfData = await pdfParse(buffer);
+      // Extract text AND hyperlink annotations (e.g. LinkedIn URL hidden behind hyperlinked text)
+      const collectedUrls = [];
+      const pdfData = await pdfParse(buffer, {
+        pagerender: async function(pageData) {
+          try {
+            const annotations = await pageData.getAnnotations();
+            for (const ann of annotations) {
+              const url = ann.url || ann.unsafeUrl;
+              if (url) collectedUrls.push(url);
+            }
+          } catch (_) { /* annotations unavailable, ignore */ }
+          // Standard text rendering (matches pdf-parse default)
+          const textContent = await pageData.getTextContent();
+          let lastY = '';
+          let pageText = '';
+          for (const item of textContent.items) {
+            if (lastY === item.transform[5] || !lastY) {
+              pageText += item.str;
+            } else {
+              pageText += '\n' + item.str;
+            }
+            lastY = item.transform[5];
+          }
+          return pageText;
+        }
+      });
       text = pdfData.text;
+      if (collectedUrls.length > 0) {
+        const uniqueUrls = [...new Set(collectedUrls)];
+        text += '\n\nLinks:\n' + uniqueUrls.join('\n');
+      }
     } else if (mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-      const docxResult = await mammoth.extractRawText({ buffer });
-      text = docxResult.value;
+      // Extract text + hyperlink URLs (e.g. LinkedIn linked behind display text)
+      const [rawResult, htmlResult] = await Promise.all([
+        mammoth.extractRawText({ buffer }),
+        mammoth.convertToHtml({ buffer })
+      ]);
+      text = rawResult.value;
+      const hrefMatches = htmlResult.value.match(/href="([^"]+)"/g) || [];
+      const docxUrls = [...new Set(
+        hrefMatches
+          .map(m => m.slice(6, -1))
+          .filter(u => /^https?:\/\//.test(u))
+      )];
+      if (docxUrls.length > 0) {
+        text += '\n\nLinks:\n' + docxUrls.join('\n');
+      }
     } else if (mimetype === 'text/plain') {
       text = buffer.toString('utf-8');
     } else {
