@@ -153,29 +153,33 @@ class DraftApplyExtension {
     modal.innerHTML = `
       <div class="da-modal-content">
         <div class="da-modal-header">
-          <span>DraftApply</span>
+          <img class="da-modal-logo" src="${chrome.runtime.getURL('icons/icon128.png')}" alt="" onerror="this.style.display='none'">
+          <span class="da-header-name">DraftApply</span>
           <span class="da-context-badge" id="da-context-badge">No context</span>
-          <button class="da-modal-close">&times;</button>
+          <button class="da-modal-close" aria-label="Close">&times;</button>
         </div>
         <div class="da-modal-body">
           <div class="da-context-info" id="da-context-info"></div>
-          <div class="da-question-label">Question:</div>
+          <div class="da-question-label">Question</div>
           <div class="da-question-preview" id="da-question-preview"></div>
-          <div class="da-answer-label">Generated Answer:</div>
+          <div class="da-answer-label">Generated Answer</div>
           <textarea class="da-answer-output" id="da-answer-output" placeholder="Your answer will appear here. You can edit it before inserting."></textarea>
           <div class="da-modal-actions">
-            <select class="da-length-select" id="da-length-select">
-              <option value="short">Short</option>
-              <option value="medium" selected>Medium</option>
-              <option value="long">Long</option>
-            </select>
-            <button class="da-btn da-btn-regenerate" id="da-btn-regenerate">Regenerate</button>
-            <button class="da-btn da-btn-insert" id="da-btn-insert">Insert Answer</button>
+            <div class="da-length-pills" id="da-length-pills" role="group" aria-label="Answer length">
+              <button type="button" class="da-length-pill" data-value="short">Short</button>
+              <button type="button" class="da-length-pill da-pill-active" data-value="medium">Medium</button>
+              <button type="button" class="da-length-pill" data-value="long">Long</button>
+            </div>
+            <input type="hidden" id="da-length-select" value="medium">
+            <div class="da-modal-actions-row">
+              <button class="da-btn da-btn-regenerate" id="da-btn-regenerate">↺ Regenerate</button>
+              <button class="da-btn da-btn-insert" id="da-btn-insert">Insert Answer</button>
+            </div>
           </div>
         </div>
         <div class="da-loading" id="da-loading" hidden>
           <div class="da-spinner"></div>
-          <span id="da-loading-text">Generating answer...</span>
+          <span id="da-loading-text">Generating answer…</span>
           <button class="da-btn da-btn-stop" id="da-btn-stop" type="button">Stop</button>
         </div>
       </div>
@@ -189,6 +193,13 @@ class DraftApplyExtension {
     modal.querySelector('#da-btn-insert').onclick = () => this.insertAnswer();
     modal.querySelector('#da-btn-regenerate').onclick = () => this.regenerate();
     modal.querySelector('#da-btn-stop').onclick = () => this.cancelGeneration();
+    modal.querySelector('#da-length-pills').onclick = (e) => {
+      const pill = e.target.closest('.da-length-pill');
+      if (!pill) return;
+      modal.querySelectorAll('.da-length-pill').forEach(p => p.classList.remove('da-pill-active'));
+      pill.classList.add('da-pill-active');
+      modal.querySelector('#da-length-select').value = pill.dataset.value;
+    };
     
     modal.onclick = (e) => {
       if (e.target === modal) this.hideModal();

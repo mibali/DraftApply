@@ -5,185 +5,175 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>DraftApply</title>
   <style>
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
-    
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       width: 360px;
-      padding: 16px;
       background: #f8fafc;
-    }
-    
-    h1 {
-      font-size: 16px;
-      font-weight: 600;
-      margin-bottom: 12px;
       color: #1e293b;
     }
-    
-    .status-bar {
+
+    /* ── Header ── */
+    .da-header {
+      background: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%);
+      padding: 14px 16px;
       display: flex;
-      gap: 12px;
-      margin-bottom: 16px;
+      align-items: center;
+      gap: 10px;
     }
-    
-    .status {
+
+    .da-header-logo {
+      width: 32px;
+      height: 32px;
+      background: rgba(255, 255, 255, 0.18);
+      border-radius: 9px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      overflow: hidden;
+    }
+
+    .da-header-logo img {
+      width: 22px;
+      height: 22px;
+      object-fit: contain;
+    }
+
+    .da-header-text { flex: 1; }
+
+    .da-header-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: white;
+      letter-spacing: -0.2px;
+      line-height: 1.2;
+    }
+
+    .da-header-sub {
+      font-size: 11px;
+      color: rgba(255, 255, 255, 0.65);
+      margin-top: 1px;
+    }
+
+    /* ── Status row ── */
+    .da-status-row {
+      display: flex;
+      gap: 6px;
+      padding: 10px 14px;
+      background: white;
+      border-bottom: 1px solid #f1f5f9;
+    }
+
+    .da-status-chip {
       display: flex;
       align-items: center;
       gap: 6px;
-      padding: 8px 12px;
-      background: white;
-      border-radius: 6px;
-      border: 1px solid #e2e8f0;
       flex: 1;
+      padding: 5px 10px;
+      background: #f8fafc;
+      border-radius: 20px;
+      border: 1px solid #e2e8f0;
+      min-width: 0;
     }
-    
-    .status-dot {
-      width: 8px;
-      height: 8px;
+
+    .da-status-dot {
+      width: 7px;
+      height: 7px;
       border-radius: 50%;
-      background: #94a3b8;
+      background: #cbd5e1;
+      flex-shrink: 0;
+      transition: background 0.3s;
     }
-    
-    .status-dot.ready {
-      background: #22c55e;
+
+    .da-status-dot.ready { background: #22c55e; }
+    .da-status-dot.error { background: #ef4444; }
+
+    .da-status-label {
+      font-size: 11.5px;
+      color: #475569;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
-    
-    .status-dot.error {
-      background: #ef4444;
-    }
-    
-    .status-text {
-      font-size: 12px;
-      color: #64748b;
-    }
-    
-    .section {
-      margin-bottom: 16px;
-    }
-    
-    .section-title {
-      font-size: 12px;
+
+    /* ── Body ── */
+    .da-body { padding: 14px; }
+
+    .da-section-label {
+      font-size: 10.5px;
       font-weight: 600;
       text-transform: uppercase;
-      color: #64748b;
+      letter-spacing: 0.5px;
+      color: #94a3b8;
       margin-bottom: 8px;
     }
-    
-    textarea {
-      width: 100%;
-      padding: 10px;
-      border: 1px solid #e2e8f0;
-      border-radius: 6px;
-      font-size: 13px;
-      font-family: inherit;
-      resize: vertical;
-      min-height: 100px;
-    }
-    
-    textarea:focus {
-      outline: none;
-      border-color: #2563eb;
-    }
-    
-    .btn {
-      width: 100%;
-      padding: 10px;
-      border: none;
-      border-radius: 6px;
-      font-size: 14px;
-      font-weight: 500;
-      cursor: pointer;
-      margin-top: 8px;
-    }
-    
-    .btn-primary {
-      background: #2563eb;
-      color: white;
-    }
-    
-    .btn-primary:hover {
-      background: #1d4ed8;
-    }
-    
-    .btn-secondary {
-      background: #f1f5f9;
-      color: #475569;
-    }
-    
-    .btn-secondary:hover {
-      background: #e2e8f0;
-    }
-    
-    .cv-preview {
-      padding: 10px;
-      background: white;
-      border: 1px solid #e2e8f0;
-      border-radius: 6px;
-      font-size: 13px;
-      max-height: 100px;
-      overflow: hidden;
-      color: #64748b;
-    }
-    
+
+    /* ── Upload area ── */
     .upload-area {
-      border: 2px dashed #cbd5e1;
-      border-radius: 8px;
-      padding: 20px;
+      border: 1.5px dashed #cbd5e1;
+      border-radius: 10px;
+      padding: 16px;
       text-align: center;
       cursor: pointer;
-      transition: all 0.2s;
+      transition: border-color 0.2s, background 0.2s;
       background: white;
     }
-    
+
     .upload-area:hover,
     .upload-area.dragover {
       border-color: #2563eb;
       background: #eff6ff;
     }
-    
-    .upload-icon {
-      font-size: 28px;
-      margin-bottom: 6px;
-    }
-    
-    .upload-text {
-      font-size: 13px;
-      color: #475569;
-    }
-    
-    .upload-link {
-      color: #2563eb;
-      font-weight: 500;
-    }
-    
-    .upload-hint {
-      font-size: 11px;
-      color: #94a3b8;
-      margin-top: 4px;
-    }
-    
+
     .upload-area.has-file {
       border-color: #22c55e;
       background: #f0fdf4;
     }
-    
-    .upload-area.has-file .upload-icon::before {
-      content: '✓ ';
+
+    .upload-icon-wrap {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 38px;
+      height: 38px;
+      background: #f1f5f9;
+      border-radius: 10px;
+      margin: 0 auto 9px;
+      transition: background 0.2s;
     }
-    
+
+    .upload-area:hover .upload-icon-wrap,
+    .upload-area.dragover .upload-icon-wrap { background: #dbeafe; }
+    .upload-area.has-file .upload-icon-wrap { background: #dcfce7; }
+
+    .upload-text {
+      font-size: 13px;
+      color: #475569;
+      line-height: 1.4;
+    }
+
+    .upload-link {
+      color: #2563eb;
+      font-weight: 600;
+    }
+
+    .upload-hint {
+      font-size: 11px;
+      color: #94a3b8;
+      margin-top: 3px;
+    }
+
+    /* ── Divider ── */
     .divider {
       display: flex;
       align-items: center;
-      margin: 12px 0;
+      margin: 11px 0;
       color: #94a3b8;
-      font-size: 12px;
+      font-size: 11px;
     }
-    
+
     .divider::before,
     .divider::after {
       content: '';
@@ -191,165 +181,254 @@
       height: 1px;
       background: #e2e8f0;
     }
-    
-    .divider span {
-      padding: 0 10px;
-    }
-    
-    .message {
-      padding: 10px;
-      background: #dcfce7;
-      color: #166534;
-      border-radius: 6px;
+
+    .divider span { padding: 0 10px; }
+
+    /* ── Textarea ── */
+    textarea {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1.5px solid #e2e8f0;
+      border-radius: 8px;
       font-size: 13px;
-      margin-top: 8px;
-    }
-    
-    .message.error {
-      background: #fee2e2;
-      color: #dc2626;
-    }
-    
-    .help {
-      font-size: 12px;
-      color: #94a3b8;
-      margin-top: 12px;
-      line-height: 1.5;
-    }
-    
-    .help code {
-      background: #e2e8f0;
-      padding: 2px 4px;
-      border-radius: 3px;
-      font-size: 11px;
-    }
-    
-    [hidden] {
-      display: none !important;
-    }
-    
-    .stats-grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 8px;
-      margin-bottom: 10px;
-    }
-    
-    .stat-card {
-      background: white;
-      border: 1px solid #e2e8f0;
-      border-radius: 6px;
-      padding: 10px;
-      text-align: center;
-    }
-    
-    .stat-value {
-      font-size: 20px;
-      font-weight: 600;
+      font-family: inherit;
+      resize: vertical;
+      min-height: 90px;
       color: #1e293b;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
     }
-    
-    .stat-label {
-      font-size: 10px;
+
+    textarea:focus {
+      border-color: #2563eb;
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+    }
+
+    textarea::placeholder { color: #94a3b8; }
+
+    /* ── Buttons ── */
+    .btn {
+      width: 100%;
+      padding: 10px;
+      border: none;
+      border-radius: 8px;
+      font-size: 13.5px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 8px;
+      transition: opacity 0.2s, transform 0.15s, box-shadow 0.15s;
+      letter-spacing: -0.1px;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #2563eb, #7c3aed);
+      color: white;
+    }
+
+    .btn-primary:hover {
+      opacity: 0.92;
+      transform: translateY(-1px);
+      box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
+    }
+
+    .btn-primary:active {
+      transform: translateY(0);
+      box-shadow: none;
+    }
+
+    .btn-secondary {
+      background: #f1f5f9;
+      color: #475569;
+    }
+
+    .btn-secondary:hover { background: #e2e8f0; }
+
+    /* ── CV Loaded card ── */
+    .cv-loaded-card {
+      background: white;
+      border: 1.5px solid #e2e8f0;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    .cv-loaded-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 11px 14px;
+      border-bottom: 1px solid #f1f5f9;
+    }
+
+    .cv-check-icon {
+      width: 26px;
+      height: 26px;
+      background: #dcfce7;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      font-size: 13px;
+      color: #16a34a;
+    }
+
+    .cv-loaded-info { flex: 1; min-width: 0; }
+
+    .cv-loaded-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: #166534;
+    }
+
+    .cv-change-btn {
+      padding: 4px 11px;
+      font-size: 12px;
+      font-weight: 500;
+      border: 1.5px solid #e2e8f0;
+      border-radius: 6px;
+      background: white;
       color: #64748b;
-      text-transform: uppercase;
-      margin-top: 2px;
+      cursor: pointer;
+      transition: background 0.2s, border-color 0.2s;
+      flex-shrink: 0;
     }
-    
-    .current-session {
+
+    .cv-change-btn:hover {
+      background: #f1f5f9;
+      border-color: #cbd5e1;
+    }
+
+    .cv-preview {
+      padding: 9px 14px;
+      font-size: 12px;
+      color: #64748b;
+      max-height: 52px;
+      overflow: hidden;
+      line-height: 1.5;
+      background: #fafafa;
+    }
+
+    /* ── Page status ── */
+    .page-status-card {
       display: flex;
       align-items: center;
       gap: 8px;
-      padding: 8px 10px;
-      background: #fef3c7;
-      border-radius: 6px;
-      font-size: 12px;
+      padding: 9px 12px;
+      background: white;
+      border: 1.5px solid #e2e8f0;
+      border-radius: 8px;
+      margin-bottom: 8px;
     }
-    
-    .session-indicator {
-      color: #f59e0b;
-      animation: pulse 2s infinite;
+
+    /* ── Message ── */
+    .message {
+      padding: 9px 12px;
+      background: #dcfce7;
+      color: #166534;
+      border-radius: 8px;
+      font-size: 13px;
+      margin-top: 8px;
+      border: 1px solid #bbf7d0;
+      line-height: 1.4;
     }
-    
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.5; }
+
+    .message.error {
+      background: #fee2e2;
+      color: #dc2626;
+      border-color: #fecaca;
     }
-    
-    .btn-small {
-      padding: 4px 8px;
+
+    /* ── Footer ── */
+    .da-footer {
+      padding: 8px 14px 14px;
       font-size: 11px;
-      border: none;
-      border-radius: 4px;
-      background: #2563eb;
-      color: white;
-      cursor: pointer;
-      margin-left: auto;
+      color: #94a3b8;
+      text-align: center;
+      line-height: 1.5;
     }
-    
-    .btn-small:hover {
-      background: #1d4ed8;
-    }
+
+    [hidden] { display: none !important; }
   </style>
 </head>
 <body>
-  <h1>DraftApply</h1>
-  
-  <div class="status-bar">
-    <div class="status">
-      <div class="status-dot" id="cv-status-dot"></div>
-      <span class="status-text" id="cv-status-text">No CV</span>
+
+  <!-- Header -->
+  <div class="da-header">
+    <div class="da-header-logo">
+      <img src="icons/icon128.png" alt="" onerror="this.style.display='none'">
     </div>
-    <div class="status">
-      <div class="status-dot" id="proxy-status-dot"></div>
-      <span class="status-text" id="proxy-status-text">Proxy: Checking...</span>
+    <div class="da-header-text">
+      <div class="da-header-title">DraftApply</div>
+      <div class="da-header-sub">AI job application assistant</div>
     </div>
   </div>
 
-  <p class="help">
-    <strong>Status:</strong> If "Proxy" is green, DraftApply can generate answers.
-  </p>
-  
-  <!-- CV Input Section -->
-  <div class="section" id="cv-input-section">
-    <div class="section-title">Your CV</div>
-    <div class="upload-area" id="upload-area">
-      <input type="file" id="cv-file" accept=".pdf,.doc,.docx,.txt" hidden>
-      <div class="upload-icon">📄</div>
-      <div class="upload-text">Drop file or <span class="upload-link">browse</span></div>
-      <div class="upload-hint">PDF, DOCX, or TXT</div>
+  <!-- Status row -->
+  <div class="da-status-row">
+    <div class="da-status-chip">
+      <div class="da-status-dot" id="cv-status-dot"></div>
+      <span class="da-status-label" id="cv-status-text">No CV</span>
     </div>
-    <div class="divider"><span>or paste text</span></div>
-    <textarea id="cv-text" placeholder="Paste your CV text here..."></textarea>
-    <button class="btn btn-primary" id="save-cv-btn">Save CV</button>
-  </div>
-  
-  <!-- CV Loaded Section -->
-  <div class="section" id="cv-loaded-section" hidden>
-    <div class="section-title">Your CV</div>
-    <div class="cv-preview" id="cv-preview"></div>
-    <button class="btn btn-secondary" id="change-cv-btn">Change CV</button>
-  </div>
-  
-  <div class="message" id="message" hidden></div>
-  
-  <!-- Activate on this page -->
-  <div class="section" id="activate-section">
-    <div class="section-title">Current Page</div>
-    <div class="status" id="page-status" style="margin-bottom: 8px;">
-      <div class="status-dot" id="page-status-dot"></div>
-      <span class="status-text" id="page-status-text">Checking...</span>
+    <div class="da-status-chip">
+      <div class="da-status-dot" id="proxy-status-dot"></div>
+      <span class="da-status-label" id="proxy-status-text">Checking…</span>
     </div>
-    <button class="btn btn-primary" id="activate-btn" hidden>Activate on this page</button>
   </div>
 
-  <p class="help">
-    <strong>How to use:</strong> On known job sites DraftApply activates automatically. On other pages, click "Activate on this page" above, or highlight any question, right-click, and select "DraftApply - Answer using my CV".
-  </p>
-  <p class="help">
-    <strong>Privacy:</strong> Your CV is stored locally in your browser. DraftApply does not store your CV or generated answers on our servers. When generating an answer, the prompt is sent to DraftApply’s server and then to the LLM provider (Groq with ZDR enabled) to generate a response.
-  </p>
-  
+  <div class="da-body">
+
+    <!-- CV Input -->
+    <div id="cv-input-section">
+      <div class="da-section-label">Your CV</div>
+      <div class="upload-area" id="upload-area">
+        <input type="file" id="cv-file" accept=".pdf,.doc,.docx,.txt" hidden>
+        <div class="upload-icon-wrap">
+          <svg width="18" height="18" viewBox="0 0 20 20" fill="none">
+            <path d="M10 13V3M10 3L7 6M10 3L13 6" stroke="#64748b" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M3 14v2a2 2 0 002 2h10a2 2 0 002-2v-2" stroke="#64748b" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div class="upload-text">Drop file or <span class="upload-link">browse</span></div>
+        <div class="upload-hint">PDF, DOCX, or TXT</div>
+      </div>
+      <div class="divider"><span>or paste text</span></div>
+      <textarea id="cv-text" placeholder="Paste your CV text here…"></textarea>
+      <button class="btn btn-primary" id="save-cv-btn">Save CV</button>
+    </div>
+
+    <!-- CV Loaded -->
+    <div id="cv-loaded-section" hidden>
+      <div class="da-section-label">Your CV</div>
+      <div class="cv-loaded-card">
+        <div class="cv-loaded-header">
+          <div class="cv-check-icon">✓</div>
+          <div class="cv-loaded-info">
+            <div class="cv-loaded-title">CV loaded</div>
+          </div>
+          <button class="cv-change-btn" id="change-cv-btn">Change</button>
+        </div>
+        <div class="cv-preview" id="cv-preview"></div>
+      </div>
+    </div>
+
+    <div class="message" id="message" hidden></div>
+
+    <!-- Current Page -->
+    <div id="activate-section" style="margin-top: 14px;">
+      <div class="da-section-label">Current Page</div>
+      <div class="page-status-card">
+        <div class="da-status-dot" id="page-status-dot"></div>
+        <span class="da-status-label" id="page-status-text">Checking…</span>
+      </div>
+      <button class="btn btn-primary" id="activate-btn" hidden>Activate on this page</button>
+    </div>
+
+  </div>
+
+  <div class="da-footer">
+    Click the <strong>DA</strong> button next to any field, or highlight a question and right-click.
+  </div>
+
   <script src="popup.js"></script>
 </body>
 </html>
