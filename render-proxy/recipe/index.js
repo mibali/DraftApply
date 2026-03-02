@@ -119,6 +119,42 @@ function getCvContext(rawText, maxChars) {
 }
 
 // ---------------------------------------------------------------------------
+// Short-answer detection (conversational forms of factual questions)
+// e.g. "Could you please confirm your notice period?"
+// ---------------------------------------------------------------------------
+
+function isShortAnswerQuestion(question) {
+  const q = (question || '').toLowerCase();
+  return (
+    /notice\s*period/.test(q) ||
+    /\bstart\s+date\b/.test(q) ||
+    /when\s+(can|could|are)\s+you\s+(start|available|join)/.test(q) ||
+    /\bavailability\b/.test(q) ||
+    /salary\s*(expectation|requirement|expect)/.test(q) ||
+    /expected\s+salary/.test(q) ||
+    /current\s+salary/.test(q) ||
+    /right\s+to\s+work/.test(q) ||
+    /work\s*authori[sz]ation/.test(q) ||
+    /\bvisa\s+(status|type|sponsorship)\b/.test(q)
+  );
+}
+
+function buildShortAnswerPrompt(cvText, question) {
+  const systemPrompt = `You are answering a job application question that requires a short, direct response.
+
+RULES:
+- Give a SHORT, DIRECT answer — e.g. "4 weeks", "Immediately", "£60,000–£70,000", "Yes, I have the right to work in the UK"
+- 1–2 sentences maximum — no paragraphs, no career history
+- Use information from the CV if present; otherwise give a reasonable professional default
+- Do NOT explain your answer or add context unless the question explicitly asks for it`;
+
+  const cvContext = getCvContext(cvText, 10000);
+  const userPrompt = `CV:\n${cvContext}\n\nQuestion: ${question}\n\nAnswer concisely in 1–2 sentences maximum.`;
+
+  return { systemPrompt, userPrompt, temperature: 0.1 };
+}
+
+// ---------------------------------------------------------------------------
 // Data extraction (simple fields like name, email, phone, LinkedIn)
 // ---------------------------------------------------------------------------
 
@@ -159,6 +195,10 @@ export function buildPrompts(input) {
 
   if (isDataExtractionQuestion(question)) {
     return buildExtractionPrompt(cvText, question);
+  }
+
+  if (isShortAnswerQuestion(question)) {
+    return buildShortAnswerPrompt(cvText, question);
   }
 
   const coverLetter = isCoverLetterQuestion(question);
