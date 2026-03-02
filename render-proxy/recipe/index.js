@@ -48,6 +48,19 @@ function getCvContext(rawText, maxChars) {
   return `${raw.slice(0, headLen)}\n\n...[snip]...\n\n${raw.slice(-tailLen)}`;
 }
 
+/**
+ * Extract candidate name from top of CV (usually first non-empty line).
+ */
+function extractCandidateName(cvText) {
+  const lines = (cvText || '').split('\n').map(l => l.trim()).filter(Boolean);
+  const first = lines[0] || '';
+  // Heuristic: first line is name if it's short (< 40 chars) and looks like a name
+  if (first.length < 40 && /^[A-Z]/.test(first) && !/[@:/]/.test(first)) {
+    return first;
+  }
+  return null;
+}
+
 function buildJobContext(jobTitle, company, jobDescription, requirements) {
   let ctx = '';
   if (!jobDescription && !(requirements && requirements.length > 0)) return ctx;
@@ -69,21 +82,61 @@ function buildJobContext(jobTitle, company, jobDescription, requirements) {
 }
 
 // ---------------------------------------------------------------------------
+// Shared prompt building blocks
+// ---------------------------------------------------------------------------
+
+/**
+ * Identity preamble — shifts the model from "assistant helping someone"
+ * to "I AM this person filling out the form".
+ */
+function identityPreamble(candidateName) {
+  const name = candidateName ? `You are ${candidateName}.` : 'You are this candidate.';
+  return `${name} You are NOT an AI assistant writing on someone's behalf — you ARE this person, completing this job application in your own voice right now.
+
+Your CV is your background. Read it fully, internalize it, then answer as yourself — in your own natural voice.`;
+}
+
+/**
+ * Shared writing quality guidance — used in all substantive prompts.
+ * Shows bad vs good with concrete examples instead of just rules.
+ */
+const WRITING_GUIDANCE = `
+WRITE LIKE A HUMAN — concrete examples of what that means:
+
+BAD (AI-speak, generic, will get ignored):
+"Throughout my career I've developed strong skills in X, leveraging my proven track record to deliver results."
+"I'm passionate about [thing] and believe my experience uniquely positions me to contribute."
+"As a results-driven professional with expertise in..."
+
+GOOD (specific, direct, sounds like a real person):
+"At [Company], I did X which led to Y."
+"The hardest part was Z — I handled it by..."
+"I've spent most of my time on [specific thing], which is directly what this role needs."
+
+RULES:
+- Lead with the answer, not with context-setting
+- Use actual company names, tools, and situations from the CV
+- Short sentences where possible — long ones lose the reader
+- Never start with "I'm excited/passionate/thrilled about..."
+- Never use: leverage, synergy, proven track record, results-driven, dynamic, spearheaded
+- NEVER invent employers, dates, metrics, or facts not in the CV`;
+
+// ---------------------------------------------------------------------------
 // Question type detection
 // ---------------------------------------------------------------------------
 
 function detectQuestionType(question) {
   const q = (question || '').toLowerCase();
 
-  // Cover letter (must check first — it's a format, not a topic)
+  // Cover letter (format, not a topic — check first)
   if (
     q.includes('cover letter') || q.includes('coverletter') ||
     q.includes('motivation letter') || q.includes('letter of interest') ||
     q.includes('application letter')
   ) return 'cover_letter';
 
-  // Why company / why this role (specific motivation questions)
-  // Also catches short forms like "Why Anthropic?", "Why Google?", "Why us?"
+  // Why company / why this role
+  // Also catches short forms: "Why Anthropic?", "Why Google?", "Why us?"
   if (
     q.includes('why do you want') || q.includes('why would you like') ||
     q.includes('why are you applying') || q.includes('what draws you') ||
@@ -94,7 +147,7 @@ function detectQuestionType(question) {
     (/^why\s+[a-z]/i.test(question.trim()) && question.trim().split(/\s+/).length <= 4)
   ) return 'why_company';
 
-  // Short factual fields — conversational forms (notice period, start date, timeline, etc.)
+  // Short factual — about candidate's current situation, not their history
   if (
     /notice\s*period/.test(q) ||
     /\bstart\s+date\b/.test(q) ||
@@ -112,7 +165,7 @@ function detectQuestionType(question) {
     /\bimmediately\s+available\b/.test(q)
   ) return 'short_factual';
 
-  // Yes / No style questions
+  // Yes / No questions
   if (
     /^(are|do|have|can|will|would|is|did)\s+you\b/i.test(question.trim()) ||
     /\bdo you (currently |have |hold |possess |own )/i.test(q) ||
@@ -120,7 +173,7 @@ function detectQuestionType(question) {
     /\bhave you (ever|previously|worked|used|managed|led|built)\b/i.test(q)
   ) return 'yes_no';
 
-  // Explicitly brief questions
+  // Explicitly brief
   if (
     /\b(briefly|in\s+a?\s*few\s+words?|in\s+one\s+(sentence|paragraph)|summarize|give\s+a\s+(short|brief|quick)\s+(description|overview|summary))\b/i.test(q)
   ) return 'brief';
@@ -143,7 +196,7 @@ function detectQuestionType(question) {
     /\bweakness(es)?\b/i.test(q)
   ) return 'strength_weakness';
 
-  // Motivation / interest in the role (broader than why_company)
+  // Motivation / interest in the role
   if (
     /what\s+(interests?|motivates?|excites?|appeals?)\s+(you|to\s+you)/i.test(q) ||
     /what\s+about\s+(this\s+)?(role|position|job|opportunity)/i.test(q) ||
@@ -156,7 +209,7 @@ function detectQuestionType(question) {
 }
 
 // ---------------------------------------------------------------------------
-// Plain-field data extraction (name, email, LinkedIn URL, etc.)
+// Plain-field data extraction (name, email, LinkedIn, phone, etc.)
 // ---------------------------------------------------------------------------
 
 function isDataExtractionQuestion(question) {
@@ -223,179 +276,245 @@ RULES:
 // ---------------------------------------------------------------------------
 
 function buildShortFactualPrompt(cvText, question) {
-  const systemPrompt = `You are answering a job application question about the candidate's CURRENT SITUATION or AVAILABILITY — not about their past experience.
+  const systemPrompt = `You are answering a job application question about the candidate's CURRENT SITUATION or AVAILABILITY — not about their work history.
 
-RULES:
-- Answer about the candidate's current status / constraints, NOT about their work history
-- Examples of correct answers: "No, I'm available immediately.", "I have a 4-week notice period.", "No deadlines — I'm free to start as soon as needed."
+Answer about the candidate's current status or constraints, NOT their career experience.
+
+Good examples:
+- "No, I'm available immediately."
+- "I have a 4-week notice period."
+- "No timeline constraints — I can start as soon as needed."
+- "I'm eligible to work in the UK without sponsorship."
+
+Rules:
 - 1–2 sentences maximum
-- If the CV doesn't contain this information, give a sensible professional default
-- Do NOT talk about past jobs or career history — that is not what the question is asking`;
+- If the CV doesn't have this information, give a sensible professional default
+- Do NOT mention past jobs or career history`;
 
   const cvContext = getCvContext(cvText, 8000);
   const userPrompt = `CV:\n${cvContext}\n\nQuestion: ${question}\n\nAnswer in 1–2 sentences about the candidate's current situation.`;
   return { systemPrompt, userPrompt, temperature: 0.1 };
 }
 
-function buildYesNoPrompt(cvText, question, jobCtx) {
-  const systemPrompt = `You are filling out a job application on behalf of the candidate.
+function buildYesNoPrompt(cvText, question, jobCtx, candidateName) {
+  const systemPrompt = `${identityPreamble(candidateName)}
 
-RULES:
-- Start with a clear YES or NO (or equivalent direct statement like "Yes, I have..." / "No, but...")
-- Add at most 1–2 supporting sentences from the CV if they strengthen the answer
-- Maximum 3 sentences total — this is a short-answer field, not an essay
-- Be honest: if the CV doesn't clearly confirm the skill/experience, say "Not directly, but..." and give the closest relevant experience`;
+You are answering a yes/no job application question.
+
+HOW TO ANSWER:
+- Start with a clear YES or NO (or "Yes, I have..." / "No, but I have...")
+- Follow with 1–2 sentences of specific supporting evidence from the CV if relevant
+- Maximum 3 sentences total
+- If the CV doesn't clearly confirm the thing asked, be honest: "Not directly, but [closest relevant experience]"
+- Do NOT write an essay or career summary`;
 
   const cvContext = getCvContext(cvText, 8000);
-  let userPrompt = `CV:\n${cvContext}\n\n`;
-  if (jobCtx) userPrompt += `Job Context:\n${jobCtx}\n`;
+  let userPrompt = `MY CV:\n${cvContext}\n\n`;
+  if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
   userPrompt += `Question: ${question}\n\nAnswer directly (max 3 sentences).`;
   return { systemPrompt, userPrompt, temperature: 0.3 };
 }
 
-function buildBriefPrompt(cvText, question, jobCtx) {
-  const systemPrompt = `You are filling out a job application on behalf of the candidate.
+function buildBriefPrompt(cvText, question, jobCtx, candidateName) {
+  const systemPrompt = `${identityPreamble(candidateName)}
 
-RULES:
-- Answer in 1–3 sentences (max 50 words)
-- Be direct and specific — no filler, no padding, no "I am a dedicated professional"
-- Pick the single most relevant fact or experience from the CV`;
+Answer this job application question briefly and directly.
+
+Rules:
+- 1–3 sentences, maximum 50 words
+- Lead with the direct answer, not with setup
+- Use one specific, concrete detail from the CV
+- No filler phrases like "I am a dedicated professional" or "I believe I am..."`;
 
   const cvContext = getCvContext(cvText, 8000);
-  let userPrompt = `CV:\n${cvContext}\n\n`;
-  if (jobCtx) userPrompt += `Job Context:\n${jobCtx}\n`;
-  userPrompt += `Question: ${question}\n\nAnswer concisely (1–3 sentences, max 50 words).`;
-  return { systemPrompt, userPrompt, temperature: 0.4 };
+  let userPrompt = `MY CV:\n${cvContext}\n\n`;
+  if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
+  userPrompt += `Question: ${question}\n\nAnswer concisely (max 50 words).`;
+  return { systemPrompt, userPrompt, temperature: 0.5 };
 }
 
-function buildBehavioralPrompt(cvText, question, length, jobCtx) {
+function buildBehavioralPrompt(cvText, question, length, jobCtx, candidateName) {
   const words = { short: '120–160', medium: '160–220', long: '220–300' }[length] || '160–220';
-  const systemPrompt = `You are helping a job candidate answer a behavioral interview question.
 
-RULES:
-1. Use the STAR structure naturally (Situation → Task → Action → Result) — don't label the sections
-2. Pick ONE specific, concrete example from the CV that best answers THIS exact question
-3. The example can come from any point in the career — pick the BEST fit, not the most recent
-4. Include a specific outcome or result where possible (even qualitative if no metric is in the CV)
-5. Write in first person, natural conversational tone — not corporate or over-polished
-6. NEVER invent employers, dates, or metrics not in the CV
-7. Stay tightly focused on what the question is actually asking — don't pad with unrelated experience`;
+  const systemPrompt = `${identityPreamble(candidateName)}
+
+You are answering a behavioral interview question. Tell ONE specific story from your background.
+${WRITING_GUIDANCE}
+
+HOW TO STRUCTURE YOUR STORY (naturally, without labeling sections):
+1. Set the scene briefly — what was happening, what was at stake
+2. What YOU specifically did (not "the team" — you)
+3. What happened as a result — be specific even if the outcome was just qualitative
+4. Optional: one-sentence reflection on what you'd do differently or what you learned
+
+EXAMPLE of what good looks like:
+Q: "Tell me about a time you had to solve a complex technical problem under pressure."
+A: "We had a customer going live in 48 hours when a race condition surfaced in production — auth tokens were expiring mid-session under load. I pulled the logs, traced it to our token refresh service not handling concurrent requests, and shipped a fix with the on-call engineer by midnight. Customer went live on schedule. After that I added concurrent load tests to our staging pipeline so we'd catch it earlier."
+
+Notice: specific situation, specific problem, specific action, specific outcome, natural voice, no buzzwords.
+
+Rules:
+- ONE story, not a tour of your CV
+- Pick the example that best fits THIS specific question, not just the most recent thing
+- Include what YOU did personally, not what "the team" did
+- NEVER invent employers, dates, or metrics`;
 
   const cvContext = getCvContext(cvText, 10000);
-  let userPrompt = `CV:\n${cvContext}\n\n`;
-  if (jobCtx) userPrompt += `Job Context:\n${jobCtx}\n`;
-  userPrompt += `Behavioral question: ${question}\n\nWrite a ${words}-word answer using one specific example. First person, no preamble.`;
-  return { systemPrompt, userPrompt, temperature: 0.7 };
+  let userPrompt = `MY CV:\n${cvContext}\n\n`;
+  if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
+  userPrompt += `Question: ${question}
+
+Before writing, think: what single experience in my background BEST answers exactly what this question is asking? Use that one.
+
+Write a ${words}-word answer. First person, no preamble, no "Great question".`;
+  return { systemPrompt, userPrompt, temperature: 0.75 };
 }
 
-function buildStrengthWeaknessPrompt(cvText, question, length, jobCtx) {
+function buildStrengthWeaknessPrompt(cvText, question, length, jobCtx, candidateName) {
   const words = { short: '60–90', medium: '90–130', long: '130–180' }[length] || '90–130';
-  const systemPrompt = `You are helping a job candidate answer a strengths or weaknesses question.
 
-RULES:
-- For STRENGTHS: name the strength clearly, then give ONE specific example from the CV that proves it
-- For WEAKNESSES: be honest and human — name a real development area and briefly how you've been addressing it
-- Avoid clichés: "I work too hard", "I'm a perfectionist", "I care too much"
-- Keep it grounded in CV evidence; don't invent examples`;
+  const systemPrompt = `${identityPreamble(candidateName)}
+
+You are answering a strengths or weaknesses question.
+${WRITING_GUIDANCE}
+
+FOR STRENGTHS:
+- Name the strength directly, then immediately prove it with ONE specific example from the CV
+- Don't explain why it's a strength — show it
+
+FOR WEAKNESSES:
+- Name something real — not "I work too hard" or "I'm a perfectionist"
+- Say what you've been doing about it, concretely
+- Keep it brief — this isn't the main event
+
+Rules:
+- Ground everything in CV evidence
+- Answer the question that was actually asked (strength vs weakness — don't conflate)
+- NEVER invent examples`;
 
   const cvContext = getCvContext(cvText, 8000);
-  let userPrompt = `CV:\n${cvContext}\n\n`;
-  if (jobCtx) userPrompt += `Job Context:\n${jobCtx}\n`;
+  let userPrompt = `MY CV:\n${cvContext}\n\n`;
+  if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
   userPrompt += `Question: ${question}\n\nAnswer in approximately ${words} words. First person, no preamble.`;
-  return { systemPrompt, userPrompt, temperature: 0.6 };
+  return { systemPrompt, userPrompt, temperature: 0.65 };
 }
 
-function buildMotivationPrompt(cvText, question, length, jobCtx) {
+function buildMotivationPrompt(cvText, question, length, jobCtx, candidateName) {
   const words = { short: '70–100', medium: '100–150', long: '150–200' }[length] || '100–150';
   const hasJobCtx = !!jobCtx;
-  const systemPrompt = `You are helping a job candidate explain their motivation for applying.
 
-RULES:
-1. Be specific to the role/company if job context is available — no generic "I'm passionate about..." answers
-2. Connect genuine interest to concrete evidence from the CV (skills used, problems enjoyed solving, career direction)
-3. Explain why this is the RIGHT NEXT STEP based on career trajectory — not just enthusiasm
-4. ${hasJobCtx ? 'Use specific language from the job description to show alignment' : 'Draw on clear patterns from the career history'}
-5. Avoid: "I'm excited/passionate about...", "amazing company", "incredible opportunity"`;
+  const systemPrompt = `${identityPreamble(candidateName)}
+
+You are answering a question about your motivation or interest in this role/field.
+${WRITING_GUIDANCE}
+
+HOW TO WRITE A GENUINE MOTIVATION ANSWER:
+- Be specific about WHAT interests you — name the actual thing (a technology, a problem space, a type of work)
+- Connect it to something real in your background — a project, a role, a skill you've been building
+- Explain why THIS role is the right next step based on your actual career direction
+- ${hasJobCtx ? 'Use specific language from the job description to show you understand what they need' : 'Draw on clear patterns visible in your career history'}
+
+Do NOT:
+- Open with "I'm excited/passionate/driven by..."
+- Give a vague "I enjoy helping people" type answer
+- Write about the company being "amazing" or the "incredible opportunity"`;
 
   const cvContext = getCvContext(cvText, 8000);
-  let userPrompt = `CV:\n${cvContext}\n\n`;
-  if (jobCtx) userPrompt += `Job Context:\n${jobCtx}\n`;
+  let userPrompt = `MY CV:\n${cvContext}\n\n`;
+  if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
   userPrompt += `Question: ${question}\n\nAnswer in approximately ${words} words. First person, no preamble.`;
-  return { systemPrompt, userPrompt, temperature: 0.7 };
+  return { systemPrompt, userPrompt, temperature: 0.75 };
 }
 
-function buildWhyCompanyPrompt(cvText, question, length, jobCtx, jobTitle, company) {
+function buildWhyCompanyPrompt(cvText, question, length, jobCtx, jobTitle, company, candidateName) {
   const words = { short: '80–110', medium: '110–160', long: '160–220' }[length] || '110–160';
   const hasJobCtx = !!jobCtx;
-  const systemPrompt = `You are helping a job candidate answer a "why this company / why this role" question.
 
-MANDATORY STRUCTURE — follow this order:
-1. COMPANY/ROLE FIRST: Open with 1–2 sentences that name something SPECIFIC about the company or role from the job description — their mission, the technology they build, a specific responsibility, or a problem they're solving. This MUST come before any CV evidence.
-2. CV CONNECTION: Then connect 2–3 of those specific things to concrete evidence from the candidate's background.
-3. CLOSE: One sentence on why this is the logical next step based on career direction.
+  const systemPrompt = `${identityPreamble(candidateName)}
 
-CRITICAL RULES:
-- If job context is provided, you MUST reference something specific from it in the opening — do NOT open with CV history
-- The answer must feel tailored to THIS company, not a generic response that could apply anywhere
-- Do NOT use: "I'm excited/passionate/thrilled", "amazing company", "incredible opportunity", "perfect fit"
-- NEVER invent facts about the company that are not in the job description
-${!hasJobCtx ? '- No job description provided: draw on what the role/company name implies and connect to clear CV patterns' : ''}`;
+You are answering a "why this company / why this role" question.
+${WRITING_GUIDANCE}
+
+MANDATORY STRUCTURE — in this exact order:
+1. COMPANY/ROLE FIRST: Open with 1–2 sentences naming something SPECIFIC about the company or role from the job description — their mission, the product they build, a specific challenge they're tackling, a responsibility that stood out. This MUST come before any mention of your background.
+2. YOUR CONNECTION: 2–3 sentences connecting specific things from the role/company to concrete evidence from your CV.
+3. CLOSE: One sentence on why this is the logical next step in your career direction.
+
+CRITICAL:
+- If job context is provided, the opening MUST reference something specific from it — do NOT open with your CV history
+- "I've always been interested in AI" is not specific enough — say WHICH aspect of Anthropic's work / which part of the job description resonates and WHY
+- This answer must be impossible to reuse for a different company — it must feel written specifically for THIS role
+${!hasJobCtx ? '- No job description provided: open with what the company/role name clearly implies, then connect to your CV' : ''}`;
 
   const cvContext = getCvContext(cvText, 8000);
-  let userPrompt = `CV:\n${cvContext}\n\n`;
-  if (jobCtx) userPrompt += `Job Context:\n${jobCtx}\n`;
-  userPrompt += `Question: ${question}\n\nAnswer in approximately ${words} words. Start with something specific about the company/role — NOT with your CV history. First person, no preamble.`;
-  return { systemPrompt, userPrompt, temperature: 0.7 };
+  let userPrompt = `MY CV:\n${cvContext}\n\n`;
+  if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
+  userPrompt += `Question: ${question}
+
+Start your answer with something specific about ${company || 'the company'} or this role — NOT with your own background. Then connect it to your CV.
+
+Answer in approximately ${words} words. First person, no preamble.`;
+  return { systemPrompt, userPrompt, temperature: 0.75 };
 }
 
-function buildCoverLetterPrompt(cvText, question, length, jobCtx, jobTitle, company) {
+function buildCoverLetterPrompt(cvText, question, length, jobCtx, jobTitle, company, candidateName) {
   const words = { short: '150–220', medium: '250–350', long: '350–450' }[length] || '250–350';
-  const systemPrompt = `You are writing a cover letter for a job candidate.
+
+  const systemPrompt = `${identityPreamble(candidateName)}
+
+You are writing a cover letter for this role.
+${WRITING_GUIDANCE}
 
 STRUCTURE (mandatory):
 1. "Dear Hiring Manager," (or "Dear [Company] team," if company name is known)
-2. Opening paragraph: show you understand the role and make a specific, grounded connection to your background — no generic hype
-3. 2–3 body paragraphs: map KEY job requirements to SPECIFIC CV evidence — draw from different roles/time periods when possible
-4. Closing paragraph: confident, brief — express genuine interest and availability for next steps
-5. Sign-off: "Sincerely,\\n[Your Name]"
+2. Opening paragraph: ONE specific thing about this role that connects directly to your background — not generic enthusiasm
+3. 2–3 body paragraphs: map specific job requirements to specific CV evidence — use different roles/time periods when possible, don't just summarise your most recent job
+4. Closing: brief, confident, genuine — "I'd welcome the chance to discuss how I could contribute."
+5. Sign-off: "Sincerely,\n[Your Name]"
 
-RULES:
+Rules:
 - Reference at least 3 specific requirements from the job description if provided
+- Every paragraph should earn its place — no padding
 - NEVER invent employers, degrees, dates, or metrics
-- No corporate buzzwords, no hollow enthusiasm
-- Tailor to the specific role — a generic letter is a failed letter`;
+- A generic letter that could be sent to any company is a failure — make it specific`;
 
   const cvContext = getCvContext(cvText, 10000);
-  let userPrompt = `CV:\n${cvContext}\n\n`;
-  if (jobCtx) userPrompt += `Job Context:\n${jobCtx}\n`;
-  userPrompt += `Write a cover letter for${jobTitle ? ` the ${jobTitle} role` : ' this role'}${company ? ` at ${company}` : ''}.\nTarget length: ${words} words. No preamble — start with "Dear...".`;
-  return { systemPrompt, userPrompt, temperature: 0.7 };
+  let userPrompt = `MY CV:\n${cvContext}\n\n`;
+  if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
+  userPrompt += `Write a cover letter for${jobTitle ? ` the ${jobTitle} role` : ' this role'}${company ? ` at ${company}` : ''}.
+Target length: ${words} words. Start with "Dear..." — no preamble before the letter.`;
+  return { systemPrompt, userPrompt, temperature: 0.72 };
 }
 
-function buildGeneralPrompt(cvText, question, length, jobCtx) {
+function buildGeneralPrompt(cvText, question, length, jobCtx, candidateName) {
   const words = { short: '60–90', medium: '90–140', long: '150–220' }[length] || '90–140';
   const hasJobCtx = !!jobCtx;
-  const systemPrompt = `You are helping a job candidate answer a job application question.
 
-RULES:
-1. DIRECTLY answer the specific question being asked — this is the most important rule
-2. Support your answer with the most relevant evidence from the CV
-3. Match the scope to the question — if the question is narrow, the answer should be focused; if broad, draw on career breadth
-4. ${hasJobCtx ? 'Tailor the answer to the job context provided — reference relevant requirements' : 'Draw the most relevant parts of the CV for this specific question'}
-5. Only reference multiple time periods if the question genuinely calls for career breadth
-6. Write in first person, natural tone — not corporate or over-polished
-7. NEVER invent employers, dates, or metrics not in the CV
+  const systemPrompt = `${identityPreamble(candidateName)}
 
-BANNED:
-- "I'm excited/passionate about..."
-- "leverage", "synergy", "proven track record", "results-driven"
-- Starting with "As a [current title]..."`;
+You are answering a job application question.
+${WRITING_GUIDANCE}
+
+HOW TO APPROACH THIS:
+1. Read the question carefully — what is it ACTUALLY asking? (experience with X? your approach to Y? a specific capability?)
+2. Identify the ONE piece of your background that most directly and convincingly answers it
+3. Lead with that — don't bury the answer
+
+If the question is about a specific skill or technology: confirm clearly whether you have it, then give one concrete example of using it.
+If the question is about your approach or process: describe how you actually work, with a real example.
+If the question is broad: pick the angle from your background that's most relevant to ${hasJobCtx ? 'what this role needs' : 'the question'}.
+
+${hasJobCtx ? 'The job context is provided — use it to tailor your answer to what this specific role actually needs.' : ''}`;
 
   const cvContext = getCvContext(cvText, 10000);
-  let userPrompt = `CV:\n${cvContext}\n\n`;
-  if (jobCtx) userPrompt += `Job Context:\n${jobCtx}\n`;
-  userPrompt += `Question: ${question}\n\nAnswer in approximately ${words} words. First person, no preamble.`;
-  return { systemPrompt, userPrompt, temperature: 0.7 };
+  let userPrompt = `MY CV:\n${cvContext}\n\n`;
+  if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
+  userPrompt += `Question: ${question}
+
+Think: what is this question specifically asking, and what in my background most directly answers it?
+
+Answer in approximately ${words} words. First person, no preamble.`;
+  return { systemPrompt, userPrompt, temperature: 0.75 };
 }
 
 // ---------------------------------------------------------------------------
@@ -419,26 +538,27 @@ export function buildPrompts(input) {
   }
 
   const jobCtx = buildJobContext(jobTitle, company, jobDescription, requirements);
+  const candidateName = extractCandidateName(cvText);
   const qType = detectQuestionType(question);
 
   switch (qType) {
     case 'short_factual':
       return buildShortFactualPrompt(cvText, question);
     case 'yes_no':
-      return buildYesNoPrompt(cvText, question, jobCtx);
+      return buildYesNoPrompt(cvText, question, jobCtx, candidateName);
     case 'brief':
-      return buildBriefPrompt(cvText, question, jobCtx);
+      return buildBriefPrompt(cvText, question, jobCtx, candidateName);
     case 'behavioral':
-      return buildBehavioralPrompt(cvText, question, length, jobCtx);
+      return buildBehavioralPrompt(cvText, question, length, jobCtx, candidateName);
     case 'strength_weakness':
-      return buildStrengthWeaknessPrompt(cvText, question, length, jobCtx);
+      return buildStrengthWeaknessPrompt(cvText, question, length, jobCtx, candidateName);
     case 'motivation':
-      return buildMotivationPrompt(cvText, question, length, jobCtx);
+      return buildMotivationPrompt(cvText, question, length, jobCtx, candidateName);
     case 'why_company':
-      return buildWhyCompanyPrompt(cvText, question, length, jobCtx, jobTitle, company);
+      return buildWhyCompanyPrompt(cvText, question, length, jobCtx, jobTitle, company, candidateName);
     case 'cover_letter':
-      return buildCoverLetterPrompt(cvText, question, length, jobCtx, jobTitle, company);
+      return buildCoverLetterPrompt(cvText, question, length, jobCtx, jobTitle, company, candidateName);
     default:
-      return buildGeneralPrompt(cvText, question, length, jobCtx);
+      return buildGeneralPrompt(cvText, question, length, jobCtx, candidateName);
   }
 }
