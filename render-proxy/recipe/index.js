@@ -83,15 +83,18 @@ function detectQuestionType(question) {
   ) return 'cover_letter';
 
   // Why company / why this role (specific motivation questions)
+  // Also catches short forms like "Why Anthropic?", "Why Google?", "Why us?"
   if (
     q.includes('why do you want') || q.includes('why would you like') ||
     q.includes('why are you applying') || q.includes('what draws you') ||
     q.includes('why this company') || q.includes("company's mission") ||
     q.includes('why our company') || q.includes('why do you want to join') ||
-    q.includes('what attracted you') || q.includes('why are you interested in')
+    q.includes('what attracted you') || q.includes('why are you interested in') ||
+    q.includes('why us?') || q.includes('why us ') ||
+    (/^why\s+[a-z]/i.test(question.trim()) && question.trim().split(/\s+/).length <= 4)
   ) return 'why_company';
 
-  // Short factual fields — conversational forms (notice period, start date, etc.)
+  // Short factual fields — conversational forms (notice period, start date, timeline, etc.)
   if (
     /notice\s*period/.test(q) ||
     /\bstart\s+date\b/.test(q) ||
@@ -102,7 +105,11 @@ function detectQuestionType(question) {
     /current\s+salary/.test(q) ||
     /right\s+to\s+work/.test(q) ||
     /work\s*authori[sz]ation/.test(q) ||
-    /\bvisa\s+(status|type|sponsorship)\b/.test(q)
+    /\bvisa\s+(status|type|sponsorship)\b/.test(q) ||
+    /deadline[s]?\s+or\s+timeline/.test(q) ||
+    /timeline\s+consideration/.test(q) ||
+    /any\s+(deadline|timeline|constraint|commitment)[s]?\s+(we|you|to)\s+/i.test(q) ||
+    /\bimmediately\s+available\b/.test(q)
   ) return 'short_factual';
 
   // Yes / No style questions
@@ -216,15 +223,17 @@ RULES:
 // ---------------------------------------------------------------------------
 
 function buildShortFactualPrompt(cvText, question) {
-  const systemPrompt = `You are answering a job application question that requires a short, direct response.
+  const systemPrompt = `You are answering a job application question about the candidate's CURRENT SITUATION or AVAILABILITY — not about their past experience.
 
 RULES:
-- Give a SHORT, DIRECT answer — e.g. "4 weeks", "Immediately", "£60,000–£70,000", "Yes, eligible to work in the UK"
-- 1–2 sentences maximum — no paragraphs, no career history
-- Use information from the CV if present; otherwise give a reasonable professional default`;
+- Answer about the candidate's current status / constraints, NOT about their work history
+- Examples of correct answers: "No, I'm available immediately.", "I have a 4-week notice period.", "No deadlines — I'm free to start as soon as needed."
+- 1–2 sentences maximum
+- If the CV doesn't contain this information, give a sensible professional default
+- Do NOT talk about past jobs or career history — that is not what the question is asking`;
 
   const cvContext = getCvContext(cvText, 8000);
-  const userPrompt = `CV:\n${cvContext}\n\nQuestion: ${question}\n\nAnswer in 1–2 sentences maximum.`;
+  const userPrompt = `CV:\n${cvContext}\n\nQuestion: ${question}\n\nAnswer in 1–2 sentences about the candidate's current situation.`;
   return { systemPrompt, userPrompt, temperature: 0.1 };
 }
 
@@ -320,19 +329,22 @@ function buildWhyCompanyPrompt(cvText, question, length, jobCtx, jobTitle, compa
   const hasJobCtx = !!jobCtx;
   const systemPrompt = `You are helping a job candidate answer a "why this company / why this role" question.
 
-RULES:
-1. ${hasJobCtx
-    ? 'Open with 1–2 sentences showing you understand what the company/team is working on — use specific language from the job description'
-    : 'Show genuine, specific interest based on what the role/company clearly involves'}
-2. Connect 2–3 specific aspects of the role or company to concrete evidence from the CV (different roles when possible)
-3. End with 1 sentence on why this is a logical next step — based on career direction, not hype
-4. Do NOT use: "I'm excited/passionate/thrilled", "amazing company", "incredible opportunity", "perfect fit"
-5. NEVER invent facts about the company not in the job description`;
+MANDATORY STRUCTURE — follow this order:
+1. COMPANY/ROLE FIRST: Open with 1–2 sentences that name something SPECIFIC about the company or role from the job description — their mission, the technology they build, a specific responsibility, or a problem they're solving. This MUST come before any CV evidence.
+2. CV CONNECTION: Then connect 2–3 of those specific things to concrete evidence from the candidate's background.
+3. CLOSE: One sentence on why this is the logical next step based on career direction.
+
+CRITICAL RULES:
+- If job context is provided, you MUST reference something specific from it in the opening — do NOT open with CV history
+- The answer must feel tailored to THIS company, not a generic response that could apply anywhere
+- Do NOT use: "I'm excited/passionate/thrilled", "amazing company", "incredible opportunity", "perfect fit"
+- NEVER invent facts about the company that are not in the job description
+${!hasJobCtx ? '- No job description provided: draw on what the role/company name implies and connect to clear CV patterns' : ''}`;
 
   const cvContext = getCvContext(cvText, 8000);
   let userPrompt = `CV:\n${cvContext}\n\n`;
   if (jobCtx) userPrompt += `Job Context:\n${jobCtx}\n`;
-  userPrompt += `Question: ${question}\n\nAnswer in approximately ${words} words. First person, no preamble.`;
+  userPrompt += `Question: ${question}\n\nAnswer in approximately ${words} words. Start with something specific about the company/role — NOT with your CV history. First person, no preamble.`;
   return { systemPrompt, userPrompt, temperature: 0.7 };
 }
 
