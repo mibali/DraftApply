@@ -125,33 +125,49 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (file.type === 'text/plain' || file.name.endsWith('.txt')) {
       return await file.text();
     }
-    
+
     if (!proxyUrl) {
       throw new Error('Proxy not available. Configure and wait for connection.');
     }
-    
-    // For PDF/DOCX, send to proxy for extraction (server-side parsing)
-    const formData = new FormData();
-    formData.append('cv', file);
-    
-    const tokenResp = await fetch(`${proxyUrl}/api/register`, { method: 'POST' });
-    const tokenData = await tokenResp.json().catch(() => ({}));
-    const token = tokenData.token;
-    if (!token) throw new Error('Could not register with proxy');
 
-    const response = await fetch(`${proxyUrl}/api/cv/upload`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-      body: formData
-    });
-    
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({}));
-      throw new Error(err.error || 'Extraction failed');
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30000);
+
+    try {
+      // For PDF/DOCX, send to proxy for extraction (server-side parsing)
+      const formData = new FormData();
+      formData.append('cv', file);
+
+      const tokenResp = await fetch(`${proxyUrl}/api/register`, {
+        method: 'POST',
+        signal: controller.signal
+      });
+      const tokenData = await tokenResp.json().catch(() => ({}));
+      const token = tokenData.token;
+      if (!token) throw new Error('Could not register with proxy');
+
+      const response = await fetch(`${proxyUrl}/api/cv/upload`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+        signal: controller.signal
+      });
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.error || 'Extraction failed');
+      }
+
+      const result = await response.json();
+      return result.text;
+    } catch (e) {
+      if (e?.name === 'AbortError') {
+        throw new Error('Timed out — the service may be starting up. Please try again in a few seconds.');
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
     }
-    
-    const result = await response.json();
-    return result.text;
   }
 
   async function saveCV() {

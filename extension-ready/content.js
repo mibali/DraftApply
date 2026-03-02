@@ -175,7 +175,7 @@ class DraftApplyExtension {
         </div>
         <div class="da-loading" id="da-loading" hidden>
           <div class="da-spinner"></div>
-          <span>Generating tailored answer...</span>
+          <span id="da-loading-text">Generating answer...</span>
           <button class="da-btn da-btn-stop" id="da-btn-stop" type="button">Stop</button>
         </div>
       </div>
@@ -538,12 +538,27 @@ class DraftApplyExtension {
     const output = this.modal.querySelector('#da-answer-output');
     const length = this.modal.querySelector('#da-length-select').value;
     const stopBtn = this.modal.querySelector('#da-btn-stop');
-    
+    const statusEl = this.modal.querySelector('#da-loading-text');
+
     this.lastQuestion = question;
     loading.hidden = false;
     stopBtn.disabled = false;
     output.value = '';
-    
+    if (statusEl) statusEl.textContent = 'Generating answer...';
+
+    const statusMessages = [
+      [0,  'Generating answer...'],
+      [5,  'Connecting to AI service...'],
+      [15, 'This is taking longer than usual...'],
+      [30, 'Still working — service may be waking up...'],
+    ];
+    const startTime = Date.now();
+    const statusInterval = setInterval(() => {
+      const elapsed = (Date.now() - startTime) / 1000;
+      const msg = statusMessages.filter(([t]) => elapsed >= t).pop()?.[1];
+      if (statusEl && msg) statusEl.textContent = msg;
+    }, 2000);
+
     try {
       // Get CV from storage
       const response = await chrome.runtime.sendMessage({ type: 'GET_CV' });
@@ -613,6 +628,7 @@ class DraftApplyExtension {
         output.value = `Error: ${error.message}`;
       }
     } finally {
+      clearInterval(statusInterval);
       if (this.currentRequestId) {
         // Clear the request id after completion
         this.currentRequestId = null;

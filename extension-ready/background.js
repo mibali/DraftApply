@@ -26,11 +26,14 @@ async function getInstallToken() {
     'installTokenExpiresAt'
   ]);
   if (typeof installToken !== 'string' || !installToken) return null;
-  if (typeof installTokenExpiresAt === 'number' && Date.now() > installTokenExpiresAt - 24 * 60 * 60 * 1000) {
-    // refresh if expiring within 24h
-    return null;
-  }
-  return installToken;
+
+  const now = Date.now();
+  const isExpired = typeof installTokenExpiresAt === 'number' && now > installTokenExpiresAt;
+  const isExpiring = !isExpired && typeof installTokenExpiresAt === 'number'
+    && now > installTokenExpiresAt - 24 * 60 * 60 * 1000;
+
+  if (isExpired) return null; // truly expired, must re-register
+  return { token: installToken, expiring: isExpiring };
 }
 
 async function setInstallToken(token, expiresAt) {
@@ -42,15 +45,27 @@ async function clearInstallToken() {
 }
 
 async function ensureInstallToken(proxyUrl) {
-  const existing = await getInstallToken();
-  if (existing) return existing;
+  const result = await getInstallToken();
+  const existing = result?.token ?? null;
+  const expiring = result?.expiring ?? false;
 
-  const response = await fetch(`${proxyUrl}/api/register`, { method: 'POST' });
-  if (!response.ok) throw new Error(`Register failed (${response.status})`);
-  const data = await response.json().catch(() => ({}));
-  if (!data.token) throw new Error('Register failed (no token)');
-  await setInstallToken(data.token, data.expiresAt);
-  return data.token;
+  if (existing && !expiring) return existing;
+
+  try {
+    const response = await fetch(`${proxyUrl}/api/register`, { method: 'POST' });
+    if (!response.ok) throw new Error(`Register failed (${response.status})`);
+    const data = await response.json().catch(() => ({}));
+    if (!data.token) throw new Error('Register failed (no token)');
+    await setInstallToken(data.token, data.expiresAt);
+    return data.token;
+  } catch (e) {
+    if (existing) {
+      // Re-registration failed but old token still valid — use it
+      console.warn('[DraftApply] Token refresh failed, using existing token:', e.message);
+      return existing;
+    }
+    throw e;
+  }
 }
 
 /**
@@ -344,6 +359,22 @@ async function checkProxy() {
   return { available: true, ...data, proxyUrl };
 }
 
+async function withRetry(fn, maxRetries = 2) {
+  let lastError;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastError = e;
+      if (e?.name === 'AbortError') throw e; // don't retry cancellations
+      if (attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt)));
+      }
+    }
+  }
+  throw lastError;
+}
+
 /**
  * Make API call to proxy for answer generation
  */
@@ -370,7 +401,15 @@ async function handleAPICall(payload, requestId) {
         body: JSON.stringify(payload)
       });
 
-    let response = await doRequest();
+    let response = await withRetry(async () => {
+      const r = await doRequest();
+      if (r.status >= 500) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.error || `Proxy error: ${r.status}`);
+      }
+      return r;
+    });
+
     if (response.status === 401) {
       // Token expired/revoked → re-register once and retry
       await clearInstallToken();
