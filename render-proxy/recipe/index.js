@@ -71,11 +71,11 @@ function buildJobContext(jobTitle, company, jobDescription, requirements) {
     ctx += '\n\n';
   }
   if (requirements && requirements.length > 0) {
-    ctx += `Key Requirements:\n${requirements.slice(0, 10).map(r => `- ${r}`).join('\n')}\n\n`;
+    ctx += `Key Requirements:\n${requirements.slice(0, 30).map(r => `- ${r}`).join('\n')}\n\n`;
   }
   if (jobDescription) {
-    ctx += `Job Description:\n${jobDescription.slice(0, 8000)}`;
-    if (jobDescription.length > 8000) ctx += '\n[...truncated...]';
+    ctx += `Job Description:\n${jobDescription.slice(0, 40000)}`;
+    if (jobDescription.length > 40000) ctx += '\n[...truncated...]';
     ctx += '\n\n';
   }
   return ctx;

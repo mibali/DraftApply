@@ -231,7 +231,7 @@ class PageExtractor {
       }
     }
 
-    return requirements.slice(0, 20);
+    return requirements.slice(0, 30);
   }
 
   /**
@@ -261,7 +261,7 @@ class PageExtractor {
       .replace(/\s+/g, ' ')
       .replace(/\n\s*\n/g, '\n\n')
       .trim()
-      .slice(0, 20000); // Limit for token management
+      .slice(0, 40000); // Limit for token management
   }
 
 }
