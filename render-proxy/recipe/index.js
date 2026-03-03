@@ -266,7 +266,7 @@ RULES:
 - For names, return just the name
 - For phone numbers, include country code if present`;
 
-  const cvContext = getCvContext(cvText, 10000);
+  const cvContext = getCvContext(cvText, 40000);
   const userPrompt = `CV:\n${cvContext}\n\nExtract: ${cleanQ}\n\nReturn ONLY the value, nothing else.`;
   return { systemPrompt, userPrompt, temperature: 0.1 };
 }
@@ -291,7 +291,7 @@ Rules:
 - If the CV doesn't have this information, give a sensible professional default
 - Do NOT mention past jobs or career history`;
 
-  const cvContext = getCvContext(cvText, 8000);
+  const cvContext = getCvContext(cvText, 40000);
   const userPrompt = `CV:\n${cvContext}\n\nQuestion: ${question}\n\nAnswer in 1–2 sentences about the candidate's current situation.`;
   return { systemPrompt, userPrompt, temperature: 0.1 };
 }
@@ -308,7 +308,7 @@ HOW TO ANSWER:
 - If the CV doesn't clearly confirm the thing asked, be honest: "Not directly, but [closest relevant experience]"
 - Do NOT write an essay or career summary`;
 
-  const cvContext = getCvContext(cvText, 8000);
+  const cvContext = getCvContext(cvText, 40000);
   let userPrompt = `MY CV:\n${cvContext}\n\n`;
   if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
   userPrompt += `Question: ${question}\n\nAnswer directly (max 3 sentences).`;
@@ -326,7 +326,7 @@ Rules:
 - Use one specific, concrete detail from the CV
 - No filler phrases like "I am a dedicated professional" or "I believe I am..."`;
 
-  const cvContext = getCvContext(cvText, 8000);
+  const cvContext = getCvContext(cvText, 40000);
   let userPrompt = `MY CV:\n${cvContext}\n\n`;
   if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
   userPrompt += `Question: ${question}\n\nAnswer concisely (max 50 words).`;
@@ -359,7 +359,7 @@ Rules:
 - Include what YOU did personally, not what "the team" did
 - NEVER invent employers, dates, or metrics`;
 
-  const cvContext = getCvContext(cvText, 10000);
+  const cvContext = getCvContext(cvText, 40000);
   let userPrompt = `MY CV:\n${cvContext}\n\n`;
   if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
   userPrompt += `Question: ${question}
@@ -392,7 +392,7 @@ Rules:
 - Answer the question that was actually asked (strength vs weakness — don't conflate)
 - NEVER invent examples`;
 
-  const cvContext = getCvContext(cvText, 8000);
+  const cvContext = getCvContext(cvText, 40000);
   let userPrompt = `MY CV:\n${cvContext}\n\n`;
   if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
   userPrompt += `Question: ${question}\n\nAnswer in approximately ${words} words. First person, no preamble.`;
@@ -419,7 +419,7 @@ Do NOT:
 - Give a vague "I enjoy helping people" type answer
 - Write about the company being "amazing" or the "incredible opportunity"`;
 
-  const cvContext = getCvContext(cvText, 8000);
+  const cvContext = getCvContext(cvText, 40000);
   let userPrompt = `MY CV:\n${cvContext}\n\n`;
   if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
   userPrompt += `Question: ${question}\n\nAnswer in approximately ${words} words. First person, no preamble.`;
@@ -446,7 +446,7 @@ CRITICAL:
 - This answer must be impossible to reuse for a different company — it must feel written specifically for THIS role
 ${!hasJobCtx ? '- No job description provided: open with what the company/role name clearly implies, then connect to your CV' : ''}`;
 
-  const cvContext = getCvContext(cvText, 8000);
+  const cvContext = getCvContext(cvText, 40000);
   let userPrompt = `MY CV:\n${cvContext}\n\n`;
   if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
   userPrompt += `Question: ${question}
@@ -478,7 +478,7 @@ Rules:
 - NEVER invent employers, degrees, dates, or metrics
 - A generic letter that could be sent to any company is a failure — make it specific`;
 
-  const cvContext = getCvContext(cvText, 10000);
+  const cvContext = getCvContext(cvText, 40000);
   let userPrompt = `MY CV:\n${cvContext}\n\n`;
   if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
   userPrompt += `Write a cover letter for${jobTitle ? ` the ${jobTitle} role` : ' this role'}${company ? ` at ${company}` : ''}.
@@ -506,7 +506,7 @@ If the question is broad: pick the angle from your background that's most releva
 
 ${hasJobCtx ? 'The job context is provided — use it to tailor your answer to what this specific role actually needs.' : ''}`;
 
-  const cvContext = getCvContext(cvText, 10000);
+  const cvContext = getCvContext(cvText, 40000);
   let userPrompt = `MY CV:\n${cvContext}\n\n`;
   if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
   userPrompt += `Question: ${question}
