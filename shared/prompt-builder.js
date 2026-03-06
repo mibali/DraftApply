@@ -15,6 +15,30 @@
 export class PromptBuilder {
   constructor() {
     this.questionTypes = {
+      salary: [
+        'salary requirement',
+        'salary expectation',
+        'salary range',
+        'expected salary',
+        'desired salary',
+        'compensation requirement',
+        'compensation expectation',
+        'pay requirement',
+        'pay expectation',
+        'what are your salary',
+        'what is your salary',
+        'how much are you looking',
+        'how much do you expect',
+        'what salary are you',
+        'annual salary',
+        'base salary',
+        'starting salary',
+        'minimum salary',
+        'rate expectation',
+        'hourly rate',
+        'day rate',
+        'what compensation'
+      ],
       cover_letter: [
         'cover letter',
         'coverletter',
@@ -210,6 +234,22 @@ The answer should feel like something the candidate would naturally write themse
    */
   buildTypeInstructions(questionType) {
     const instructions = {
+      salary: `This is a SALARY / COMPENSATION question. Provide a specific, well-reasoned salary range — not a vague non-answer.
+
+Use the following logic:
+1. SENIORITY: Determine the candidate's level from their CV (years of experience, scope of roles, team sizes managed, technologies used).
+2. ROLE: Use the job title from the job description to anchor the market rate.
+3. MARKET DATA: Apply your knowledge of current industry salary benchmarks for this role and seniority level. Be specific — give a realistic range in the format "£X–£Y" or "$X–$Y" depending on context. If the job location is known, adjust for it; otherwise default to UK/London rates for UK roles and US national rates for US roles.
+4. FRAMING: State the range confidently, briefly explain the reasoning (experience level, market rate), and keep the door open for negotiation based on the full package.
+
+RULES:
+- Always give a specific number range. Never say "competitive" or "open to discussion" without first naming a range.
+- Do NOT make up CV facts. Base seniority on what is in the CV.
+- Keep the answer concise: 2–4 sentences is ideal for short/medium; up to 6 for long.
+- Sound confident but not rigid — mention you're open to discussing the full package.
+
+EXAMPLE STRUCTURE: "Based on my X years of [relevant experience] at [seniority level], I'm looking for a base salary in the range of £X–£Y. This reflects current market rates for [role] roles at this level and aligns with my experience in [key relevant area]. I'm happy to discuss the full package and am open to conversations around benefits and structure."`,
+
       cover_letter: `This is a COVER LETTER request. Write a real cover letter (not a paragraph answer).
 
 Format:
@@ -341,10 +381,18 @@ Rules:
       medium: { words: '250-350', sentences: '10-16' },
       long: { words: '350-500', sentences: '16-24' }
     };
+    // Salary answers are always concise regardless of selected length
+    const salaryLengths = {
+      short: { words: '30-50', sentences: '2-3' },
+      medium: { words: '50-80', sentences: '3-4' },
+      long: { words: '80-120', sentences: '4-6' }
+    };
     const effectiveLengthSpec =
       questionType === 'cover_letter'
         ? (coverLetterLengths[length] || coverLetterLengths.medium)
-        : lengthSpec;
+        : questionType === 'salary'
+          ? (salaryLengths[length] || salaryLengths.medium)
+          : lengthSpec;
 
     const systemPrompt = this.buildSystemPrompt();
     const cvContext = this.buildCVContext(cvData, questionType);

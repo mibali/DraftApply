@@ -33,6 +33,8 @@ import {
   generateWithFallback,
   buildFallbackChain
 } from './llm-providers.js';
+import { CVParser } from '../shared/cv-parser.js';
+import { PromptBuilder } from '../shared/prompt-builder.js';
 
 dotenv.config();
 
@@ -173,13 +175,40 @@ app.post('/api/cv/upload', upload.single('cv'), async (req, res) => {
 /**
  * Answer Generation endpoint
  *
- * Accepts optional `llmConfig` in request body to use a user-supplied provider:
- *   { provider: 'openai', apiKey: 'sk-...', model: 'gpt-4o' }
- * On failure, falls back to the server's default provider chain.
+ * Accepts two payload formats:
+ *
+ * 1. Pre-built prompts (web app):
+ *    { systemPrompt, userPrompt, temperature?, stream?, llmConfig? }
+ *
+ * 2. Structured payload (extension) — prompts built server-side:
+ *    { question, cvText, length?, jobTitle?, company?, jobDescription?,
+ *      requirements?, platform?, llmConfig? }
+ *
+ * Both formats accept optional `llmConfig: { provider, apiKey, model? }`
+ * to use a user-supplied LLM. Falls back to server default (Groq) on failure.
  */
 app.post('/api/generate', async (req, res) => {
   try {
-    const { systemPrompt, userPrompt, temperature, stream: useStream, llmConfig } = req.body;
+    let { systemPrompt, userPrompt, temperature, stream: useStream, llmConfig } = req.body;
+
+    // ── Extension structured payload → build prompts server-side ──────────
+    if (!systemPrompt && req.body.question && req.body.cvText) {
+      const { question, cvText, length, jobTitle, company, jobDescription, requirements } = req.body;
+
+      const cvParser = new CVParser();
+      const cvData = cvParser.parse(cvText);
+
+      const promptBuilder = new PromptBuilder();
+      const built = promptBuilder.buildPrompt(cvData, question, length || 'medium', {
+        jobTitle,
+        company,
+        jobDescription,
+        requirements
+      });
+
+      systemPrompt = built.systemPrompt;
+      userPrompt = built.userPrompt;
+    }
 
     if (!systemPrompt || !userPrompt) {
       return res.status(400).json({ error: 'Missing prompt data' });
