@@ -384,7 +384,10 @@ class DraftApplyExtension {
           this.currentField = field;
           
           const label = this.findFieldLabel(field);
-          const question = label || field.placeholder || 'Answer this question';
+          // Use field.name / field.id as last-resort hints so the LLM has something
+          // meaningful to work with even when no visible label can be found.
+          const fieldHint = field.name || field.id || field.placeholder || null;
+          const question = label || fieldHint || 'Please describe your relevant experience and background';
           this.handleGenerateRequest(question);
         });
         
@@ -612,22 +615,26 @@ class DraftApplyExtension {
       if (statusEl && msg) statusEl.textContent = msg;
     }, 2000);
 
+    // Hoist requestId so finally can safely compare without capturing a stale closure value.
+    // This prevents a regenerate race: if req_1 finishes after req_2 has started, req_1's
+    // finally should NOT null out req_2's currentRequestId.
+    let requestId;
+
     try {
       // Get CV from storage
-      const response = await chrome.runtime.sendMessage({ type: 'GET_CV' });
-      
-      if (!response.cvText) {
+      const cvResponse = await chrome.runtime.sendMessage({ type: 'GET_CV' });
+
+      if (!cvResponse.cvText) {
         output.value = 'Please load your CV first. Click the DraftApply extension icon.';
-        loading.hidden = true;
         return;
       }
-      
-      // Build structured payload — the proxy's recipe module builds prompts server-side
+
+      // Build structured payload — prompts are built server-side
       const ctx = this.pageContext || {};
       const structuredPayload = {
         question,
         length,
-        cvText:         response.cvText,
+        cvText:         cvResponse.cvText,
         jobTitle:       ctx.jobTitle || undefined,
         company:        ctx.company || undefined,
         jobDescription: ctx.jobDescription || ctx.fullPageText || undefined,
@@ -635,30 +642,22 @@ class DraftApplyExtension {
         pageUrl:        ctx.url || window.location.href,
         platform:       ctx.platform || undefined,
       };
-      
-      // Call API via background with timeout
-      const requestId = (globalThis.crypto?.randomUUID?.() || `req_${Date.now()}_${Math.random().toString(16).slice(2)}`);
+
+      requestId = globalThis.crypto?.randomUUID?.() ?? `req_${Date.now()}_${Math.random().toString(16).slice(2)}`;
       this.currentRequestId = requestId;
-      
-      const timeoutPromise = new Promise((_, reject) => 
+
+      const timeoutPromise = new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Request timed out after 2 minutes')), 120000)
       );
-      
+
       const result = await Promise.race([
-        chrome.runtime.sendMessage({
-          type: 'CALL_API',
-          requestId,
-          payload: structuredPayload
-        }),
+        chrome.runtime.sendMessage({ type: 'CALL_API', requestId, payload: structuredPayload }),
         timeoutPromise
       ]);
 
-      // If user cancelled/restarted while awaiting, ignore stale response.
-      if (this.currentRequestId !== requestId) {
-        loading.hidden = true;
-        return;
-      }
-      
+      // Stale-response guard: another request started while this one was in-flight.
+      if (this.currentRequestId !== requestId) return;
+
       if (!result) {
         output.value = 'Error: No response from backend. Is it running?';
       } else if (result.error) {
@@ -667,23 +666,26 @@ class DraftApplyExtension {
         output.value = result.answer;
         this.lastAnswer = result.answer;
       } else {
-        // Handle unexpected response format
         output.value = result.text || result.content || JSON.stringify(result);
         this.lastAnswer = output.value;
       }
-      
+
     } catch (error) {
-      if (error.message.includes('Extension context invalidated')) {
-        output.value = 'Extension was updated. Please refresh this page.';
-      } else if (error.message === 'Cancelled') {
-        output.value = 'Cancelled.';
-      } else {
-        output.value = `Error: ${error.message}`;
+      // Only write error if this request is still the active one
+      if (this.currentRequestId === requestId || !requestId) {
+        if (error.message.includes('Extension context invalidated')) {
+          output.value = 'Extension was updated. Please refresh this page.';
+        } else if (error.message === 'Cancelled') {
+          output.value = 'Cancelled.';
+        } else {
+          output.value = `Error: ${error.message}`;
+        }
       }
     } finally {
       clearInterval(statusInterval);
-      if (this.currentRequestId) {
-        // Clear the request id after completion
+      // Only clear ownership if this request is still the active one — prevents
+      // a completed stale request from nulling out a newer request's ID.
+      if (this.currentRequestId === requestId) {
         this.currentRequestId = null;
       }
       loading.hidden = true;
