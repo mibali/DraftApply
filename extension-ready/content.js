@@ -466,33 +466,75 @@ class DraftApplyExtension {
   }
 
   findFieldLabel(field) {
+    // 1. Explicit <label for="...">
     if (field.id) {
-      const label = document.querySelector(`label[for="${field.id}"]`);
-      if (label) return label.textContent.trim();
-    }
-    
-    if (field.getAttribute('aria-label')) {
-      return field.getAttribute('aria-label');
-    }
-
-    if (field.getAttribute('aria-labelledby')) {
-      const labelEl = document.getElementById(field.getAttribute('aria-labelledby'));
-      if (labelEl) return labelEl.textContent.trim();
-    }
-    
-    const prev = field.previousElementSibling;
-    if (prev?.tagName === 'LABEL') {
-      return prev.textContent.trim();
-    }
-    
-    const parent = field.closest('.form-group, .field, .question, .form-field, [class*="question"]');
-    if (parent) {
-      const label = parent.querySelector('label, .label, .question-text, [class*="label"]');
-      if (label && label.textContent.trim().length < 500) {
-        return label.textContent.trim();
+      try {
+        const label = document.querySelector(`label[for="${CSS.escape(field.id)}"]`);
+        if (label) return label.textContent.trim();
+      } catch (e) {
+        const label = document.querySelector(`label[for="${field.id}"]`);
+        if (label) return label.textContent.trim();
       }
     }
-    
+
+    // 2. aria-label attribute
+    const ariaLabel = field.getAttribute('aria-label');
+    if (ariaLabel) return ariaLabel;
+
+    // 3. aria-labelledby (may be space-separated list of ids)
+    const labelledBy = field.getAttribute('aria-labelledby');
+    if (labelledBy) {
+      const parts = labelledBy.split(/\s+/)
+        .map(id => document.getElementById(id)?.textContent?.trim())
+        .filter(Boolean);
+      if (parts.length) return parts.join(' ');
+    }
+
+    // 4. title attribute
+    if (field.title) return field.title;
+
+    // 5. Walk up DOM ancestry — look for label/heading text before the input
+    const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'BUTTON', 'INPUT', 'TEXTAREA', 'SELECT', 'OPTION']);
+    const isGoodText = (t) => t && t.length > 2 && t.length < 400;
+
+    let ancestor = field.parentElement;
+    for (let depth = 0; depth < 10 && ancestor; depth++, ancestor = ancestor.parentElement) {
+      // 5a. Explicit <label> or <legend> anywhere in the ancestor (not wrapping the field)
+      for (const tag of ['label', 'legend']) {
+        const el = ancestor.querySelector(tag);
+        if (el && !el.contains(field)) {
+          const t = el.textContent.trim();
+          if (isGoodText(t)) return t;
+        }
+      }
+
+      // 5b. Look at DOM siblings that come BEFORE the field's branch in this ancestor
+      const children = Array.from(ancestor.children);
+      // Find which child contains (or is) the field
+      const branchIdx = children.findIndex(c => c === field || c.contains(field));
+      if (branchIdx > 0) {
+        // Walk backwards through earlier siblings looking for label-like text
+        for (let i = branchIdx - 1; i >= 0; i--) {
+          const sib = children[i];
+          if (SKIP_TAGS.has(sib.tagName)) continue;
+          // Prefer explicit label/heading elements
+          const heading = sib.querySelector('label, legend, h1, h2, h3, h4, h5, h6, p, strong, b') || sib;
+          const t = heading.textContent.trim();
+          if (isGoodText(t) && !SKIP_TAGS.has(heading.tagName)) return t;
+        }
+      }
+
+      // 5c. Any heading/strong element within this ancestor (not the field itself)
+      const heading = ancestor.querySelector('h1,h2,h3,h4,h5,h6,legend,strong,b,p,[class*="label" i],[class*="question" i],[class*="heading" i],[class*="title" i]');
+      if (heading && !heading.contains(field)) {
+        const t = heading.textContent.trim();
+        if (isGoodText(t)) return t;
+      }
+
+      // Stop climbing if we've reached a major landmark
+      if (ancestor.matches('form, main, [role="main"], body')) break;
+    }
+
     return null;
   }
 
