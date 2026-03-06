@@ -23,8 +23,13 @@ export class PromptBuilder {
         'desired salary',
         'compensation requirement',
         'compensation expectation',
+        'compensation range',
+        'desired compensation',
+        'expected compensation',
+        'total compensation',
         'pay requirement',
         'pay expectation',
+        'pay range',
         'what are your salary',
         'what is your salary',
         'how much are you looking',
@@ -37,7 +42,11 @@ export class PromptBuilder {
         'rate expectation',
         'hourly rate',
         'day rate',
-        'what compensation'
+        'what compensation',
+        'current salary',
+        'current compensation',
+        'target salary',
+        'target compensation'
       ],
       cover_letter: [
         'cover letter',
