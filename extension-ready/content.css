@@ -283,6 +283,89 @@
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
 }
 
+.da-controls-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.da-control-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+}
+
+.da-control-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #94a3b8;
+}
+
+.da-tone-pills {
+  display: flex;
+  gap: 0;
+  background: #f1f5f9;
+  border-radius: 8px;
+  padding: 3px;
+}
+
+.da-tone-pill {
+  flex: 1;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  background: transparent;
+  color: #64748b;
+  transition: background 0.15s, color 0.15s, box-shadow 0.15s;
+  font-family: inherit;
+}
+
+.da-tone-pill:hover {
+  background: rgba(255, 255, 255, 0.7);
+  color: #334155;
+}
+
+.da-tone-pill.da-pill-active {
+  background: white;
+  color: #7c3aed;
+  font-weight: 600;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
+}
+
+/* Prefetch button states */
+.da-field-btn-overlay.da-btn-prefetching {
+  border-color: rgba(37, 99, 235, 0.6);
+  animation: da-btn-pulse 1.4s ease-in-out infinite;
+}
+
+.da-field-btn-overlay.da-btn-ready {
+  border-color: rgba(22, 163, 74, 0.9);
+  background: rgba(240, 253, 244, 0.97);
+}
+
+.da-field-btn-overlay.da-btn-ready::after {
+  content: '';
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 8px;
+  height: 8px;
+  background: #16a34a;
+  border-radius: 50%;
+  border: 1.5px solid white;
+}
+
+@keyframes da-btn-pulse {
+  0%, 100% { box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15), 0 0 0 0 rgba(37, 99, 235, 0.4); }
+  50%       { box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15), 0 0 0 4px rgba(37, 99, 235, 0); }
+}
+
 .da-btn {
   padding: 10px 16px;
   border: none;

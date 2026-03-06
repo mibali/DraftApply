@@ -193,7 +193,7 @@ app.post('/api/generate', async (req, res) => {
 
     // ── Extension structured payload → build prompts server-side ──────────
     if (!systemPrompt && req.body.question && req.body.cvText) {
-      const { question, cvText, length, jobTitle, company, jobDescription, requirements } = req.body;
+      const { question, cvText, length, jobTitle, company, jobDescription, requirements, tone } = req.body;
 
       const cvParser = new CVParser();
       const cvData = cvParser.parse(cvText);
@@ -203,7 +203,8 @@ app.post('/api/generate', async (req, res) => {
         jobTitle,
         company,
         jobDescription,
-        requirements
+        requirements,
+        tone
       });
 
       systemPrompt = built.systemPrompt;

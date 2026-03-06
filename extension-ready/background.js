@@ -224,6 +224,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === 'CALL_API_STREAM') {
+    const tabId = sender.tab?.id;
+    const frameId = sender.frameId ?? 0;
+    if (!tabId) {
+      sendResponse({ error: 'No tab context' });
+      return;
+    }
+    sendResponse({ started: true }); // Acknowledge immediately
+    handleStreamingAPICall(message.payload, message.requestId, tabId, frameId)
+      .catch(err => {
+        try {
+          chrome.tabs.sendMessage(tabId, {
+            type: 'STREAM_ERROR',
+            requestId: message.requestId,
+            error: err.message
+          }, { frameId });
+        } catch (e) {}
+      });
+    return; // sendResponse already called synchronously
+  }
+
   if (message.type === 'CANCEL_API') {
     const controller = pendingRequests.get(message.requestId);
     if (controller) {
@@ -386,6 +407,99 @@ async function withRetry(fn, maxRetries = 2) {
     }
   }
   throw lastError;
+}
+
+/**
+ * Streaming API call: relay SSE chunks to the content script tab.
+ * Chunks are forwarded via chrome.tabs.sendMessage as STREAM_CHUNK messages.
+ */
+async function handleStreamingAPICall(payload, requestId, tabId, frameId) {
+  const proxyUrl = await getProxyUrl();
+  const controller = new AbortController();
+  const effectiveRequestId = requestId || `req_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  pendingRequests.set(effectiveRequestId, controller);
+
+  const timeout = setTimeout(() => controller.abort(), 120000);
+
+  const { llmConfig } = await chrome.storage.local.get('llmConfig');
+  const enrichedPayload = (llmConfig?.provider && llmConfig?.apiKey)
+    ? { ...payload, llmConfig, stream: true }
+    : { ...payload, stream: true };
+
+  try {
+    const token = await ensureInstallToken(proxyUrl);
+
+    const response = await fetch(`${proxyUrl}/api/generate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`
+      },
+      signal: controller.signal,
+      body: JSON.stringify(enrichedPayload)
+    });
+
+    if (response.status === 401) {
+      await clearInstallToken();
+      await ensureInstallToken(proxyUrl); // refresh token for next attempt
+      throw new Error('Token expired — please try again');
+    }
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.error || `Proxy error: ${response.status}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    const sendChunk = (chunk) => {
+      try {
+        chrome.tabs.sendMessage(tabId, { type: 'STREAM_CHUNK', requestId: effectiveRequestId, chunk }, { frameId });
+      } catch (e) {}
+    };
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // keep last incomplete line
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6).trim();
+        if (data === '[DONE]') continue;
+        try {
+          const json = JSON.parse(data);
+          // OpenAI-compatible format
+          const chunk = json.choices?.[0]?.delta?.content;
+          if (chunk) sendChunk(chunk);
+        } catch (e) {
+          // Non-JSON line — skip
+        }
+      }
+    }
+
+    try {
+      chrome.tabs.sendMessage(tabId, { type: 'STREAM_DONE', requestId: effectiveRequestId }, { frameId });
+    } catch (e) {}
+
+  } catch (e) {
+    if (e?.name === 'AbortError') {
+      // Cancelled — notify so the promise bridge resolves cleanly
+      try {
+        chrome.tabs.sendMessage(tabId, { type: 'STREAM_DONE', requestId: effectiveRequestId }, { frameId });
+      } catch (_) {}
+      return;
+    }
+    throw e;
+  } finally {
+    clearTimeout(timeout);
+    pendingRequests.delete(effectiveRequestId);
+  }
 }
 
 /**

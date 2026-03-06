@@ -18,11 +18,15 @@ class DraftApplyExtension {
     this.lastFocusedField = null;
     this.pageExtractor = new PageExtractor();
     this.pageContext = null;
-    this.activeRequestId = null;
     this.lastAnswer = null;
     this.lastQuestion = null;
     this.observer = null;
-    
+    this._streamResolvers = new Map(); // requestId -> { resolve, reject }
+    this._prefetchCache = new WeakMap(); // field -> { status, question, answer, promise }
+    this._buttonMap = new WeakMap();    // field -> overlay button
+    this._prefetchTimer = null;
+    this._prefetchField = null;
+
     this.init();
   }
 
@@ -165,12 +169,26 @@ class DraftApplyExtension {
           <div class="da-answer-label">Generated Answer</div>
           <textarea class="da-answer-output" id="da-answer-output" placeholder="Your answer will appear here. You can edit it before inserting."></textarea>
           <div class="da-modal-actions">
-            <div class="da-length-pills" id="da-length-pills" role="group" aria-label="Answer length">
-              <button type="button" class="da-length-pill" data-value="short">Short</button>
-              <button type="button" class="da-length-pill da-pill-active" data-value="medium">Medium</button>
-              <button type="button" class="da-length-pill" data-value="long">Long</button>
+            <div class="da-controls-row">
+              <div class="da-control-group">
+                <span class="da-control-label">Length</span>
+                <div class="da-length-pills" id="da-length-pills" role="group" aria-label="Answer length">
+                  <button type="button" class="da-length-pill" data-value="short">Short</button>
+                  <button type="button" class="da-length-pill da-pill-active" data-value="medium">Medium</button>
+                  <button type="button" class="da-length-pill" data-value="long">Long</button>
+                </div>
+              </div>
+              <div class="da-control-group">
+                <span class="da-control-label">Tone</span>
+                <div class="da-tone-pills" id="da-tone-pills" role="group" aria-label="Answer tone">
+                  <button type="button" class="da-tone-pill" data-value="formal">Formal</button>
+                  <button type="button" class="da-tone-pill da-pill-active" data-value="natural">Natural</button>
+                  <button type="button" class="da-tone-pill" data-value="direct">Direct</button>
+                </div>
+              </div>
             </div>
             <input type="hidden" id="da-length-select" value="medium">
+            <input type="hidden" id="da-tone-select" value="natural">
             <div class="da-modal-actions-row">
               <button class="da-btn da-btn-regenerate" id="da-btn-regenerate">↺ Regenerate</button>
               <button class="da-btn da-btn-insert" id="da-btn-insert">Insert Answer</button>
@@ -199,6 +217,14 @@ class DraftApplyExtension {
       modal.querySelectorAll('.da-length-pill').forEach(p => p.classList.remove('da-pill-active'));
       pill.classList.add('da-pill-active');
       modal.querySelector('#da-length-select').value = pill.dataset.value;
+    };
+
+    modal.querySelector('#da-tone-pills').onclick = (e) => {
+      const pill = e.target.closest('.da-tone-pill');
+      if (!pill) return;
+      modal.querySelectorAll('.da-tone-pill').forEach(p => p.classList.remove('da-pill-active'));
+      pill.classList.add('da-pill-active');
+      modal.querySelector('#da-tone-select').value = pill.dataset.value;
     };
     
     modal.onclick = (e) => {
@@ -326,12 +352,44 @@ class DraftApplyExtension {
       if (message.type === 'GET_PAGE_CONTEXT') {
         sendResponse(this.pageContext);
       }
+
+      if (message.type === 'STREAM_CHUNK') {
+        if (this.currentRequestId === message.requestId) {
+          const output = this.modal?.querySelector?.('#da-answer-output');
+          if (output) {
+            // Hide loading overlay on first chunk so text is visible as it streams
+            const loading = this.modal?.querySelector?.('#da-loading');
+            if (loading && !loading.hidden) loading.hidden = true;
+            output.value += message.chunk;
+            output.scrollTop = output.scrollHeight;
+          }
+        }
+        return;
+      }
+
+      if (message.type === 'STREAM_DONE') {
+        const resolver = this._streamResolvers.get(message.requestId);
+        if (resolver) {
+          resolver.resolve();
+          this._streamResolvers.delete(message.requestId);
+        }
+        return;
+      }
+
+      if (message.type === 'STREAM_ERROR') {
+        const resolver = this._streamResolvers.get(message.requestId);
+        if (resolver) {
+          resolver.reject(new Error(message.error || 'Stream error'));
+          this._streamResolvers.delete(message.requestId);
+        }
+        return;
+      }
     });
   }
 
   observeFormFields() {
     // Use overlay buttons instead of wrapping fields (avoids breaking React)
-    const buttonMap = new WeakMap(); // field -> button element
+    const buttonMap = this._buttonMap; // lifted to class so prefetch can reference it
 
     const BTN_SIZE = 36;
     const BTN_INSET = 6;
@@ -382,12 +440,28 @@ class DraftApplyExtension {
           e.stopPropagation();
           clickPending = false;
           this.currentField = field;
-          
+
           const label = this.findFieldLabel(field);
-          // Use field.name / field.id as last-resort hints so the LLM has something
-          // meaningful to work with even when no visible label can be found.
           const fieldHint = field.name || field.id || field.placeholder || null;
           const question = label || fieldHint || 'Please describe your relevant experience and background';
+
+          // Use prefetch cache if answer is ready for the same question
+          const cached = this._prefetchCache.get(field);
+          if (cached?.status === 'ready' && cached.question === question) {
+            this.showModal(question);
+            const output = this.modal.querySelector('#da-answer-output');
+            output.value = cached.answer;
+            this.lastAnswer = cached.answer;
+            this.lastQuestion = question;
+            // Remove ready indicator from button
+            btn.classList.remove('da-btn-ready');
+            this._prefetchCache.delete(field);
+            return;
+          }
+
+          // If prefetch is still in-flight for the same question, show modal and let
+          // it fill in automatically once the promise resolves (falls through to normal
+          // generateAnswer which will race or the prefetch completes in background).
           this.handleGenerateRequest(question);
         });
         
@@ -406,7 +480,17 @@ class DraftApplyExtension {
           btn.classList.remove('da-btn-visible');
         };
         
-        field.addEventListener('focus', showBtn);
+        field.addEventListener('focus', () => {
+          showBtn();
+          // Prefetch: debounce 600ms then silently generate answer in background
+          clearTimeout(this._prefetchTimer);
+          this._prefetchField = field;
+          this._prefetchTimer = setTimeout(() => {
+            if (this._prefetchField === field && !this._prefetchCache.has(field)) {
+              this._startPrefetch(field);
+            }
+          }, 600);
+        });
         field.addEventListener('mouseenter', showBtn);
         field.addEventListener('blur', (e) => {
           // Don't hide if focus moved to the button
@@ -541,6 +625,52 @@ class DraftApplyExtension {
     return null;
   }
 
+  /**
+   * Silently prefetch an answer for a field so it can be shown instantly on click.
+   * Uses the same structured payload as generateAnswer but non-streaming.
+   */
+  async _startPrefetch(field) {
+    const label = this.findFieldLabel(field);
+    const fieldHint = field.name || field.id || field.placeholder || null;
+    const question = label || fieldHint || 'Please describe your relevant experience and background';
+
+    let cvResponse;
+    try {
+      cvResponse = await chrome.runtime.sendMessage({ type: 'GET_CV' });
+    } catch (e) { return; }
+    if (!cvResponse?.cvText) return;
+
+    const btn = this._buttonMap.get(field);
+    const ctx = this.pageContext || {};
+    const payload = {
+      question,
+      length: 'medium',
+      tone:   'natural',
+      cvText:         cvResponse.cvText,
+      jobTitle:       ctx.jobTitle || undefined,
+      company:        ctx.company || undefined,
+      jobDescription: ctx.jobDescription || ctx.fullPageText || undefined,
+      requirements:   (ctx.requirements?.length > 0) ? ctx.requirements : undefined,
+    };
+
+    const cacheEntry = { status: 'loading', question, answer: null };
+    this._prefetchCache.set(field, cacheEntry);
+    if (btn?.isConnected) btn.classList.add('da-btn-prefetching');
+
+    try {
+      const result = await chrome.runtime.sendMessage({ type: 'CALL_API', requestId: null, payload });
+      cacheEntry.answer = result?.answer || result?.text || result?.content || null;
+      cacheEntry.status = cacheEntry.answer ? 'ready' : 'error';
+      if (btn?.isConnected) {
+        btn.classList.remove('da-btn-prefetching');
+        if (cacheEntry.status === 'ready') btn.classList.add('da-btn-ready');
+      }
+    } catch (e) {
+      cacheEntry.status = 'error';
+      if (btn?.isConnected) btn.classList.remove('da-btn-prefetching');
+    }
+  }
+
   async handleGenerateRequest(question) {
     if (!this.modal) {
       console.warn('[DraftApply] Modal not ready — cannot generate.');
@@ -593,6 +723,7 @@ class DraftApplyExtension {
     const loading = this.modal.querySelector('#da-loading');
     const output = this.modal.querySelector('#da-answer-output');
     const length = this.modal.querySelector('#da-length-select').value;
+    const tone = this.modal.querySelector('#da-tone-select').value || 'natural';
     const stopBtn = this.modal.querySelector('#da-btn-stop');
     const statusEl = this.modal.querySelector('#da-loading-text');
 
@@ -602,26 +733,20 @@ class DraftApplyExtension {
     output.value = '';
     if (statusEl) statusEl.textContent = 'Generating answer...';
 
-    const statusMessages = [
-      [0,  'Generating answer...'],
-      [5,  'Connecting to AI service...'],
-      [15, 'This is taking longer than usual...'],
-      [30, 'Still working — service may be waking up...'],
-    ];
     const startTime = Date.now();
-    const statusInterval = setInterval(() => {
+    const statusTimer = setInterval(() => {
+      if (loading.hidden) { clearInterval(statusTimer); return; }
       const elapsed = (Date.now() - startTime) / 1000;
-      const msg = statusMessages.filter(([t]) => elapsed >= t).pop()?.[1];
-      if (statusEl && msg) statusEl.textContent = msg;
+      if (elapsed > 30 && statusEl) statusEl.textContent = 'Still working — service may be waking up...';
+      else if (elapsed > 15 && statusEl) statusEl.textContent = 'This is taking longer than usual...';
+      else if (elapsed > 5 && statusEl) statusEl.textContent = 'Connecting to AI service...';
     }, 2000);
 
-    // Hoist requestId so finally can safely compare without capturing a stale closure value.
-    // This prevents a regenerate race: if req_1 finishes after req_2 has started, req_1's
-    // finally should NOT null out req_2's currentRequestId.
+    // Hoist requestId and timeoutId so finally can access them regardless of where a throw occurs.
     let requestId;
+    let timeoutId;
 
     try {
-      // Get CV from storage
       const cvResponse = await chrome.runtime.sendMessage({ type: 'GET_CV' });
 
       if (!cvResponse.cvText) {
@@ -629,11 +754,11 @@ class DraftApplyExtension {
         return;
       }
 
-      // Build structured payload — prompts are built server-side
       const ctx = this.pageContext || {};
       const structuredPayload = {
         question,
         length,
+        tone,
         cvText:         cvResponse.cvText,
         jobTitle:       ctx.jobTitle || undefined,
         company:        ctx.company || undefined,
@@ -646,32 +771,44 @@ class DraftApplyExtension {
       requestId = globalThis.crypto?.randomUUID?.() ?? `req_${Date.now()}_${Math.random().toString(16).slice(2)}`;
       this.currentRequestId = requestId;
 
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Request timed out after 2 minutes')), 120000)
-      );
+      // Promise bridge: resolves/rejects when STREAM_DONE/STREAM_ERROR arrives
+      const streamPromise = new Promise((resolve, reject) => {
+        this._streamResolvers.set(requestId, { resolve, reject });
+      });
 
-      const result = await Promise.race([
-        chrome.runtime.sendMessage({ type: 'CALL_API', requestId, payload: structuredPayload }),
-        timeoutPromise
-      ]);
+      const timeoutPromise = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          const resolver = this._streamResolvers.get(requestId);
+          if (resolver) {
+            resolver.reject(new Error('Request timed out after 2 minutes'));
+            this._streamResolvers.delete(requestId);
+          }
+        }, 120000);
+      });
 
-      // Stale-response guard: another request started while this one was in-flight.
-      if (this.currentRequestId !== requestId) return;
+      const startResult = await chrome.runtime.sendMessage({
+        type: 'CALL_API_STREAM',
+        requestId,
+        payload: structuredPayload
+      });
 
-      if (!result) {
-        output.value = 'Error: No response from backend. Is it running?';
-      } else if (result.error) {
-        output.value = `Error: ${result.error}`;
-      } else if (result.answer) {
-        output.value = result.answer;
-        this.lastAnswer = result.answer;
+      if (!startResult?.started) {
+        throw new Error(startResult?.error || 'Failed to start generation');
+      }
+
+      // Wait for stream to finish — chunks arrive via STREAM_CHUNK messages
+      await Promise.race([streamPromise, timeoutPromise]);
+
+      if (this.currentRequestId !== requestId) return; // Stale — newer request took over
+
+      const answer = output.value.trim();
+      if (answer) {
+        this.lastAnswer = answer;
       } else {
-        output.value = result.text || result.content || JSON.stringify(result);
-        this.lastAnswer = output.value;
+        output.value = 'Error: No answer received. Please try again.';
       }
 
     } catch (error) {
-      // Only write error if this request is still the active one
       if (this.currentRequestId === requestId || !requestId) {
         if (error.message.includes('Extension context invalidated')) {
           output.value = 'Extension was updated. Please refresh this page.';
@@ -682,9 +819,11 @@ class DraftApplyExtension {
         }
       }
     } finally {
-      clearInterval(statusInterval);
-      // Only clear ownership if this request is still the active one — prevents
-      // a completed stale request from nulling out a newer request's ID.
+      clearInterval(statusTimer);
+      clearTimeout(timeoutId); // always cancel the 2-min timer, whether success, error, or cancel
+      if (this._streamResolvers.has(requestId)) {
+        this._streamResolvers.delete(requestId);
+      }
       if (this.currentRequestId === requestId) {
         this.currentRequestId = null;
       }
@@ -710,7 +849,14 @@ class DraftApplyExtension {
     const requestId = this.currentRequestId;
     this.currentRequestId = null;
 
-    // Best-effort abort (may fail if background was reloaded)
+    // Reject the stream promise so generateAnswer's await unblocks immediately
+    const resolver = requestId && this._streamResolvers.get(requestId);
+    if (resolver) {
+      resolver.reject(new Error('Cancelled'));
+      this._streamResolvers.delete(requestId);
+    }
+
+    // Best-effort abort the network request (may fail if background was reloaded)
     try {
       if (requestId) {
         await chrome.runtime.sendMessage({ type: 'CANCEL_API', requestId });

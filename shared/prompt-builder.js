@@ -130,7 +130,13 @@ export class PromptBuilder {
    * Build the system prompt that sets up the LLM's behavior
    * @returns {string} System prompt
    */
-  buildSystemPrompt() {
+  buildSystemPrompt(tone = 'natural') {
+    const toneGuide = {
+      formal:  'Use polished, professional language. Complete sentences, measured phrasing, appropriate for a formal application. No contractions.',
+      natural: 'Sound like a real person — confident but not stiff, specific but not robotic. Contractions are fine. Natural conversational flow.',
+      direct:  'Be concise and direct. Lead with the strongest point immediately. Short sentences. No filler phrases or qualifiers. Cut anything that does not add information.'
+    }[tone] || '';
+
     return `You are an expert career coach helping a job candidate write authentic, compelling answers to job application questions.
 
 CRITICAL INSTRUCTIONS:
@@ -141,23 +147,23 @@ CRITICAL INSTRUCTIONS:
 5. Sound human and genuine - avoid corporate buzzwords and AI-speak.
 6. Avoid recency bias: do NOT default to the most recent role. Select the BEST evidence from anywhere in the CV that fits the question.
 
+TONE: ${toneGuide}
+
 ANTI-AI PATTERNS TO AVOID:
 - Starting with "I'm excited to..." or "I'm passionate about..."
 - Using "leverage" as a verb
 - Phrases like "proven track record" or "results-driven professional"
 - Overusing "I believe" or "I feel"
 - Generic statements that could apply to anyone
-- Overly formal or robotic language
 - Lists of buzzwords without substance
 
 GOOD PATTERNS:
 - Specific examples from the CV with concrete details
-- Natural conversational flow
 - Honest reflection on experience
 - Connecting past experience to the question's context
 - Showing genuine interest without being sycophantic
 
-The answer should feel like something the candidate would naturally write themselves - not too polished, not too casual, but authentic and confident.`;
+The answer should feel like something the candidate would naturally write themselves - authentic and confident.`;
   }
 
   /**
@@ -394,7 +400,7 @@ Rules:
           ? (salaryLengths[length] || salaryLengths.medium)
           : lengthSpec;
 
-    const systemPrompt = this.buildSystemPrompt();
+    const systemPrompt = this.buildSystemPrompt(options.tone || 'natural');
     const cvContext = this.buildCVContext(cvData, questionType);
     const jobContext = this.buildJobContext(options.jobDescription, options.jobTitle, options.company);
     const typeInstructions = this.buildTypeInstructions(questionType);
