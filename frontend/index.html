@@ -9,9 +9,63 @@
 <body>
   <div class="container">
     <header>
-      <h1>DraftApply</h1>
+      <div class="header-main">
+        <h1>DraftApply</h1>
+        <button class="btn-icon" id="settings-btn" title="LLM Settings" aria-label="LLM Settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
+      </div>
       <p class="subtitle">Generate authentic answers to job application questions using your CV</p>
     </header>
+
+    <!-- LLM Settings Modal -->
+    <div class="modal-overlay" id="settings-modal" hidden>
+      <div class="modal-box" role="dialog" aria-modal="true" aria-label="LLM Settings">
+        <div class="modal-header">
+          <h3>LLM Settings</h3>
+          <button class="btn-icon modal-close" id="close-settings-btn" aria-label="Close">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <p class="settings-hint">Leave on <strong>Default (Groq)</strong> and the platform works out of the box. Choose a custom provider to use your own API key.</p>
+
+          <div class="form-group">
+            <label for="setting-provider">Provider</label>
+            <select id="setting-provider">
+              <option value="">Default (Groq)</option>
+              <option value="groq">Groq</option>
+              <option value="openai">OpenAI</option>
+              <option value="anthropic">Anthropic (Claude)</option>
+              <option value="gemini">Google Gemini</option>
+              <option value="mistral">Mistral</option>
+              <option value="together">Together AI</option>
+            </select>
+          </div>
+
+          <div id="setting-custom-fields" hidden>
+            <div class="form-group">
+              <label for="setting-api-key">API Key</label>
+              <input type="password" id="setting-api-key" placeholder="Enter your API key…" autocomplete="off">
+            </div>
+            <div class="form-group">
+              <label for="setting-model">Model <span class="label-hint">(optional — leave empty for default)</span></label>
+              <input type="text" id="setting-model" placeholder="e.g. gpt-4o, claude-3-5-haiku-20241022">
+            </div>
+          </div>
+
+          <div class="modal-actions">
+            <button class="btn btn-primary" id="save-settings-btn">Save Settings</button>
+            <button class="btn btn-secondary" id="reset-settings-btn">Reset to Default</button>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <main>
       <!-- CV Section -->

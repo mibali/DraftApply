@@ -23,6 +23,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     pageStatusDot: document.getElementById('page-status-dot'),
     pageStatusText: document.getElementById('page-status-text'),
     activateBtn: document.getElementById('activate-btn'),
+    // LLM settings
+    toggleLlmBtn: document.getElementById('toggle-llm-btn'),
+    llmSettingsPanel: document.getElementById('llm-settings-panel'),
+    llmBadge: document.getElementById('llm-badge'),
+    llmProviderSelect: document.getElementById('llm-provider-select'),
+    llmKeyField: document.getElementById('llm-key-field'),
+    llmModelField: document.getElementById('llm-model-field'),
+    llmApiKey: document.getElementById('llm-api-key'),
+    llmModel: document.getElementById('llm-model'),
+    saveLlmBtn: document.getElementById('save-llm-btn'),
+    resetLlmBtn: document.getElementById('reset-llm-btn'),
   };
 
   let proxyUrl = null; // Will be set by checkProxy()
@@ -40,6 +51,19 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (elements.activateBtn) {
     elements.activateBtn.addEventListener('click', activateOnPage);
   }
+
+  // LLM settings
+  await loadLLMSettings();
+  elements.toggleLlmBtn.addEventListener('click', () => {
+    elements.llmSettingsPanel.hidden = !elements.llmSettingsPanel.hidden;
+  });
+  elements.llmProviderSelect.addEventListener('change', () => {
+    const hasProvider = !!elements.llmProviderSelect.value;
+    elements.llmKeyField.hidden = !hasProvider;
+    elements.llmModelField.hidden = !hasProvider;
+  });
+  elements.saveLlmBtn.addEventListener('click', saveLLMSettings);
+  elements.resetLlmBtn.addEventListener('click', resetLLMSettings);
   
   // File upload handling
   elements.uploadArea.addEventListener('click', () => elements.cvFile.click());
@@ -259,5 +283,52 @@ document.addEventListener('DOMContentLoaded', async () => {
       elements.activateBtn.textContent = 'Activate on this page';
       showMessage('Could not activate: ' + err.message, 'error');
     }
+  }
+
+  // ── LLM Settings ──────────────────────────────────────────────────────────
+
+  async function loadLLMSettings() {
+    const { llmConfig } = await chrome.storage.local.get('llmConfig');
+    if (llmConfig?.provider && llmConfig?.apiKey) {
+      elements.llmProviderSelect.value = llmConfig.provider;
+      elements.llmApiKey.value = llmConfig.apiKey;
+      elements.llmModel.value = llmConfig.model || '';
+      elements.llmKeyField.hidden = false;
+      elements.llmModelField.hidden = false;
+      elements.llmBadge.textContent = llmConfig.provider + (llmConfig.model ? ` / ${llmConfig.model}` : '');
+    }
+  }
+
+  async function saveLLMSettings() {
+    const provider = elements.llmProviderSelect.value;
+    const apiKey = elements.llmApiKey.value.trim();
+    const model = elements.llmModel.value.trim();
+
+    if (provider && !apiKey) {
+      showMessage('Please enter an API key', 'error');
+      return;
+    }
+
+    if (!provider) {
+      return resetLLMSettings();
+    }
+
+    const llmConfig = { provider, apiKey, model: model || '' };
+    await chrome.storage.local.set({ llmConfig });
+    elements.llmBadge.textContent = provider + (model ? ` / ${model}` : '');
+    elements.llmSettingsPanel.hidden = true;
+    showMessage(`Saved — using ${provider}`);
+  }
+
+  async function resetLLMSettings() {
+    await chrome.storage.local.remove('llmConfig');
+    elements.llmProviderSelect.value = '';
+    elements.llmApiKey.value = '';
+    elements.llmModel.value = '';
+    elements.llmKeyField.hidden = true;
+    elements.llmModelField.hidden = true;
+    elements.llmBadge.textContent = 'Default (Groq)';
+    elements.llmSettingsPanel.hidden = true;
+    showMessage('Reset to default (Groq)');
   }
 });

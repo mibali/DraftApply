@@ -389,7 +389,10 @@ async function withRetry(fn, maxRetries = 2) {
 }
 
 /**
- * Make API call to proxy for answer generation
+ * Make API call to proxy for answer generation.
+ * If the user has configured a custom LLM provider in chrome.storage,
+ * it is forwarded to the proxy as `llmConfig` so the proxy uses it
+ * (and falls back to the default Groq key if it fails).
  */
 async function handleAPICall(payload, requestId) {
   const proxyUrl = await getProxyUrl();
@@ -399,6 +402,12 @@ async function handleAPICall(payload, requestId) {
 
   // Hard timeout so the UI never spins forever
   const timeout = setTimeout(() => controller.abort(), 120000);
+
+  // Attach user's custom LLM config if configured
+  const { llmConfig } = await chrome.storage.local.get('llmConfig');
+  const enrichedPayload = (llmConfig?.provider && llmConfig?.apiKey)
+    ? { ...payload, llmConfig }
+    : payload;
 
   try {
     let token = await ensureInstallToken(proxyUrl);
@@ -411,7 +420,7 @@ async function handleAPICall(payload, requestId) {
           Authorization: `Bearer ${token}`
         },
         signal: controller.signal,
-        body: JSON.stringify(payload)
+        body: JSON.stringify(enrichedPayload)
       });
 
     let response = await withRetry(async () => {

@@ -13,6 +13,56 @@
 import { CVParser } from '../shared/cv-parser.js';
 import { PromptBuilder } from '../shared/prompt-builder.js';
 
+const LLM_SETTINGS_KEY = 'draftapply_llm_settings';
+
+// Manages user-configured LLM provider (stored in localStorage)
+class LLMSettings {
+  constructor() {
+    this.settings = this._load();
+  }
+
+  _load() {
+    try {
+      const raw = localStorage.getItem(LLM_SETTINGS_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  save(provider, apiKey, model) {
+    if (!provider || !apiKey) {
+      this.clear();
+      return;
+    }
+    this.settings = { provider, apiKey, model: model || '' };
+    localStorage.setItem(LLM_SETTINGS_KEY, JSON.stringify(this.settings));
+  }
+
+  clear() {
+    this.settings = null;
+    localStorage.removeItem(LLM_SETTINGS_KEY);
+  }
+
+  // Returns the llmConfig object to include in API requests, or null for default
+  getLLMConfig() {
+    if (!this.settings?.provider || !this.settings?.apiKey) return null;
+    return {
+      provider: this.settings.provider,
+      apiKey: this.settings.apiKey,
+      model: this.settings.model || undefined
+    };
+  }
+
+  isCustom() {
+    return !!this.getLLMConfig();
+  }
+
+  getProvider() {
+    return this.settings?.provider || null;
+  }
+}
+
 // Configuration
 function getApiEndpoint() {
   const url = new URL(window.location.href);
@@ -206,9 +256,10 @@ class JobManager {
 
 // Answer Service - handles API communication
 class AnswerService {
-  constructor(cvManager, jobManager) {
+  constructor(cvManager, jobManager, llmSettings) {
     this.cvManager = cvManager;
     this.jobManager = jobManager;
+    this.llmSettings = llmSettings;
     this.promptBuilder = new PromptBuilder();
   }
 
@@ -230,15 +281,21 @@ class AnswerService {
       }
     );
 
+    const body = {
+      systemPrompt: prompt.systemPrompt,
+      userPrompt: prompt.userPrompt,
+      temperature: 0.7,
+      stream: options.stream || false
+    };
+
+    // Include user's LLM config if configured
+    const llmConfig = this.llmSettings?.getLLMConfig();
+    if (llmConfig) body.llmConfig = llmConfig;
+
     const response = await fetch(`${CONFIG.apiEndpoint}/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        systemPrompt: prompt.systemPrompt,
-        userPrompt: prompt.userPrompt,
-        temperature: 0.7,
-        stream: options.stream || false
-      })
+      body: JSON.stringify(body)
     });
 
     if (!response.ok) {
@@ -316,10 +373,11 @@ class AnswerService {
 
 // UI Controller - handles DOM interactions
 class UIController {
-  constructor(cvManager, jobManager, answerService) {
+  constructor(cvManager, jobManager, answerService, llmSettings) {
     this.cvManager = cvManager;
     this.jobManager = jobManager;
     this.answerService = answerService;
+    this.llmSettings = llmSettings;
     this.selectedLength = 'medium';
     this.lastAnswer = null;
     this.lastQuestion = null;
@@ -328,6 +386,7 @@ class UIController {
     this.bindEvents();
     this.checkSavedCV();
     this.checkSavedJob();
+    this.applyLLMSettings();
   }
 
   initElements() {
@@ -370,6 +429,18 @@ class UIController {
     // Global
     this.loadingOverlay = document.getElementById('loading-overlay');
     this.toast = document.getElementById('toast');
+
+    // Settings modal
+    this.settingsModal = document.getElementById('settings-modal');
+    this.settingsBtn = document.getElementById('settings-btn');
+    this.closeSettingsBtn = document.getElementById('close-settings-btn');
+    this.settingProvider = document.getElementById('setting-provider');
+    this.settingCustomFields = document.getElementById('setting-custom-fields');
+    this.settingApiKey = document.getElementById('setting-api-key');
+    this.settingModel = document.getElementById('setting-model');
+    this.saveSettingsBtn = document.getElementById('save-settings-btn');
+    this.resetSettingsBtn = document.getElementById('reset-settings-btn');
+    this.llmProviderEl = document.getElementById('llm-provider');
   }
 
   bindEvents() {
@@ -419,6 +490,18 @@ class UIController {
 
     // Copy
     this.copyBtn.addEventListener('click', () => this.copyAnswer());
+
+    // Settings modal
+    this.settingsBtn.addEventListener('click', () => this.openSettings());
+    this.closeSettingsBtn.addEventListener('click', () => this.closeSettings());
+    this.settingsModal.addEventListener('click', (e) => {
+      if (e.target === this.settingsModal) this.closeSettings();
+    });
+    this.settingProvider.addEventListener('change', () => {
+      this.settingCustomFields.hidden = !this.settingProvider.value;
+    });
+    this.saveSettingsBtn.addEventListener('click', () => this.saveSettings());
+    this.resetSettingsBtn.addEventListener('click', () => this.resetSettings());
   }
 
   checkSavedCV() {
@@ -553,6 +636,66 @@ class UIController {
     this.generateBtn.disabled = !(hasCV && hasQuestion);
   }
 
+  // ── LLM Settings ──────────────────────────────────────────
+  applyLLMSettings() {
+    if (!this.llmProviderEl) return;
+    if (this.llmSettings.isCustom()) {
+      this.llmProviderEl.textContent = this.llmSettings.getProvider();
+      this.llmProviderEl.classList.add('custom');
+    }
+    // If not custom, the LLM status check will update the text
+  }
+
+  openSettings() {
+    const s = this.llmSettings.settings;
+    this.settingProvider.value = s?.provider || '';
+    this.settingApiKey.value = s?.apiKey || '';
+    this.settingModel.value = s?.model || '';
+    this.settingCustomFields.hidden = !this.settingProvider.value;
+    this.settingsModal.hidden = false;
+  }
+
+  closeSettings() {
+    this.settingsModal.hidden = true;
+  }
+
+  saveSettings() {
+    const provider = this.settingProvider.value;
+    const apiKey = this.settingApiKey.value.trim();
+    const model = this.settingModel.value.trim();
+
+    if (provider && !apiKey) {
+      this.showToast('Please enter an API key for the selected provider', 'error');
+      return;
+    }
+
+    this.llmSettings.save(provider, apiKey, model);
+    this.closeSettings();
+
+    if (provider) {
+      this.showToast(`Saved — using ${provider}${model ? ' / ' + model : ''}`);
+      if (this.llmProviderEl) {
+        this.llmProviderEl.textContent = provider + (model ? ` (${model})` : '');
+        this.llmProviderEl.classList.add('custom');
+      }
+    } else {
+      this.showToast('Reset to default provider (Groq)');
+    }
+  }
+
+  resetSettings() {
+    this.settingProvider.value = '';
+    this.settingApiKey.value = '';
+    this.settingModel.value = '';
+    this.settingCustomFields.hidden = true;
+    this.llmSettings.clear();
+    this.closeSettings();
+    this.showToast('Reset to default provider (Groq)');
+    if (this.llmProviderEl) {
+      this.llmProviderEl.classList.remove('custom');
+    }
+  }
+
   async generateAnswer() {
     const question = this.questionInput.value.trim();
     if (!question) return;
@@ -642,26 +785,29 @@ class UIController {
 document.addEventListener('DOMContentLoaded', async () => {
   const cvManager = new CVManager();
   const jobManager = new JobManager();
-  const answerService = new AnswerService(cvManager, jobManager);
-  const ui = new UIController(cvManager, jobManager, answerService);
-  
-  // Check LLM status
-  try {
-    const response = await fetch(`${CONFIG.apiEndpoint}/llm-status`);
-    const status = await response.json();
-    
-    const providerEl = document.getElementById('llm-provider');
-    if (providerEl) {
-      providerEl.textContent = `${status.provider} (${status.model})`;
+  const llmSettings = new LLMSettings();
+  const answerService = new AnswerService(cvManager, jobManager, llmSettings);
+  const ui = new UIController(cvManager, jobManager, answerService, llmSettings);
+
+  // Check LLM status (shows server default; custom provider label set by applyLLMSettings)
+  if (!llmSettings.isCustom()) {
+    try {
+      const response = await fetch(`${CONFIG.apiEndpoint}/llm-status`);
+      const status = await response.json();
+
+      const providerEl = document.getElementById('llm-provider');
+      if (providerEl) {
+        providerEl.textContent = `${status.providerName || status.provider} (${status.model})`;
+      }
+
+      if (!status.available) {
+        ui.showToast(status.hint || 'Default LLM not available — configure your own key in Settings', 'error');
+      }
+    } catch (e) {
+      console.warn('Could not check LLM status');
     }
-    
-    if (!status.available) {
-      ui.showToast(status.hint || 'LLM not available', 'error');
-    }
-  } catch (e) {
-    console.warn('Could not check LLM status');
   }
 });
 
 // Export for extension reuse
-export { CVManager, JobManager, AnswerService, CONFIG };
+export { CVManager, JobManager, AnswerService, LLMSettings, CONFIG };

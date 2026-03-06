@@ -1,16 +1,17 @@
 /**
  * LLM Provider Abstraction
- * 
+ *
  * Supports multiple free LLM providers:
- * 
+ *
  * LOCAL (no API key, fully private):
  * - Ollama: Easy local setup
  * - LM Studio: GUI app with API
  * - LocalAI: OpenAI-compatible local server
- * 
+ *
  * CLOUD (free tiers, API key required):
- * - Groq: Very fast, generous free tier
+ * - Groq: Very fast, generous free tier (DEFAULT)
  * - Google Gemini: 15 RPM free
+ * - Anthropic: Claude models
  * - Mistral: Free tier available
  * - Together AI: $5 free credit
  * - OpenAI: Paid, but included for completeness
@@ -77,6 +78,14 @@ export const PROVIDERS = {
     setupHint: 'Get $5 free credit at https://together.ai'
   },
   
+  anthropic: {
+    name: 'Anthropic',
+    type: 'cloud',
+    defaultModel: 'claude-3-5-haiku-20241022',
+    baseUrl: 'https://api.anthropic.com/v1',
+    setupHint: 'Get API key at https://console.anthropic.com'
+  },
+
   openai: {
     name: 'OpenAI',
     type: 'cloud',
@@ -373,6 +382,108 @@ export async function streamGemini(config, messages, options = {}, res) {
 }
 
 /**
+ * Generate completion using Anthropic
+ */
+export async function generateAnthropic(config, messages, options = {}) {
+  if (!config.apiKey) {
+    throw new Error('Anthropic API key required');
+  }
+
+  const systemMsg = messages.find(m => m.role === 'system');
+  const userMessages = messages
+    .filter(m => m.role !== 'system')
+    .map(m => ({ role: m.role, content: m.content }));
+
+  const body = {
+    model: config.model,
+    max_tokens: 4096,
+    messages: userMessages,
+    temperature: options.temperature || 0.7
+  };
+  if (systemMsg) body.system = systemMsg.content;
+
+  const response = await fetch(`${config.baseUrl}/messages`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': config.apiKey,
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.error?.message || `Anthropic error: ${response.status}`);
+  }
+
+  const data = await response.json();
+  const text = data.content?.[0]?.text;
+  if (!text) throw new Error('No response from Anthropic');
+  return { answer: text };
+}
+
+/**
+ * Stream completion using Anthropic
+ */
+export async function streamAnthropic(config, messages, options = {}, res) {
+  if (!config.apiKey) {
+    throw new Error('Anthropic API key required');
+  }
+
+  const systemMsg = messages.find(m => m.role === 'system');
+  const userMessages = messages
+    .filter(m => m.role !== 'system')
+    .map(m => ({ role: m.role, content: m.content }));
+
+  const body = {
+    model: config.model,
+    max_tokens: 4096,
+    messages: userMessages,
+    temperature: options.temperature || 0.7,
+    stream: true
+  };
+  if (systemMsg) body.system = systemMsg.content;
+
+  const response = await fetch(`${config.baseUrl}/messages`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': config.apiKey,
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!response.ok) {
+    throw new Error(`Anthropic error: ${response.statusText}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    const chunk = decoder.decode(value, { stream: true });
+    const lines = chunk.split('\n').filter(l => l.startsWith('data: '));
+
+    for (const line of lines) {
+      try {
+        const data = JSON.parse(line.slice(6));
+        if (data.type === 'content_block_delta' && data.delta?.type === 'text_delta') {
+          res.write(`data: ${JSON.stringify({ text: data.delta.text })}\n\n`);
+        }
+      } catch (e) {}
+    }
+  }
+
+  res.write('data: [DONE]\n\n');
+  res.end();
+}
+
+/**
  * Main generate function - routes to correct provider
  */
 export async function generate(providerName, config, messages, options = {}) {
@@ -381,6 +492,8 @@ export async function generate(providerName, config, messages, options = {}) {
       return generateOllama(config, messages, options);
     case 'gemini':
       return generateGemini(config, messages, options);
+    case 'anthropic':
+      return generateAnthropic(config, messages, options);
     case 'lmstudio':
     case 'localai':
     case 'groq':
@@ -402,6 +515,8 @@ export async function stream(providerName, config, messages, options = {}, res) 
       return streamOllama(config, messages, options, res);
     case 'gemini':
       return streamGemini(config, messages, options, res);
+    case 'anthropic':
+      return streamAnthropic(config, messages, options, res);
     case 'lmstudio':
     case 'localai':
     case 'groq':
@@ -452,13 +567,27 @@ export async function checkProvider(providerName, config) {
         if (!config.apiKey) {
           return { available: false, hint: 'API key required' };
         }
-        
+
         const response = await fetch(
           `${config.baseUrl}/models?key=${config.apiKey}`
         );
         return { available: response.ok };
       }
-      
+
+      case 'anthropic': {
+        if (!config.apiKey) {
+          return { available: false, hint: 'API key required' };
+        }
+
+        const response = await fetch(`${config.baseUrl}/models`, {
+          headers: {
+            'x-api-key': config.apiKey,
+            'anthropic-version': '2023-06-01'
+          }
+        });
+        return { available: response.ok };
+      }
+
       case 'groq':
       case 'mistral':
       case 'together':
@@ -466,7 +595,7 @@ export async function checkProvider(providerName, config) {
         if (!config.apiKey) {
           return { available: false, hint: 'API key required' };
         }
-        
+
         const response = await fetch(`${config.baseUrl}/models`, {
           headers: { 'Authorization': `Bearer ${config.apiKey}` }
         });
@@ -513,55 +642,62 @@ export async function generateWithFallback(fallbackChain, messages, options = {}
  */
 export function buildFallbackChain(env = {}) {
   const chain = [];
-  
-  // Primary provider (if set)
-  const primary = env.LLM_PROVIDER || 'ollama';
+
+  // Primary provider (if set) — default is groq
+  const primary = env.LLM_PROVIDER || 'groq';
   const primaryConfig = getProviderConfig(primary, env);
   chain.push({ name: primary, config: primaryConfig });
-  
-  // Add Ollama if not primary and available locally
-  if (primary !== 'ollama') {
-    chain.push({ 
-      name: 'ollama', 
-      config: getProviderConfig('ollama', env) 
-    });
-  }
-  
-  // Add cloud fallbacks if API keys are available
+
+  // Add cloud fallbacks if API keys are available (skip primary)
   if (env.GROQ_API_KEY && primary !== 'groq') {
-    chain.push({ 
-      name: 'groq', 
-      config: getProviderConfig('groq', env) 
+    chain.push({
+      name: 'groq',
+      config: getProviderConfig('groq', env)
     });
   }
-  
+
   if (env.GEMINI_API_KEY && primary !== 'gemini') {
-    chain.push({ 
-      name: 'gemini', 
-      config: getProviderConfig('gemini', env) 
+    chain.push({
+      name: 'gemini',
+      config: getProviderConfig('gemini', env)
     });
   }
-  
+
+  if (env.ANTHROPIC_API_KEY && primary !== 'anthropic') {
+    chain.push({
+      name: 'anthropic',
+      config: getProviderConfig('anthropic', env)
+    });
+  }
+
   if (env.MISTRAL_API_KEY && primary !== 'mistral') {
-    chain.push({ 
-      name: 'mistral', 
-      config: getProviderConfig('mistral', env) 
+    chain.push({
+      name: 'mistral',
+      config: getProviderConfig('mistral', env)
     });
   }
-  
+
   if (env.TOGETHER_API_KEY && primary !== 'together') {
-    chain.push({ 
-      name: 'together', 
-      config: getProviderConfig('together', env) 
+    chain.push({
+      name: 'together',
+      config: getProviderConfig('together', env)
     });
   }
-  
+
   if (env.OPENAI_API_KEY && primary !== 'openai') {
-    chain.push({ 
-      name: 'openai', 
-      config: getProviderConfig('openai', env) 
+    chain.push({
+      name: 'openai',
+      config: getProviderConfig('openai', env)
     });
   }
-  
+
+  // Add Ollama as local last-resort fallback
+  if (primary !== 'ollama') {
+    chain.push({
+      name: 'ollama',
+      config: getProviderConfig('ollama', env)
+    });
+  }
+
   return chain;
 }

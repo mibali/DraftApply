@@ -425,6 +425,43 @@
 
   </div>
 
+  <!-- LLM Settings -->
+  <div style="padding: 0 14px 4px;">
+    <button id="toggle-llm-btn" style="width:100%;padding:7px 10px;background:#f1f5f9;border:1.5px solid #e2e8f0;border-radius:8px;font-size:12px;font-weight:600;color:#475569;cursor:pointer;text-align:left;display:flex;align-items:center;justify-content:space-between;">
+      <span>LLM Settings</span>
+      <span id="llm-badge" style="font-size:11px;color:#94a3b8;">Default (Groq)</span>
+    </button>
+    <div id="llm-settings-panel" hidden style="margin-top:8px;padding:12px;background:white;border:1.5px solid #e2e8f0;border-radius:8px;">
+      <p style="font-size:11.5px;color:#64748b;margin-bottom:10px;line-height:1.5;">Leave on Default to use the shared Groq backend. Set your own key to use a different provider.</p>
+      <div style="margin-bottom:8px;">
+        <label style="font-size:11px;font-weight:600;color:#475569;display:block;margin-bottom:4px;">Provider</label>
+        <select id="llm-provider-select" style="width:100%;padding:6px 8px;border:1.5px solid #e2e8f0;border-radius:6px;font-size:12.5px;font-family:inherit;color:#1e293b;background:white;">
+          <option value="">Default (Groq)</option>
+          <option value="groq">Groq</option>
+          <option value="openai">OpenAI</option>
+          <option value="anthropic">Anthropic (Claude)</option>
+          <option value="gemini">Google Gemini</option>
+          <option value="mistral">Mistral</option>
+          <option value="together">Together AI</option>
+        </select>
+      </div>
+      <div id="llm-key-field" hidden style="margin-bottom:8px;">
+        <label style="font-size:11px;font-weight:600;color:#475569;display:block;margin-bottom:4px;">API Key</label>
+        <input type="password" id="llm-api-key" placeholder="Enter your API key…" autocomplete="off"
+          style="width:100%;padding:6px 8px;border:1.5px solid #e2e8f0;border-radius:6px;font-size:12.5px;font-family:inherit;color:#1e293b;">
+      </div>
+      <div id="llm-model-field" hidden style="margin-bottom:10px;">
+        <label style="font-size:11px;font-weight:600;color:#475569;display:block;margin-bottom:4px;">Model <span style="font-weight:400;color:#94a3b8;">(optional)</span></label>
+        <input type="text" id="llm-model" placeholder="Leave empty for default model"
+          style="width:100%;padding:6px 8px;border:1.5px solid #e2e8f0;border-radius:6px;font-size:12.5px;font-family:inherit;color:#1e293b;">
+      </div>
+      <div style="display:flex;gap:6px;">
+        <button class="btn btn-primary" id="save-llm-btn" style="flex:1;margin-top:0;font-size:12.5px;padding:7px;">Save</button>
+        <button class="btn btn-secondary" id="reset-llm-btn" style="flex:1;margin-top:0;font-size:12.5px;padding:7px;">Reset</button>
+      </div>
+    </div>
+  </div>
+
   <div class="da-footer">
     Click the <strong>DA</strong> button next to any field, or highlight a question and right-click.
   </div>

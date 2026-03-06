@@ -42,8 +42,8 @@ const __dirname = dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Get current provider configuration
-const PROVIDER_NAME = process.env.LLM_PROVIDER || 'ollama';
+// Get current provider configuration — default is Groq
+const PROVIDER_NAME = process.env.LLM_PROVIDER || 'groq';
 const PROVIDER_CONFIG = getProviderConfig(PROVIDER_NAME, process.env);
 
 // Build fallback chain for reliability
@@ -172,10 +172,14 @@ app.post('/api/cv/upload', upload.single('cv'), async (req, res) => {
 
 /**
  * Answer Generation endpoint
+ *
+ * Accepts optional `llmConfig` in request body to use a user-supplied provider:
+ *   { provider: 'openai', apiKey: 'sk-...', model: 'gpt-4o' }
+ * On failure, falls back to the server's default provider chain.
  */
 app.post('/api/generate', async (req, res) => {
   try {
-    const { systemPrompt, userPrompt, temperature, stream: useStream } = req.body;
+    const { systemPrompt, userPrompt, temperature, stream: useStream, llmConfig } = req.body;
 
     if (!systemPrompt || !userPrompt) {
       return res.status(400).json({ error: 'Missing prompt data' });
@@ -188,15 +192,46 @@ app.post('/api/generate', async (req, res) => {
 
     const options = { temperature: temperature || 0.7 };
 
+    // Resolve user-supplied provider config (if provided and valid)
+    let userProviderName = null;
+    let userProviderConfig = null;
+    if (llmConfig?.provider && llmConfig?.apiKey && PROVIDERS[llmConfig.provider]) {
+      userProviderName = llmConfig.provider;
+      userProviderConfig = {
+        ...PROVIDERS[llmConfig.provider],
+        apiKey: llmConfig.apiKey,
+        model: llmConfig.model || PROVIDERS[llmConfig.provider].defaultModel
+      };
+    }
+
     if (useStream) {
-      // Streaming doesn't support fallback yet - uses primary provider
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
 
+      // Try user's provider first, then fall back to server default
+      if (userProviderName && userProviderConfig) {
+        try {
+          await stream(userProviderName, userProviderConfig, messages, options, res);
+          return;
+        } catch (e) {
+          if (res.writableEnded) return; // already started streaming, can't recover
+          console.warn(`[Stream] User provider ${userProviderName} failed:`, e.message);
+        }
+      }
       await stream(PROVIDER_NAME, PROVIDER_CONFIG, messages, options, res);
     } else {
-      // Use fallback chain for non-streaming requests
+      // Try user's provider first
+      if (userProviderName && userProviderConfig) {
+        try {
+          const result = await generate(userProviderName, userProviderConfig, messages, options);
+          return res.json({ ...result, provider: userProviderName });
+        } catch (e) {
+          console.warn(`[Generate] User provider ${userProviderName} failed, falling back:`, e.message);
+        }
+      }
+
+      // Use server fallback chain
       let result;
       if (USE_FALLBACK && FALLBACK_CHAIN.length > 1) {
         result = await generateWithFallback(FALLBACK_CHAIN, messages, options);
@@ -209,10 +244,10 @@ app.post('/api/generate', async (req, res) => {
 
   } catch (error) {
     console.error('Generation error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Failed to generate answer',
       details: error.message,
-      hint: 'Check that at least one LLM provider is running (Ollama, or set GROQ_API_KEY/GEMINI_API_KEY)'
+      hint: 'Check that GROQ_API_KEY is set, or configure a provider in the UI'
     });
   }
 });
