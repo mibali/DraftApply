@@ -421,6 +421,10 @@ async function handleStreamingAPICall(payload, requestId, tabId, frameId) {
 
   const timeout = setTimeout(() => controller.abort(), 120000);
 
+  // MV3 service workers can be terminated after ~30s of inactivity.
+  // Touching chrome.storage every 20s keeps the SW alive during long streams.
+  const keepAlive = setInterval(() => chrome.storage.local.get('_sw_keepalive'), 20000);
+
   const { llmConfig } = await chrome.storage.local.get('llmConfig');
   const enrichedPayload = (llmConfig?.provider && llmConfig?.apiKey)
     ? { ...payload, llmConfig, stream: true }
@@ -497,6 +501,7 @@ async function handleStreamingAPICall(payload, requestId, tabId, frameId) {
     }
     throw e;
   } finally {
+    clearInterval(keepAlive);
     clearTimeout(timeout);
     pendingRequests.delete(effectiveRequestId);
   }

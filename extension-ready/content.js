@@ -805,7 +805,24 @@ class DraftApplyExtension {
       if (answer) {
         this.lastAnswer = answer;
       } else {
-        output.value = 'Error: No answer received. Please try again.';
+        // No chunks received — proxy may not support SSE or buffered the response.
+        // Fall back to non-streaming CALL_API and display the result normally.
+        const fallback = await chrome.runtime.sendMessage({
+          type: 'CALL_API',
+          requestId,
+          payload: structuredPayload
+        });
+
+        if (this.currentRequestId !== requestId) return; // cancelled while falling back
+
+        if (fallback?.answer) {
+          output.value = fallback.answer;
+          this.lastAnswer = fallback.answer;
+        } else if (fallback?.error) {
+          output.value = `Error: ${fallback.error}`;
+        } else {
+          output.value = 'Error: No answer received. Please try again.';
+        }
       }
 
     } catch (error) {
