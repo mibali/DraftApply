@@ -268,6 +268,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === 'GET_TOKEN') {
+    // Returns the cached/refreshed install token via the shared ensureInstallToken path.
+    // Popup uses this for CV upload so we don't mint a fresh token on every file.
+    getProxyUrl()
+      .then(proxyUrl => ensureInstallToken(proxyUrl))
+      .then(token => sendResponse({ token, proxyUrl: DEFAULT_PROXY_URL }))
+      .catch(err => sendResponse({ error: err.message }));
+    return true;
+  }
+
   if (message.type === 'GET_CV') {
     chrome.storage.local.get('cvText', (result) => {
       sendResponse({ cvText: result.cvText || null });

@@ -162,13 +162,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       const formData = new FormData();
       formData.append('cv', file);
 
-      const tokenResp = await fetch(`${proxyUrl}/api/register`, {
-        method: 'POST',
-        signal: controller.signal
-      });
-      const tokenData = await tokenResp.json().catch(() => ({}));
-      const token = tokenData.token;
-      if (!token) throw new Error('Could not register with proxy');
+      // Use the shared token from background (cached, mutex-protected).
+      // Never call /api/register directly from popup — it bypasses caching
+      // and mints a fresh orphaned token on every upload.
+      const tokenResult = await chrome.runtime.sendMessage({ type: 'GET_TOKEN' });
+      const token = tokenResult?.token;
+      if (!token) throw new Error(tokenResult?.error || 'Could not get proxy token');
 
       const response = await fetch(`${proxyUrl}/api/cv/upload`, {
         method: 'POST',
