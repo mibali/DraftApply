@@ -234,6 +234,45 @@ input[type="text"]:focus {
   color: white;
 }
 
+/* Form row — side-by-side groups */
+.form-row {
+  display: flex;
+  gap: 1rem;
+}
+
+.form-row .form-group {
+  flex: 1;
+}
+
+/* Tone Options */
+.tone-options {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.tone-btn {
+  flex: 1;
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.tone-btn:hover {
+  border-color: #7c3aed;
+  color: #7c3aed;
+}
+
+.tone-btn.active {
+  background: #7c3aed;
+  border-color: #7c3aed;
+  color: white;
+}
+
 /* Buttons */
 .btn {
   display: inline-flex;

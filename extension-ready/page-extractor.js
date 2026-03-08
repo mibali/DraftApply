@@ -75,13 +75,40 @@ class PageExtractor {
   }
 
   /**
+   * Extract from application/ld+json JobPosting schema (most reliable)
+   */
+  extractFromStructuredData() {
+    const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+    for (const script of scripts) {
+      try {
+        const data = JSON.parse(script.textContent);
+        const items = Array.isArray(data) ? data : [data, ...(data['@graph'] || [])];
+        for (const item of items) {
+          if (item['@type'] === 'JobPosting') {
+            return {
+              title: item.title || item.name || null,
+              company: item.hiringOrganization?.name || item.employer?.name || null,
+              description: item.description || item.jobDescription || null
+            };
+          }
+        }
+      } catch (e) {}
+    }
+    return null;
+  }
+
+  /**
    * Extract job title using platform-specific selectors
    */
   extractJobTitle() {
+    // 1. Structured data is most reliable
+    const structured = this.extractFromStructuredData();
+    if (structured?.title) return structured.title;
+
     const selectors = [
       // Common patterns
-      'h1.job-title', 'h1[class*="title"]', '.job-title h1',
-      '[data-testid="job-title"]', '[class*="JobTitle"]',
+      'h1.job-title', 'h1[class*="title"]', 'h1[class*="Title"]', '.job-title h1',
+      '[data-testid="job-title"]', '[class*="JobTitle"]', '[class*="job-title"]',
       // Indeed
       '.jobsearch-JobInfoHeader-title',
       // LinkedIn
@@ -106,7 +133,7 @@ class PageExtractor {
 
     // Try meta tags
     const ogTitle = document.querySelector('meta[property="og:title"]');
-    if (ogTitle) return ogTitle.content;
+    if (ogTitle?.content) return ogTitle.content;
 
     return document.title.split('|')[0].split('-')[0].trim();
   }
@@ -115,6 +142,10 @@ class PageExtractor {
    * Extract company name
    */
   extractCompany() {
+    // 1. Structured data first
+    const structured = this.extractFromStructuredData();
+    if (structured?.company) return structured.company;
+
     const selectors = [
       // Common patterns
       '[class*="company"]', '[class*="Company"]',
@@ -141,16 +172,6 @@ class PageExtractor {
       }
     }
 
-    // Try structured data
-    const ldJson = document.querySelector('script[type="application/ld+json"]');
-    if (ldJson) {
-      try {
-        const data = JSON.parse(ldJson.textContent);
-        if (data.hiringOrganization?.name) return data.hiringOrganization.name;
-        if (data.employer?.name) return data.employer.name;
-      } catch (e) {}
-    }
-
     return '';
   }
 
@@ -158,11 +179,21 @@ class PageExtractor {
    * Extract job description content
    */
   extractJobDescription() {
+    // 1. Structured data — most reliable on company career pages
+    const structured = this.extractFromStructuredData();
+    if (structured?.description?.length > 200) {
+      return this.cleanText(structured.description);
+    }
+
     const selectors = [
       // Common patterns
-      '.job-description', '[class*="description"]',
-      '[class*="Description"]', '#job-description',
+      '.job-description', '[class*="job-description"]', '[class*="job-desc"]',
+      '[class*="jobDescription"]', '[class*="JobDescription"]',
+      '[class*="Description"]', '#job-description', '[id*="job-desc"]',
       '[data-testid="job-description"]',
+      // Job detail/detail pages
+      '[class*="job-detail"]', '[class*="jobDetail"]', '[class*="JobDetail"]',
+      '[class*="position-desc"]', '[class*="role-desc"]',
       // Indeed
       '#jobDescriptionText', '.jobsearch-jobDescriptionText',
       // LinkedIn
@@ -174,15 +205,24 @@ class PageExtractor {
       // Glassdoor
       '[data-test="job-description"]', '.JobDetails_jobDescription__uW_fK',
       '.job-description-wrapper', '[class*="JobDescription"]',
-      // Workable
-      '.job-description-wrapper',
-      // Generic content areas
-      'article', 'main', '.content'
+      // Workable / Ashby / Breezy
+      '.job-description-wrapper', '[class*="job-body"]', '[class*="listing-description"]',
+      // Generic semantic elements — try to find content-rich sections
+      'article', '[role="main"] section', 'main section', '.content', 'main'
     ];
 
     for (const selector of selectors) {
       const el = document.querySelector(selector);
       if (el?.textContent?.trim().length > 200) {
+        return this.cleanText(el.textContent);
+      }
+    }
+
+    // 2. Look for any element containing typical job description keywords
+    const allSections = document.querySelectorAll('section, article, div[class], div[id]');
+    const keywords = /responsibilities|requirements|qualifications|about\s+the\s+role|what\s+you.ll\s+do|about\s+this\s+role|the\s+position/i;
+    for (const el of allSections) {
+      if (el.children.length > 2 && keywords.test(el.textContent) && el.textContent.trim().length > 300) {
         return this.cleanText(el.textContent);
       }
     }
@@ -227,6 +267,21 @@ class PageExtractor {
           text.match(/experience|proficien|knowledge|skill|ability|familiar|degree|year/i)) {
         if (!requirements.includes(text)) {
           requirements.push(text);
+        }
+      }
+    }
+
+    // If DOM extraction found nothing, parse requirements from structured data description
+    if (requirements.length === 0) {
+      const structured = this.extractFromStructuredData();
+      if (structured?.description) {
+        const lines = structured.description.split(/\n|<br\s*\/?>/i);
+        for (const line of lines) {
+          const trimmed = line.replace(/<[^>]+>/g, '').trim();
+          if (trimmed.length > 20 && trimmed.length < 300 &&
+              trimmed.match(/experience|proficien|knowledge|skill|ability|familiar|degree|year/i)) {
+            requirements.push(trimmed);
+          }
         }
       }
     }

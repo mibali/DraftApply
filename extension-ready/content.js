@@ -164,8 +164,8 @@ class DraftApplyExtension {
         </div>
         <div class="da-modal-body">
           <div class="da-context-info" id="da-context-info"></div>
-          <div class="da-question-label">Question</div>
-          <div class="da-question-preview" id="da-question-preview"></div>
+          <div class="da-question-label">Question <span class="da-question-hint">(editable)</span></div>
+          <textarea class="da-question-preview" id="da-question-preview" rows="2" spellcheck="false"></textarea>
           <div class="da-answer-label">Generated Answer</div>
           <textarea class="da-answer-output" id="da-answer-output" placeholder="Your answer will appear here. You can edit it before inserting."></textarea>
           <div class="da-modal-actions">
@@ -191,6 +191,7 @@ class DraftApplyExtension {
             <input type="hidden" id="da-tone-select" value="natural">
             <div class="da-modal-actions-row">
               <button class="da-btn da-btn-regenerate" id="da-btn-regenerate">↺ Regenerate</button>
+              <button class="da-btn da-btn-copy" id="da-btn-copy">⎘ Copy</button>
               <button class="da-btn da-btn-insert" id="da-btn-insert">Insert Answer</button>
             </div>
           </div>
@@ -210,6 +211,7 @@ class DraftApplyExtension {
     modal.querySelector('.da-modal-close').onclick = () => this.hideModal();
     modal.querySelector('#da-btn-insert').onclick = () => this.insertAnswer();
     modal.querySelector('#da-btn-regenerate').onclick = () => this.regenerate();
+    modal.querySelector('#da-btn-copy').onclick = () => this.copyAnswer();
     modal.querySelector('#da-btn-stop').onclick = () => this.cancelGeneration();
     modal.querySelector('#da-length-pills').onclick = (e) => {
       const pill = e.target.closest('.da-length-pill');
@@ -698,7 +700,7 @@ class DraftApplyExtension {
     if (!modal.isConnected) {
       document.body.appendChild(modal);
     }
-    modal.querySelector('#da-question-preview').textContent = question;
+    modal.querySelector('#da-question-preview').value = question;
     modal.querySelector('#da-answer-output').value = '';
     modal.querySelector('#da-loading').hidden = true;
     // Force-show with max-priority inline styles to override any page CSS
@@ -849,8 +851,23 @@ class DraftApplyExtension {
   }
 
   async regenerate() {
-    const question = this.modal.querySelector('#da-question-preview').textContent;
+    const question = this.modal.querySelector('#da-question-preview').value.trim();
     await this.generateAnswer(question);
+  }
+
+  async copyAnswer() {
+    const output = this.modal?.querySelector?.('#da-answer-output');
+    const text = output?.value?.trim();
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      const btn = this.modal.querySelector('#da-btn-copy');
+      const orig = btn.textContent;
+      btn.textContent = '✓ Copied';
+      setTimeout(() => { btn.textContent = orig; }, 1500);
+    } catch (e) {
+      this.showNotification('Failed to copy to clipboard');
+    }
   }
 
   async cancelGeneration(options = {}) {

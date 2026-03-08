@@ -277,7 +277,8 @@ class AnswerService {
       {
         jobTitle: jobData?.jobTitle || options.jobTitle,
         company: jobData?.company || options.company,
-        jobDescription: jobData?.description
+        jobDescription: jobData?.description,
+        tone: options.tone || 'natural'
       }
     );
 
@@ -379,6 +380,7 @@ class UIController {
     this.answerService = answerService;
     this.llmSettings = llmSettings;
     this.selectedLength = 'medium';
+    this.selectedTone = 'natural';
     this.lastAnswer = null;
     this.lastQuestion = null;
 
@@ -416,6 +418,7 @@ class UIController {
     // Question Section
     this.questionInput = document.getElementById('question');
     this.lengthBtns = document.querySelectorAll('.length-btn');
+    this.toneBtns = document.querySelectorAll('.tone-btn');
     this.generateBtn = document.getElementById('generate-btn');
 
     // Answer Section
@@ -478,6 +481,15 @@ class UIController {
         this.lengthBtns.forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         this.selectedLength = btn.dataset.length;
+      });
+    });
+
+    // Tone Selection
+    this.toneBtns.forEach(btn => {
+      btn.addEventListener('click', () => {
+        this.toneBtns.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        this.selectedTone = btn.dataset.tone;
       });
     });
 
@@ -713,6 +725,7 @@ class UIController {
       
       const result = await this.answerService.generate(question, {
         length: this.selectedLength,
+        tone: this.selectedTone,
         stream: true,
         onChunk: (chunk, full) => {
           this.answerOutput.textContent = full;
@@ -722,7 +735,7 @@ class UIController {
       this.lastAnswer = result.answer;
       this.answerSection.classList.remove('streaming');
       
-      let metaText = `Type: ${result.questionType || 'general'} • Length: ${this.selectedLength}`;
+      let metaText = `Type: ${result.questionType || 'general'} • Length: ${this.selectedLength} • Tone: ${this.selectedTone}`;
       if (hasJobContext) {
         metaText += ' • Job-tailored ✓';
       }
