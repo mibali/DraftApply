@@ -289,7 +289,7 @@ class DraftApplyExtension {
 
     // Track last focused field for context menu insert
     document.addEventListener('focusin', (e) => {
-      if (e.target.matches(fieldSelector)) {
+      if (e.target.matches(fieldSelector) && !e.target.closest('#draftapply-modal')) {
         this.lastFocusedField = e.target;
       }
     });
@@ -297,7 +297,7 @@ class DraftApplyExtension {
     // Also track on right-click
     document.addEventListener('contextmenu', (e) => {
       const field = e.target.closest(fieldSelector);
-      if (field) {
+      if (field && !field.closest('#draftapply-modal')) {
         this.lastFocusedField = field;
       }
     });
@@ -419,6 +419,8 @@ class DraftApplyExtension {
         if (buttonMap.has(field)) return;
         if (field.tagName === 'INPUT' && field.offsetWidth < 100) return;
         if (field.type === 'hidden' || !field.offsetParent) return;
+        // Never attach overlay buttons to our own modal elements
+        if (field.closest('#draftapply-modal')) return;
         
         const btn = document.createElement('button');
         btn.className = 'da-field-btn-overlay';
@@ -852,6 +854,7 @@ class DraftApplyExtension {
 
   async regenerate() {
     const question = this.modal.querySelector('#da-question-preview').value.trim();
+    if (!question) return;
     await this.generateAnswer(question);
   }
 
@@ -916,6 +919,8 @@ class DraftApplyExtension {
 
     for (const el of candidates) {
       if (!el?.isConnected) continue;
+      // Never target our own modal fields
+      if (el.closest?.('#draftapply-modal')) continue;
 
       // Contenteditable or textbox-like
       if (el.isContentEditable || el.getAttribute?.('contenteditable') === 'true' || el.getAttribute?.('role') === 'textbox') {
@@ -1052,8 +1057,10 @@ class DraftApplyExtension {
   }
 
   async copyToClipboard() {
+    const output = this.modal?.querySelector?.('#da-answer-output');
+    const text = output?.value?.trim() || this.lastAnswer;
     try {
-      await navigator.clipboard.writeText(this.lastAnswer);
+      await navigator.clipboard.writeText(text);
       this.hideModal();
       this.showNotification('Copied to clipboard! Paste with Ctrl+V / Cmd+V');
     } catch (e) {
