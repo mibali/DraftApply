@@ -790,11 +790,21 @@ class DraftApplyExtension {
         }, 120000);
       });
 
-      const startResult = await chrome.runtime.sendMessage({
+      let startResult = await chrome.runtime.sendMessage({
         type: 'CALL_API_STREAM',
         requestId,
         payload: structuredPayload
       });
+
+      // If SW was sleeping it can return undefined on the first wake — retry once.
+      if (!startResult) {
+        await new Promise(r => setTimeout(r, 400));
+        startResult = await chrome.runtime.sendMessage({
+          type: 'CALL_API_STREAM',
+          requestId,
+          payload: structuredPayload
+        });
+      }
 
       if (!startResult?.started) {
         throw new Error(startResult?.error || 'Failed to start generation');

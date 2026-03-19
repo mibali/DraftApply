@@ -242,7 +242,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }, { frameId });
         } catch (e) {}
       });
-    return; // sendResponse already called synchronously
+    return true; // Keep channel open — ensures sendResponse is delivered reliably
   }
 
   if (message.type === 'CANCEL_API') {
