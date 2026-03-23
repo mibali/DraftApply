@@ -23,9 +23,11 @@ class DraftApplyExtension {
     this.observer = null;
     this._streamResolvers = new Map(); // requestId -> { resolve, reject }
     this._prefetchCache = new WeakMap(); // field -> { status, question, answer, promise }
+    this._prefetchByQuestion = new Map(); // question -> answer (survives React re-renders)
     this._buttonMap = new WeakMap();    // field -> overlay button
     this._prefetchTimer = null;
     this._prefetchField = null;
+    this._lastChunkTime = 0; // epoch ms; updated on each STREAM_CHUNK for watchdog
 
     this.init();
   }
@@ -89,16 +91,19 @@ class DraftApplyExtension {
       if (this._rescanFields) this._rescanFields();
     }, 1500);
     
-    // Re-extract on SPA navigation
-    window.addEventListener('popstate', () => {
+    // Re-extract on SPA navigation — stored so destroy() can remove it
+    this._onPopState = () => {
       this.extractPageContext();
       this.updateContextBadge();
-    });
+    };
+    window.addEventListener('popstate', this._onPopState);
   }
 
   destroy() {
     this.observer?.disconnect();
     this.modal?.remove();
+    if (this._onKeyDown) document.removeEventListener('keydown', this._onKeyDown);
+    if (this._onPopState) window.removeEventListener('popstate', this._onPopState);
     // Clean up overlay buttons
     document.querySelectorAll('.da-field-btn-overlay').forEach(btn => btn.remove());
     document.querySelectorAll('#draftapply-indicator').forEach(el => el.remove());
@@ -109,10 +114,13 @@ class DraftApplyExtension {
    */
   extractPageContext() {
     try {
-      this.pageContext = this.pageExtractor.extract();
+      const ctx = this.pageExtractor.extract();
+      if (ctx) this.pageContext = ctx;
     } catch (e) {
       console.warn('[DraftApply] Failed to extract page context:', e);
-      this.pageContext = null;
+      // Preserve last good context rather than nulling it out — on SPA navigation
+      // a failed extraction of a new step should not lose the job description from
+      // the previous step.
     }
   }
 
@@ -120,7 +128,8 @@ class DraftApplyExtension {
    * Show a small indicator that DraftApply has detected job context
    */
   showPageContextIndicator() {
-    if (!this.pageContext?.jobDescription) return;
+    const quality = this.pageContext?.contextQuality;
+    if (quality !== 'structured' && quality !== 'heuristic') return;
 
     const indicator = document.createElement('div');
     indicator.id = 'draftapply-indicator';
@@ -233,12 +242,13 @@ class DraftApplyExtension {
       if (e.target === modal) this.hideModal();
     };
 
-    // ESC to close
-    document.addEventListener('keydown', (e) => {
+    // ESC to close — stored so destroy() can remove it
+    this._onKeyDown = (e) => {
       if (e.key === 'Escape' && modal.style.display !== 'none') {
         this.hideModal();
       }
-    });
+    };
+    document.addEventListener('keydown', this._onKeyDown);
 
     // Append to DOM (may be re-attached later if React removes it)
     if (document.body) {
@@ -254,9 +264,13 @@ class DraftApplyExtension {
     const badge = this.modal.querySelector('#da-context-badge');
     const info = this.modal.querySelector('#da-context-info');
     
-    if (this.pageContext?.jobDescription) {
+    const quality = this.pageContext?.contextQuality;
+    const hasRealContext = quality === 'structured' || quality === 'heuristic';
+    const hasNoisyContext = quality === 'fullpage';
+
+    if (hasRealContext) {
       badge.textContent = '✓ Job context detected';
-      badge.classList.add('da-badge-success');
+      badge.className = 'da-context-badge da-badge-success';
 
       // Avoid innerHTML: page content is untrusted
       info.replaceChildren();
@@ -270,11 +284,17 @@ class DraftApplyExtension {
 
       const meta = document.createElement('span');
       meta.className = 'da-context-meta';
-      meta.textContent = `${this.pageContext.requirements.length} requirements detected • ${Math.round(this.pageContext.jobDescription.length / 100) * 100}+ chars`;
+      const reqCount = this.pageContext.requirements?.length ?? 0;
+      const jdLen = Math.round((this.pageContext.jobDescription?.length ?? 0) / 100) * 100;
+      meta.textContent = `${reqCount} requirements detected • ${jdLen}+ chars`;
       info.appendChild(meta);
+    } else if (hasNoisyContext) {
+      badge.textContent = '⚠ Partial context';
+      badge.className = 'da-context-badge da-badge-warning';
+      info.textContent = 'Job description section not found — using page text. Answers may be less tailored.';
     } else {
       badge.textContent = 'No job context';
-      badge.classList.remove('da-badge-success');
+      badge.className = 'da-context-badge';
       info.textContent = 'Could not detect job description on this page.';
     }
   }
@@ -320,10 +340,18 @@ class DraftApplyExtension {
       if (message.type === 'GENERATE_FROM_IFRAME') {
         // Only handle in the top frame
         if (window !== window.top) return;
-        // Use the iframe's page context (it has the job description)
+        // Merge iframe context: only replace parent's context if the iframe's
+        // context is better quality. The parent's page often has richer
+        // structured data than the embedded form iframe.
         if (message.iframePageContext) {
-          this.pageContext = message.iframePageContext;
-          this.updateContextBadge();
+          const parentQuality = this.pageContext?.contextQuality;
+          const iframeQuality = message.iframePageContext?.contextQuality;
+          const parentIsGood = parentQuality === 'structured' || parentQuality === 'heuristic';
+          const iframeIsGood = iframeQuality === 'structured' || iframeQuality === 'heuristic';
+          if (!parentIsGood || (iframeIsGood && iframeQuality === 'structured' && parentQuality !== 'structured')) {
+            this.pageContext = message.iframePageContext;
+            this.updateContextBadge();
+          }
         }
         this._iframeSourceFrameId = message.sourceFrameId;
         this.showModal(message.question);
@@ -357,6 +385,7 @@ class DraftApplyExtension {
 
       if (message.type === 'STREAM_CHUNK') {
         if (this.currentRequestId === message.requestId) {
+          this._lastChunkTime = Date.now(); // keep watchdog alive
           const output = this.modal?.querySelector?.('#da-answer-output');
           if (output) {
             // Hide loading overlay on first chunk so text is visible as it streams
@@ -418,7 +447,12 @@ class DraftApplyExtension {
         // Skip if already has button or is too small/hidden
         if (buttonMap.has(field)) return;
         if (field.tagName === 'INPUT' && field.offsetWidth < 100) return;
-        if (field.type === 'hidden' || !field.offsetParent) return;
+        if (field.type === 'hidden') return;
+        // Use getBoundingClientRect instead of offsetParent — offsetParent is null for
+        // elements inside position:fixed containers (e.g. SmartRecruiters apply modal),
+        // which would incorrectly hide all buttons on those pages.
+        const _fieldRect = field.getBoundingClientRect();
+        if (_fieldRect.width === 0 && _fieldRect.height === 0) return;
         // Never attach overlay buttons to our own modal elements
         if (field.closest('#draftapply-modal')) return;
         
@@ -447,19 +481,25 @@ class DraftApplyExtension {
 
           const label = this.findFieldLabel(field);
           const fieldHint = field.name || field.id || field.placeholder || null;
-          const question = label || fieldHint || 'Please describe your relevant experience and background';
+          const question = (label || fieldHint || 'Please describe your relevant experience and background').slice(0, 500);
 
-          // Use prefetch cache if answer is ready for the same question
+          // Use prefetch cache if answer is ready for the same question.
+          // Check WeakMap first (same element), then the question-keyed Map as
+          // fallback for React re-renders that replaced the DOM element.
           const cached = this._prefetchCache.get(field);
-          if (cached?.status === 'ready' && cached.question === question) {
+          const cachedAnswer = (cached?.status === 'ready' && cached.question === question)
+            ? cached.answer
+            : this._prefetchByQuestion.get(question);
+          if (cachedAnswer) {
             this.showModal(question);
             const output = this.modal.querySelector('#da-answer-output');
-            output.value = cached.answer;
-            this.lastAnswer = cached.answer;
+            output.value = cachedAnswer;
+            this.lastAnswer = cachedAnswer;
             this.lastQuestion = question;
             // Remove ready indicator from button
             btn.classList.remove('da-btn-ready');
             this._prefetchCache.delete(field);
+            this._prefetchByQuestion.delete(question);
             return;
           }
 
@@ -479,8 +519,9 @@ class DraftApplyExtension {
           btn.classList.add('da-btn-visible');
         };
         const hideBtn = () => {
-          // Don't hide while a click is in progress
+          // Don't hide while a click is in progress or the field is still focused
           if (clickPending) return;
+          if (document.activeElement === field) return;
           btn.classList.remove('da-btn-visible');
         };
         
@@ -499,6 +540,8 @@ class DraftApplyExtension {
         field.addEventListener('blur', (e) => {
           // Don't hide if focus moved to the button
           if (e.relatedTarget === btn) return;
+          // Cancel any pending prefetch — user left this field
+          clearTimeout(this._prefetchTimer);
           setTimeout(hideBtn, 400);
         });
         field.addEventListener('mouseleave', (e) => {
@@ -636,7 +679,7 @@ class DraftApplyExtension {
   async _startPrefetch(field) {
     const label = this.findFieldLabel(field);
     const fieldHint = field.name || field.id || field.placeholder || null;
-    const question = label || fieldHint || 'Please describe your relevant experience and background';
+    const question = (label || fieldHint || 'Please describe your relevant experience and background').slice(0, 500);
 
     let cvResponse;
     try {
@@ -646,6 +689,10 @@ class DraftApplyExtension {
 
     const btn = this._buttonMap.get(field);
     const ctx = this.pageContext || {};
+    const jobDescriptionForPayload =
+      (ctx.contextQuality === 'structured' || ctx.contextQuality === 'heuristic')
+        ? ctx.jobDescription
+        : undefined;
     const payload = {
       question,
       length: 'medium',
@@ -653,7 +700,7 @@ class DraftApplyExtension {
       cvText:         cvResponse.cvText,
       jobTitle:       ctx.jobTitle || undefined,
       company:        ctx.company || undefined,
-      jobDescription: ctx.jobDescription || ctx.fullPageText || undefined,
+      jobDescription: jobDescriptionForPayload,
       requirements:   (ctx.requirements?.length > 0) ? ctx.requirements : undefined,
     };
 
@@ -665,6 +712,8 @@ class DraftApplyExtension {
       const result = await chrome.runtime.sendMessage({ type: 'CALL_API', requestId: null, payload });
       cacheEntry.answer = result?.answer || result?.text || result?.content || null;
       cacheEntry.status = cacheEntry.answer ? 'ready' : 'error';
+      // Also store by question string so re-rendered React fields can still hit the cache
+      if (cacheEntry.answer) this._prefetchByQuestion.set(question, cacheEntry.answer);
       if (btn?.isConnected) {
         btn.classList.remove('da-btn-prefetching');
         if (cacheEntry.status === 'ready') btn.classList.add('da-btn-ready');
@@ -749,6 +798,7 @@ class DraftApplyExtension {
     // Hoist requestId and timeoutId so finally can access them regardless of where a throw occurs.
     let requestId;
     let timeoutId;
+    let noActivityWatchdog;
 
     try {
       const cvResponse = await chrome.runtime.sendMessage({ type: 'GET_CV' });
@@ -759,6 +809,13 @@ class DraftApplyExtension {
       }
 
       const ctx = this.pageContext || {};
+      // Only send jobDescription when it comes from a reliable source.
+      // 'fullpage' fallback is noisy raw page text — omitting it is better than
+      // injecting incoherent context that the model will anchor on or ignore.
+      const jobDescriptionForPayload =
+        (ctx.contextQuality === 'structured' || ctx.contextQuality === 'heuristic')
+          ? ctx.jobDescription
+          : undefined;
       const structuredPayload = {
         question,
         length,
@@ -766,7 +823,7 @@ class DraftApplyExtension {
         cvText:         cvResponse.cvText,
         jobTitle:       ctx.jobTitle || undefined,
         company:        ctx.company || undefined,
-        jobDescription: ctx.jobDescription || ctx.fullPageText || undefined,
+        jobDescription: jobDescriptionForPayload,
         requirements:   (ctx.requirements && ctx.requirements.length > 0) ? ctx.requirements : undefined,
         pageUrl:        ctx.url || window.location.href,
         platform:       ctx.platform || undefined,
@@ -819,8 +876,30 @@ class DraftApplyExtension {
         return;
       }
 
+      // No-activity watchdog: if the SW is terminated mid-stream, chunks stop
+      // arriving but STREAM_DONE never fires. After 45s with no chunk, cancel
+      // the stale stream and resolve the promise empty so the existing
+      // CALL_API fallback path kicks in automatically.
+      this._lastChunkTime = Date.now();
+      noActivityWatchdog = setInterval(async () => {
+        if (this.currentRequestId !== requestId) {
+          clearInterval(noActivityWatchdog);
+          return;
+        }
+        if (Date.now() - this._lastChunkTime > 45000) {
+          clearInterval(noActivityWatchdog);
+          try { await chrome.runtime.sendMessage({ type: 'CANCEL_API', requestId }); } catch (_) {}
+          const resolver = this._streamResolvers.get(requestId);
+          if (resolver) {
+            resolver.resolve(); // empty resolve → output.value is '' → CALL_API fallback triggers
+            this._streamResolvers.delete(requestId);
+          }
+        }
+      }, 5000);
+
       // Wait for stream to finish — chunks arrive via STREAM_CHUNK messages
       await Promise.race([streamPromise, timeoutPromise]);
+      clearInterval(noActivityWatchdog);
 
       if (this.currentRequestId !== requestId) return; // Stale — newer request took over
 
@@ -860,6 +939,7 @@ class DraftApplyExtension {
       }
     } finally {
       clearInterval(statusTimer);
+      clearInterval(noActivityWatchdog);
       clearTimeout(timeoutId); // always cancel the 2-min timer, whether success, error, or cancel
       if (this._streamResolvers.has(requestId)) {
         this._streamResolvers.delete(requestId);
@@ -1006,7 +1086,9 @@ class DraftApplyExtension {
   }
 
   insertAnswer() {
-    const current = String(this.modal?.querySelector?.('#da-answer-output')?.value || '').trim();
+    const raw = String(this.modal?.querySelector?.('#da-answer-output')?.value || '').trim();
+    // Don't insert error/status messages that the UI writes into the textarea
+    const current = (raw && !raw.startsWith('Error:') && raw !== 'Cancelled.') ? raw : '';
     const answerToInsert = current || this.lastAnswer;
 
     if (!answerToInsert) {
@@ -1030,8 +1112,10 @@ class DraftApplyExtension {
     const target = this.getInsertionTarget();
 
     if (!target) {
-      // Fallback: copy to clipboard
-      this.copyToClipboard();
+      // Field is no longer in the DOM (React re-render between Generate and Insert).
+      // Copy to clipboard and tell the user explicitly so they aren't confused.
+      navigator.clipboard.writeText(answerToInsert).catch(() => {});
+      this.showNotification('Field no longer found — answer copied to clipboard instead.', 'error');
       return;
     }
 

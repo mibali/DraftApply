@@ -147,22 +147,26 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
 
   const body = req.body || {};
 
-  let systemPrompt, userPrompt, temperature;
+  let systemPrompt, userPrompt, temperature, maxTokens;
 
   // Detect payload format:
   //   Structured (new): body.question exists  →  run through recipe
   //   Legacy:           body.systemPrompt + body.userPrompt  →  pass through
   if (typeof body.question === 'string' && body.question.length > 0) {
     // ── Structured payload → recipe builds the prompts ──
-    if (typeof body.cvText !== 'string' || body.cvText.length < 5) {
+    if (typeof body.cvText !== 'string' || body.cvText.length < 50) {
       return res.status(400).json({ error: 'Missing or empty cvText' });
     }
     // Clean the question label (strip *, :, "Please enter your...", etc.)
     const cleanedQuestion = cleanFieldLabel(body.question);
+    if (!cleanedQuestion) {
+      return res.status(400).json({ error: 'Question is empty after cleaning' });
+    }
     try {
       const result = recipe.buildPrompts({
         question:       cleanedQuestion,
         length:         body.length || 'medium',
+        tone:           body.tone || 'natural',
         cvText:         body.cvText,
         jobTitle:       body.jobTitle || undefined,
         company:        body.company || undefined,
@@ -174,6 +178,7 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
       systemPrompt = result.systemPrompt;
       userPrompt   = result.userPrompt;
       temperature  = typeof result.temperature === 'number' ? result.temperature : 0.7;
+      maxTokens    = typeof result.maxTokens === 'number' ? result.maxTokens : undefined;
     } catch (err) {
       return res.status(500).json({ error: 'Recipe error', details: String(err.message).slice(0, 200) });
     }
@@ -211,6 +216,7 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
       body: JSON.stringify({
         model: GROQ_MODEL,
         temperature,
+        ...(maxTokens ? { max_tokens: maxTokens } : {}),
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }
@@ -228,7 +234,7 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
 
     const data = await response.json();
     const answer = data?.choices?.[0]?.message?.content;
-    if (!answer) return res.status(502).json({ error: 'No answer from provider' });
+    if (!answer?.trim()) return res.status(502).json({ error: 'No answer from provider' });
 
     res.json({ answer, provider: 'groq', model: GROQ_MODEL });
   } catch (e) {

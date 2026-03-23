@@ -330,16 +330,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const sourceFrameId = sender.frameId;
       if (!tabId) { sendResponse({ success: false }); return; }
       
-      // Ensure the main frame (frameId 0) has the content script
+      // Ensure the main frame (frameId 0) has the content script.
+      // PING first — executeScript doesn't throw when already injected, it re-runs
+      // the script, which destroys the active instance and resets all state.
+      let mainFrameReady = false;
       try {
-        await chrome.scripting.insertCSS({ target: { tabId, frameIds: [0] }, files: ['content.css'] });
-        await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, files: ['page-extractor.js', 'content.js'] });
-      } catch {
-        // May already be injected — that's fine
+        const pong = await chrome.tabs.sendMessage(tabId, { type: 'PING' }, { frameId: 0 });
+        mainFrameReady = !!pong?.pong;
+      } catch { /* not injected yet */ }
+
+      if (!mainFrameReady) {
+        try {
+          await chrome.scripting.insertCSS({ target: { tabId, frameIds: [0] }, files: ['content.css'] });
+          await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, files: ['page-extractor.js', 'content.js'] });
+        } catch { /* restricted page */ }
+        // Brief delay for content script to initialize after fresh injection
+        await new Promise(r => setTimeout(r, 300));
       }
-      
-      // Brief delay for content script to initialize
-      await new Promise(r => setTimeout(r, 300));
       
       // Forward to the main frame
       chrome.tabs.sendMessage(tabId, {

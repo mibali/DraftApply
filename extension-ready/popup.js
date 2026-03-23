@@ -151,7 +151,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     if (!proxyUrl) {
-      throw new Error('Proxy not available. Configure and wait for connection.');
+      // Proxy check may have failed when the popup first opened (cold start).
+      // Retry once before giving up — the service may now be awake.
+      await checkProxy();
+      if (!proxyUrl) {
+        throw new Error('Proxy not available. Please wait a few seconds and try again.');
+      }
     }
 
     const controller = new AbortController();

@@ -137,6 +137,10 @@
   background: rgba(34, 197, 94, 0.3);
 }
 
+.da-context-badge.da-badge-warning {
+  background: rgba(234, 179, 8, 0.3);
+}
+
 .da-modal-close {
   margin-left: auto;
   background: none;
