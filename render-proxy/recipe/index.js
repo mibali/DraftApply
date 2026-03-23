@@ -164,6 +164,21 @@ function getWritingGuidance(tone) {
   return WRITING_GUIDANCE; // 'natural' is the default
 }
 
+/**
+ * Extra brevity constraint injected into system prompts when length === 'short'.
+ * Giving the model an explicit instruction at the system level is far more
+ * reliable than relying on word counts alone.
+ */
+function getBrevityInstruction(length) {
+  if (length !== 'short') return '';
+  return `
+BREVITY CONSTRAINT — this is a SHORT answer:
+- Maximum 2-3 sentences for simple questions; 4-5 for complex ones that need a story
+- Lead with the answer in the very first clause — zero warm-up
+- Cut any sentence that could be removed without losing meaning
+- Do NOT pad, repeat, or add a closing summary sentence`;
+}
+
 // ---------------------------------------------------------------------------
 // Question type detection
 // ---------------------------------------------------------------------------
@@ -388,14 +403,14 @@ Additional rules for brevity:
 }
 
 function buildBehavioralPrompt(cvText, question, length, jobCtx, candidateName, tone) {
-  const words = { short: '120-160', medium: '160-220', long: '220-300' }[length] || '160-220';
-  const maxTokens = { short: 320, medium: 480, long: 620 }[length] || 480;
+  const words = { short: '80-120', medium: '160-220', long: '220-300' }[length] || '160-220';
+  const maxTokens = { short: 260, medium: 480, long: 620 }[length] || 480;
   const writingGuidance = getWritingGuidance(tone);
 
   const systemPrompt = `${identityPreamble(candidateName)}
 
 You are answering a behavioral interview question. Tell ONE specific story from your background.
-${writingGuidance}
+${writingGuidance}${getBrevityInstruction(length)}
 
 HOW TO STRUCTURE YOUR STORY (naturally, without labeling sections):
 1. Set the scene briefly — what was happening, what was at stake
@@ -430,14 +445,14 @@ Write a ${words}-word answer. First person, no preamble, no "Great question".`;
  * Focused strength builder — does not mention weaknesses.
  */
 function buildStrengthPrompt(cvText, question, length, jobCtx, candidateName, tone) {
-  const words = { short: '60-90', medium: '90-130', long: '130-180' }[length] || '90-130';
-  const maxTokens = { short: 200, medium: 300, long: 420 }[length] || 300;
+  const words = { short: '30-55', medium: '90-130', long: '130-180' }[length] || '90-130';
+  const maxTokens = { short: 140, medium: 300, long: 420 }[length] || 300;
   const writingGuidance = getWritingGuidance(tone);
 
   const systemPrompt = `${identityPreamble(candidateName)}
 
 You are answering a question about your greatest strength.
-${writingGuidance}
+${writingGuidance}${getBrevityInstruction(length)}
 
 HOW TO ANSWER:
 - Name the strength directly in the first sentence
@@ -459,14 +474,14 @@ NEVER invent examples, employers, or metrics`;
  * Focused weakness builder — does not conflate with strengths or pivot away.
  */
 function buildWeaknessPrompt(cvText, question, length, jobCtx, candidateName, tone) {
-  const words = { short: '60-90', medium: '90-130', long: '130-180' }[length] || '90-130';
-  const maxTokens = { short: 200, medium: 300, long: 420 }[length] || 300;
+  const words = { short: '30-55', medium: '90-130', long: '130-180' }[length] || '90-130';
+  const maxTokens = { short: 140, medium: 300, long: 420 }[length] || 300;
   const writingGuidance = getWritingGuidance(tone);
 
   const systemPrompt = `${identityPreamble(candidateName)}
 
 You are answering a question about a weakness or area for improvement.
-${writingGuidance}
+${writingGuidance}${getBrevityInstruction(length)}
 
 HOW TO ANSWER:
 - Name something REAL — not "I work too hard", "I'm a perfectionist", or "I care too much"
@@ -485,15 +500,15 @@ NEVER fabricate examples or claim you have no weaknesses`;
 }
 
 function buildMotivationPrompt(cvText, question, length, jobCtx, candidateName, tone) {
-  const words = { short: '70-100', medium: '100-150', long: '150-200' }[length] || '100-150';
-  const maxTokens = { short: 220, medium: 340, long: 460 }[length] || 340;
+  const words = { short: '35-60', medium: '100-150', long: '150-200' }[length] || '100-150';
+  const maxTokens = { short: 160, medium: 340, long: 460 }[length] || 340;
   const hasJobCtx = !!jobCtx;
   const writingGuidance = getWritingGuidance(tone);
 
   const systemPrompt = `${identityPreamble(candidateName)}
 
 You are answering a question about your motivation or interest in this role/field.
-${writingGuidance}
+${writingGuidance}${getBrevityInstruction(length)}
 
 HOW TO WRITE A GENUINE MOTIVATION ANSWER:
 - Be specific about WHAT interests you — name the actual thing (a technology, a problem space, a type of work)
@@ -514,15 +529,15 @@ Do NOT:
 }
 
 function buildWhyCompanyPrompt(cvText, question, length, jobCtx, jobTitle, company, candidateName, tone) {
-  const words = { short: '80-110', medium: '110-160', long: '160-220' }[length] || '110-160';
-  const maxTokens = { short: 250, medium: 380, long: 520 }[length] || 380;
+  const words = { short: '45-70', medium: '110-160', long: '160-220' }[length] || '110-160';
+  const maxTokens = { short: 180, medium: 380, long: 520 }[length] || 380;
   const hasJobCtx = !!jobCtx;
   const writingGuidance = getWritingGuidance(tone);
 
   const systemPrompt = `${identityPreamble(candidateName)}
 
 You are answering a "why this company / why this role" question.
-${writingGuidance}
+${writingGuidance}${getBrevityInstruction(length)}
 
 MANDATORY STRUCTURE — in this exact order:
 1. COMPANY/ROLE FIRST: Open with 1-2 sentences naming something SPECIFIC about the company or role from the job description — their mission, the product they build, a specific challenge they're tackling, a responsibility that stood out. This MUST come before any mention of your background.
@@ -547,8 +562,8 @@ Answer in approximately ${words} words. First person, no preamble.`;
 }
 
 function buildCoverLetterPrompt(cvText, question, length, jobCtx, jobTitle, company, candidateName, tone) {
-  const words = { short: '150-220', medium: '250-350', long: '350-450' }[length] || '250-350';
-  const maxTokens = { short: 500, medium: 800, long: 1100 }[length] || 800;
+  const words = { short: '120-170', medium: '250-350', long: '350-450' }[length] || '250-350';
+  const maxTokens = { short: 420, medium: 800, long: 1100 }[length] || 800;
   const writingGuidance = getWritingGuidance(tone);
 
   const systemPrompt = `${identityPreamble(candidateName)}
@@ -578,15 +593,15 @@ Target length: ${words} words. Start with "Dear..." — no preamble before the l
 }
 
 function buildGeneralPrompt(cvText, question, length, jobCtx, candidateName, tone) {
-  const words = { short: '60-90', medium: '90-140', long: '150-220' }[length] || '90-140';
-  const maxTokens = { short: 220, medium: 340, long: 520 }[length] || 340;
+  const words = { short: '30-55', medium: '90-140', long: '150-220' }[length] || '90-140';
+  const maxTokens = { short: 160, medium: 340, long: 520 }[length] || 340;
   const hasJobCtx = !!jobCtx;
   const writingGuidance = getWritingGuidance(tone);
 
   const systemPrompt = `${identityPreamble(candidateName)}
 
 You are answering a job application question.
-${writingGuidance}
+${writingGuidance}${getBrevityInstruction(length)}
 
 HOW TO APPROACH THIS:
 1. Read the question carefully — what is it ACTUALLY asking? (experience with X? your approach to Y? a specific capability?)
