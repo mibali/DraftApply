@@ -790,24 +790,33 @@ class DraftApplyExtension {
         }, 120000);
       });
 
-      let startResult = await chrome.runtime.sendMessage({
+      const startResult = await chrome.runtime.sendMessage({
         type: 'CALL_API_STREAM',
         requestId,
         payload: structuredPayload
       });
 
-      // If SW was sleeping it can return undefined on the first wake — retry once.
-      if (!startResult) {
-        await new Promise(r => setTimeout(r, 400));
-        startResult = await chrome.runtime.sendMessage({
-          type: 'CALL_API_STREAM',
+      // If streaming failed to start (SW sleeping, Chrome version quirk, etc.)
+      // fall back immediately to non-streaming rather than showing an error.
+      if (!startResult?.started) {
+        if (this.currentRequestId !== requestId) return;
+        if (statusEl) statusEl.textContent = 'Generating answer...';
+        loading.hidden = false; // re-show loading in case it was hidden
+        const fallback = await chrome.runtime.sendMessage({
+          type: 'CALL_API',
           requestId,
           payload: structuredPayload
         });
-      }
-
-      if (!startResult?.started) {
-        throw new Error(startResult?.error || 'Failed to start generation');
+        if (this.currentRequestId !== requestId) return;
+        if (fallback?.answer) {
+          output.value = fallback.answer;
+          this.lastAnswer = fallback.answer;
+        } else if (fallback?.error) {
+          output.value = `Error: ${fallback.error}`;
+        } else {
+          output.value = 'Error: No answer received. Please try again.';
+        }
+        return;
       }
 
       // Wait for stream to finish — chunks arrive via STREAM_CHUNK messages
