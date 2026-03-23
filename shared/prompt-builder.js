@@ -1,15 +1,16 @@
 /**
  * Prompt Builder Module
- * 
+ *
  * Constructs optimized prompts for LLM-based answer generation.
  * This is the core of the "intelligence" - how we frame CV data
  * and questions to get human-like, authentic responses.
- * 
+ *
  * DESIGN DECISIONS:
  * 1. CV is PRIMARY context but not a prison - we allow natural inference
  * 2. Question type detection enables tone/approach adaptation
  * 3. Response length is controllable for different form field sizes
  * 4. Anti-AI-speak instructions are baked into the system prompt
+ * 5. Pre-writing analysis step forces evidence selection before generating
  */
 
 export class PromptBuilder {
@@ -59,11 +60,21 @@ export class PromptBuilder {
       ],
       behavioral: [
         'tell me about a time',
+        'tell us about a time',
         'describe a situation',
+        'describe a time',
         'give an example',
+        'share an example',
+        'share a time',
+        'walk me through a time',
+        'walk us through',
+        'can you describe a time',
         'how did you handle',
         'what would you do if',
-        'have you ever'
+        'have you ever',
+        'give me an example',
+        'describe an instance',
+        'share an experience where'
       ],
       technical: [
         'experience with',
@@ -73,16 +84,25 @@ export class PromptBuilder {
         'technology',
         'tools',
         'systems',
-        'architecture'
+        'architecture',
+        'tech stack',
+        'languages',
+        'frameworks',
+        'infrastructure',
+        'databases'
       ],
       leadership: [
         'leadership',
-        'managed',
-        'team',
+        'led a team',
+        'managed a team',
+        'managed people',
+        'people management',
         'mentored',
         'delegated',
         'conflict',
-        'difficult colleague'
+        'difficult colleague',
+        'cross-functional',
+        'stakeholder'
       ],
       motivation: [
         'why do you want',
@@ -90,7 +110,11 @@ export class PromptBuilder {
         'why are you applying',
         'what motivates',
         'career goals',
-        'where do you see yourself'
+        'where do you see yourself',
+        'why this role',
+        'why this position',
+        'what excites you',
+        'what draws you'
       ],
       culture: [
         'work environment',
@@ -98,32 +122,38 @@ export class PromptBuilder {
         'values',
         'work-life',
         'collaboration',
-        'remote work'
+        'remote work',
+        'working style',
+        'ideal team',
+        'ideal workplace',
+        'describe your ideal'
       ],
       strengths: [
         'strengths',
         'weaknesses',
         'best quality',
         'areas for improvement',
-        'what are you good at'
+        'what are you good at',
+        'greatest strength',
+        'biggest weakness',
+        'room for improvement',
+        'what do you bring'
       ]
     };
 
     this.responseLengths = {
-      short: { words: '50-80', sentences: '2-3' },
-      medium: { words: '100-150', sentences: '4-6' },
-      long: { words: '200-300', sentences: '8-12' }
+      short: { words: '60-100',   sentences: '3-4'  },
+      medium: { words: '170-230', sentences: '6-9'  },
+      long:   { words: '280-400', sentences: '10-16' }
     };
   }
 
   /**
    * Detect the type of question being asked
-   * @param {string} question - The job application question
-   * @returns {string} Question type
    */
   detectQuestionType(question) {
     const lowerQuestion = question.toLowerCase();
-    
+
     for (const [type, patterns] of Object.entries(this.questionTypes)) {
       for (const pattern of patterns) {
         if (lowerQuestion.includes(pattern)) {
@@ -131,13 +161,32 @@ export class PromptBuilder {
         }
       }
     }
-    
+
     return 'general';
   }
 
   /**
+   * Infer candidate seniority from CV experience titles
+   */
+  inferSeniority(cvData) {
+    if (!cvData.experience?.length) return null;
+
+    const allTitles = cvData.experience.map(e => (e.title || '').toLowerCase()).join(' ');
+    if (/\b(vp|vice president|director|head of|chief|cto|ceo|coo|ciso)\b/.test(allTitles)) {
+      return 'senior/executive';
+    }
+    if (/\b(principal|staff|senior|lead|manager|architect|engineering manager)\b/.test(allTitles)) {
+      return 'senior';
+    }
+    if (/\b(junior|associate|graduate|intern|trainee|entry.level)\b/.test(allTitles)) {
+      return 'early-career';
+    }
+    if (cvData.experience.length >= 4) return 'mid–senior';
+    return 'mid-level';
+  }
+
+  /**
    * Build the system prompt that sets up the LLM's behavior
-   * @returns {string} System prompt
    */
   buildSystemPrompt(tone = 'natural') {
     const toneGuide = {
@@ -148,49 +197,66 @@ export class PromptBuilder {
 
     return `You are an expert career coach helping a job candidate write authentic, compelling answers to job application questions.
 
-CRITICAL INSTRUCTIONS:
+CRITICAL RULES:
 1. You ARE the candidate. Write in first person as if you are them.
-2. Base your answers primarily on the CV provided, but you may use reasonable professional inference.
-3. NEVER invent specific facts: employers, job titles, degrees, certifications, dates, or metrics not in the CV.
-4. You MAY infer motivations, reasoning, soft skills, and professional approach based on CV patterns.
-5. Sound human and genuine - avoid corporate buzzwords and AI-speak.
-6. Avoid recency bias: do NOT default to the most recent role. Select the BEST evidence from anywhere in the CV that fits the question.
+2. Base answers on the CV provided. You may infer soft skills, motivations, and professional approach — but NEVER invent employers, job titles, degrees, certifications, dates, or metrics not in the CV.
+3. Avoid recency bias: select the BEST evidence from anywhere in the CV, not just the most recent role.
+
+EVIDENCE STANDARD — the single most important rule:
+Every substantive claim must be backed by something specific from the CV: a named project, a real metric, a specific technology, a concrete situation. "I have strong leadership skills" is not acceptable. "Leading the platform migration at [Company], which cut deployment time by 60%" is. If you cannot back a claim with a specific, do not make it. Vague assertions kill credibility.
 
 TONE: ${toneGuide}
 
-ANTI-AI PATTERNS TO AVOID:
-- Starting with "I'm excited to..." or "I'm passionate about..."
-- Using "leverage" as a verb
-- Phrases like "proven track record" or "results-driven professional"
-- Overusing "I believe" or "I feel"
-- Generic statements that could apply to anyone
-- Lists of buzzwords without substance
+STRUCTURE:
+- Open with your strongest, most specific point — never with context-setting, role description, or a statement about what you're about to say.
+- For stories: lead with action, then add context, then give the result. Not "In my role at X, I was responsible for..." — instead "When our infrastructure hit capacity limits, I designed..."
+- Keep paragraphs tight (2–4 sentences). White space is your friend.
+- End with something concrete and forward-looking, not a generic sign-off.
 
-GOOD PATTERNS:
-- Specific examples from the CV with concrete details
-- Honest reflection on experience
-- Connecting past experience to the question's context
-- Showing genuine interest without being sycophantic
+ANTI-AI PATTERNS — never use these:
+- "I'm excited/passionate/thrilled to..."
+- "Throughout my career..."
+- "As a [job title], I have always..."
+- "I have always been passionate about..."
+- "Leverage" as a verb
+- "Proven track record" / "results-driven" / "self-starter"
+- "I believe" / "I feel that" (state things directly)
+- "Dynamic" / "fast-paced" / "collaborative environment" as empty descriptors
+- Generic closers: "I look forward to the opportunity to discuss..."
+- Filler openers: "Great question" / "Certainly" / "Of course"
 
-The answer should feel like something the candidate would naturally write themselves - authentic and confident.`;
+The answer must feel like something the candidate wrote themselves on a good day — specific, human, and confident.`;
   }
 
   /**
    * Build context from parsed CV data
-   * @param {Object} cvData - Parsed CV data
-   * @param {string} questionType - Type of question
-   * @returns {string} Formatted CV context
    */
   buildCVContext(cvData, questionType) {
     let context = '## CANDIDATE CV DATA\n\n';
 
+    // Candidate profile synthesis — gives the model a sense of who this person is
+    const seniority = this.inferSeniority(cvData);
+    const name = cvData.contactInfo?.name;
+    const roleCount = cvData.experience?.length || 0;
+    const recentRoles = cvData.experience?.slice(0, 2)
+      .map(e => `${e.title} at ${e.company}`).join(', ');
+
+    if (seniority || name || recentRoles) {
+      context += '### Candidate Profile\n';
+      if (name) context += `**Name:** ${name}\n`;
+      if (seniority) context += `**Career level:** ${seniority}`;
+      if (roleCount) context += ` (${roleCount} roles on CV)`;
+      context += '\n';
+      if (recentRoles) context += `**Recent roles:** ${recentRoles}\n`;
+      context += '\n';
+    }
+
     if (cvData.contactInfo) {
       const ci = cvData.contactInfo;
       const links = [
-        ci.linkedin && `LinkedIn: ${ci.linkedin}`,
-        ci.github && `GitHub: ${ci.github}`,
-        ci.website && `Website: ${ci.website}`,
-        ci.twitter && `Twitter/X: ${ci.twitter}`,
+        ci.linkedin  && `LinkedIn: ${ci.linkedin}`,
+        ci.github    && `GitHub: ${ci.github}`,
+        ci.website   && `Website: ${ci.website}`,
         ci.portfolio && `Portfolio: ${ci.portfolio}`,
       ].filter(Boolean);
       if (links.length > 0) {
@@ -207,7 +273,9 @@ The answer should feel like something the candidate would naturally write themse
       for (const exp of cvData.experience) {
         context += `**${exp.title}** at **${exp.company}** (${exp.dates})\n`;
         if (exp.responsibilities?.length > 0) {
-          for (const resp of exp.responsibilities.slice(0, 5)) {
+          // Show more bullets for recent roles, fewer for older ones
+          const bulletCap = 6;
+          for (const resp of exp.responsibilities.slice(0, bulletCap)) {
             context += `- ${resp}\n`;
           }
         }
@@ -221,7 +289,7 @@ The answer should feel like something the candidate would naturally write themse
 
     if (cvData.achievements?.length > 0) {
       context += '### Key Achievements\n';
-      for (const achievement of cvData.achievements.slice(0, 5)) {
+      for (const achievement of cvData.achievements.slice(0, 8)) {
         context += `- ${achievement}\n`;
       }
       context += '\n';
@@ -244,8 +312,6 @@ The answer should feel like something the candidate would naturally write themse
 
   /**
    * Build type-specific instructions based on question type
-   * @param {string} questionType - Detected question type
-   * @returns {string} Type-specific instructions
    */
   buildTypeInstructions(questionType) {
     const instructions = {
@@ -269,53 +335,100 @@ EXAMPLE STRUCTURE: "Based on my X years of [relevant experience] at [seniority l
 
 Format:
 - "Dear Hiring Manager," (or "Dear [Company] team," if company is known)
-- 1st paragraph: specific hook showing you understand the role and why you fit (no generic hype)
-- 2nd–3rd paragraphs: map 3 key job requirements to concrete evidence from DIFFERENT parts of the CV when possible (older roles/projects are valid)
-- Final paragraph: close confidently, mention interest in discussing, and add a simple sign-off
-- End with: "Sincerely," and the candidate name as "[Your Name]"
+- 1st paragraph: open with something specific about the company or role — what they're building, a challenge they're solving, or what makes this opportunity distinct. Not a statement about yourself. Show you've read the job description.
+- 2nd–3rd paragraphs: map 3 key job requirements to concrete evidence from DIFFERENT parts of the CV when possible — name the project, the metric, the specific outcome. Older roles are valid if the evidence is strong.
+- Final paragraph: close with confidence and genuine interest. One sentence on why this next step makes sense. End with "Sincerely," and the candidate name as "[Your Name]"
 
-Rules:
-- Must reference at least 3 specific requirements/responsibilities from the job description when provided
+RULES:
+- Opening line must NOT be "I am writing to apply for..." or any variation. Open with a specific observation about the company/role.
+- Must reference at least 3 specific requirements from the job description (when provided)
 - Must NOT invent employers, degrees, dates, or metrics not in the CV
-- Avoid buzzwords and "AI voice"`,
-      behavioral: `This is a BEHAVIORAL question. Use the STAR method implicitly (Situation, Task, Action, Result) without making it obvious. Draw from specific experiences in the CV. Include concrete details and outcomes where available.`,
-      
-      technical: `This is a TECHNICAL question. Reference specific technologies, tools, or methodologies from the CV. Be honest about proficiency levels. It's okay to mention related experience even if not an exact match.`,
-      
-      leadership: `This is a LEADERSHIP question. Focus on team management, mentorship, or project leadership examples from the CV. Highlight collaborative approaches and outcomes achieved through others.`,
-      
-      motivation: `This is a MOTIVATION question. Connect genuine interests to the role based on your career trajectory across the CV (not just the most recent role). Be specific about what attracts you - avoid generic enthusiasm. Tie motivations to concrete skills and examples.`,
-      
-      culture: `This is a CULTURE FIT question. Draw from work environment preferences that can be reasonably inferred from the CV (startup vs enterprise experience, team sizes, remote/on-site patterns). Be genuine about working style.`,
-      
-      strengths: `This is a STRENGTHS/WEAKNESSES question. For strengths, point to evidence in the CV. For weaknesses, be honest but strategic - mention something genuine and how you're addressing it. Avoid clichéd "weakness" answers.`,
-      
-      general: `Answer thoughtfully based on the CV content. Be specific where possible, and professional but natural in tone.`
+- Every paragraph should contain at least one concrete specific (named project, metric, technology)`,
+
+      behavioral: `This is a BEHAVIORAL question. Tell a tight, specific story from the CV.
+
+STRUCTURE (follow this proportionally):
+- Opening (1 sentence): Drop straight into the action or situation — "When our deployment pipeline failed the night before a major release..." or "During the acquisition of [Company], I was asked to..." Give just enough context so the story makes sense, then move on.
+- Actions (2–3 sentences, this is the core): Focus on what YOU specifically decided and did. Be concrete — what approach did you take, why, and how? Name technologies, team sizes, timelines where they're in the CV.
+- Outcome (1–2 sentences): What was the measurable result? What did you learn or change as a result? Quantify if the CV provides numbers.
+- Optional: One sentence connecting this to how you'd approach similar situations in the new role.
+
+RULES:
+- Never open with "I have always..." or "In my experience..." — open with the situation
+- Use past tense throughout
+- The story must come from a specific role/project in the CV — do not fabricate
+- If multiple CV examples are relevant, pick the strongest one (not the most recent)`,
+
+      technical: `This is a TECHNICAL question. Demonstrate depth, not just breadth.
+
+APPROACH:
+- Name specific technologies, tools, or systems from the CV with context — not just "I've used Python" but "I've used Python extensively for data pipeline work at [Company], including building ETL processes that processed X records/day"
+- Be honest about depth: distinguish between "daily production use" and "I've worked with this in projects"
+- If the question asks about something not in the CV but you have adjacent experience, connect them explicitly: "I haven't worked directly with X, but at [Company] I built Y which solves the same class of problems by..."
+- For architecture or design questions: describe your reasoning process, tradeoffs you've navigated, and outcomes — not just what you built`,
+
+      leadership: `This is a LEADERSHIP question. Show how you actually led, not just that you did.
+
+APPROACH:
+- Be specific about team size, composition, and context from the CV
+- Focus on HOW you led: decisions you made, how you built trust, how you handled pushback, how you enabled others
+- For conflict/difficult colleague questions: show emotional maturity and problem-solving. Describe the approach (direct conversation, finding shared interests, escalation if appropriate) and the outcome
+- Outcomes should be specific: what did the team deliver, how did it change, what did people say or do differently?
+- Avoid "I created a collaborative environment" — show what that actually looked like in practice`,
+
+      motivation: `This is a MOTIVATION question. Give a specific, reasoned answer — not enthusiasm.
+
+APPROACH:
+- Start with what specifically attracts you to THIS role or company (not a generic statement about the field)
+- Connect to a genuine pattern in your career trajectory — why does this role make sense as the next step given your specific history?
+- Map 1–2 concrete things from the job description to 1–2 concrete things from your CV — show alignment, not aspiration
+- Avoid: "I've always been passionate about X" — instead say what specifically about this role or company aligns with what you've been building toward and why`,
+
+      culture: `This is a CULTURE FIT / WORKING STYLE question. Be honest and specific.
+
+APPROACH:
+- Ground your answer in your actual CV experience — if you've worked at both startups and enterprises, you have real evidence about what suits you
+- Describe a specific aspect of how you work best: team structure, how you collaborate, how you handle ambiguity, what kind of problems energize you
+- Connect your working style to something in the job description that matches — show this isn't just a generic preference
+- Be genuine: it's better to be specific about what you want (and risk not being a fit) than to give a vague answer that could apply to anyone`,
+
+      strengths: `This is a STRENGTHS / WEAKNESSES question.
+
+FOR STRENGTHS:
+- Name one or two genuine strengths backed by specific CV evidence. "I'm strong at X — for example, at [Company] when [situation], I [action] and [outcome]."
+- The strength should be relevant to the role in question, ideally one the job description signals they care about
+
+FOR WEAKNESSES:
+- Pick something real and work-relevant — not a fake weakness dressed up as a strength ("I work too hard")
+- Describe it honestly, then show what you've done to address it: a process you've adopted, a skill you've deliberately built, feedback you've acted on
+- The weakness should not be a core requirement of the job
+- Show self-awareness without undermining your candidacy
+
+RULES:
+- Do not give two weaknesses unless specifically asked
+- Do not claim your weakness is "perfectionism" or "caring too much"`,
+
+      general: `Answer this question directly, specifically, and with evidence from the CV.
+
+APPROACH:
+- Identify the underlying quality or competency this question is testing (e.g. a question about "biggest achievement" is testing self-awareness + ability to quantify impact)
+- Select the strongest relevant evidence from anywhere in the CV — not just the most recent role
+- If this is a story-based question, structure it as: situation → your specific action → outcome
+- If this is a preference/opinion question, ground your answer in real experience from the CV rather than abstract statements
+- Every paragraph should contain at least one concrete specific: a named company, project, metric, or decision`
     };
 
     return instructions[questionType] || instructions.general;
   }
 
   /**
-   * Build the complete prompt for answer generation
-   * @param {Object} cvData - Parsed CV data
-   * @param {string} question - The application question
-   * @param {string} length - Desired response length (short/medium/long)
-   * @param {Object} options - Additional options (jobTitle, company, etc.)
-   * @returns {Object} Complete prompt structure
-   */
-  /**
    * Build job description context for the prompt
-   * @param {string} jobDescription - Full job description text
-   * @param {string} jobTitle - Job title
-   * @param {string} company - Company name
-   * @returns {string} Formatted job context
    */
   buildJobContext(jobDescription, jobTitle, company) {
     if (!jobDescription) return '';
 
     let context = '## TARGET JOB\n\n';
-    
+
     if (jobTitle || company) {
       context += `**Position:** ${jobTitle || 'Not specified'}`;
       if (company) context += ` at **${company}**`;
@@ -323,17 +436,15 @@ Rules:
     }
 
     context += '### Job Description\n';
-    // Give the model enough detail to tailor properly without blowing up tokens.
     const cap = 6000;
     context += jobDescription.slice(0, cap);
-    
+
     if (jobDescription.length > cap) {
       context += '\n[...truncated for length...]';
     }
-    
+
     context += '\n\n';
 
-    // Extract and highlight key requirements
     const requirements = this.extractKeyRequirements(jobDescription);
     if (requirements.length > 0) {
       context += '### Key Requirements to Address\n';
@@ -348,13 +459,11 @@ Rules:
 
   /**
    * Extract key requirements from job description
-   * @param {string} jobDescription - Job description text
-   * @returns {string[]} List of key requirements
    */
   extractKeyRequirements(jobDescription) {
     const requirements = [];
     const lines = jobDescription.split('\n');
-    
+
     const patterns = [
       /experience\s+(?:with|in)\s+(.{10,60})/gi,
       /proficien(?:t|cy)\s+(?:in|with)\s+(.{10,60})/gi,
@@ -366,14 +475,12 @@ Rules:
 
     for (const line of lines) {
       const trimmed = line.trim();
-      
-      // Bullet points with skill/requirement keywords
-      if (trimmed.match(/^[\-\•\*\d\.]\s*.{15,}/) && 
+
+      if (trimmed.match(/^[\-\•\*\d\.]\s*.{15,}/) &&
           trimmed.match(/experience|skill|knowledge|ability|proficien|familiar|require|must|should/i)) {
         requirements.push(trimmed.replace(/^[\-\•\*\d\.]\s*/, '').slice(0, 100));
       }
-      
-      // Pattern-based extraction
+
       for (const pattern of patterns) {
         const matches = trimmed.matchAll(pattern);
         for (const match of matches) {
@@ -383,8 +490,7 @@ Rules:
         }
       }
     }
-    
-    // Deduplicate
+
     return [...new Set(requirements)];
   }
 
@@ -392,15 +498,14 @@ Rules:
     const questionType = this.detectQuestionType(question);
     const lengthSpec = this.responseLengths[length] || this.responseLengths.medium;
     const coverLetterLengths = {
-      short: { words: '150-220', sentences: '6-10' },
-      medium: { words: '250-350', sentences: '10-16' },
-      long: { words: '350-500', sentences: '16-24' }
+      short: { words: '200-280', sentences: '8-12'  },
+      medium: { words: '300-400', sentences: '12-18' },
+      long:   { words: '400-550', sentences: '18-26' }
     };
-    // Salary answers are always concise regardless of selected length
     const salaryLengths = {
-      short: { words: '30-50', sentences: '2-3' },
-      medium: { words: '50-80', sentences: '3-4' },
-      long: { words: '80-120', sentences: '4-6' }
+      short:  { words: '30-50',  sentences: '2-3' },
+      medium: { words: '50-80',  sentences: '3-4' },
+      long:   { words: '80-120', sentences: '4-6' }
     };
     const effectiveLengthSpec =
       questionType === 'cover_letter'
@@ -418,6 +523,19 @@ Rules:
       /what\s+draws\s+you\s+to/i.test(question) ||
       /why\s+(this|our)\s+company/i.test(question);
 
+    // Pre-writing analysis step — forces the model to select the best evidence
+    // before generating the answer rather than defaulting to generic assertions.
+    const analysisStep = questionType === 'salary' || questionType === 'cover_letter' ? '' : `
+## BEFORE YOU WRITE
+Reason through the following silently (do not include this analysis in your answer):
+1. What specific competency or quality is this question testing? Be precise — not just "leadership" but e.g. "leading through ambiguity" or "recovering a failing project".
+2. What is the single strongest piece of evidence from the CV that demonstrates it? Name the company, project, and outcome.
+3. Is there a second piece of evidence that adds depth or shows range across different roles?${options.jobDescription ? `
+4. Which 1–2 requirements in the job description does this question relate to? How does the CV evidence map to them?` : ''}
+
+Now write the answer using that specific evidence. Do not include the analysis itself.
+`;
+
     let userPrompt = `${cvContext}
 ${jobContext}
 ## QUESTION TYPE
@@ -426,23 +544,24 @@ ${questionType.toUpperCase()}
 ## SPECIFIC INSTRUCTIONS
 ${typeInstructions}
 ${options.jobDescription ? `
-IMPORTANT: Tailor your answer to the specific job description provided. Reference relevant requirements, technologies, or responsibilities mentioned in the job posting where they align with your experience. Show that you understand what the employer is looking for.
-${questionType === 'cover_letter' ? `For a cover letter, you MUST explicitly connect job requirements to CV evidence (not generic claims).` : ''}
+TAILORING: This answer must be tailored to the specific job description. Reference the company's language, specific requirements, and role context where they connect to real experience from the CV. Make it obvious this answer was written for this specific role, not copy-pasted.
+${questionType === 'cover_letter' ? `For the cover letter, EVERY body paragraph must connect a specific job requirement to a named CV achievement.` : ''}
 ` : ''}
 ${questionType === 'motivation' && isWhyCompany ? `
 ${options.jobDescription ? `FOR THIS "WHY COMPANY" QUESTION, you MUST use BOTH the job description and the CV:` : `FOR THIS "WHY COMPANY" QUESTION, use the CV and any company/job context provided:`}
-- Start with 1–2 sentences showing you understand what the company/team is building (use the job description language if available).
+- Start with 1–2 sentences showing you understand what the company/team is building or solving (use the job description language if available). This shows you've done your homework.
 - Then map 2–3 specific job needs/requirements to 2–3 concrete examples from DIFFERENT parts of the CV when possible.
 - If only one role is relevant, use that role plus another relevant project/skill/achievement/education example from elsewhere in the CV.
-- End with a grounded reason this role is a logical next step based on your trajectory (no generic excitement).
+- End with a grounded reason this role is a logical next step based on your trajectory — not excitement, but fit.
 ` : ''}
+${analysisStep}
 ## RESPONSE LENGTH
 Write approximately ${effectiveLengthSpec.words} words (${effectiveLengthSpec.sentences} sentences).
 
 ## THE QUESTION
 ${question}
 
-Write the answer now, in first person, as the candidate. Do not include any preamble or meta-commentary.`;
+Write the answer now, in first person, as the candidate. Output only the answer — no preamble, no meta-commentary, no headers.`;
 
     return {
       systemPrompt,
