@@ -7,33 +7,43 @@
 
 document.addEventListener('DOMContentLoaded', async () => {
   const elements = {
-    cvStatusDot: document.getElementById('cv-status-dot'),
-    cvStatusText: document.getElementById('cv-status-text'),
-    proxyStatusDot: document.getElementById('proxy-status-dot'),
+    cvStatusDot:     document.getElementById('cv-status-dot'),
+    cvStatusText:    document.getElementById('cv-status-text'),
+    proxyStatusDot:  document.getElementById('proxy-status-dot'),
     proxyStatusText: document.getElementById('proxy-status-text'),
-    cvInputSection: document.getElementById('cv-input-section'),
+    cvInputSection:  document.getElementById('cv-input-section'),
     cvLoadedSection: document.getElementById('cv-loaded-section'),
-    cvText: document.getElementById('cv-text'),
-    cvPreview: document.getElementById('cv-preview'),
-    saveCvBtn: document.getElementById('save-cv-btn'),
-    changeCvBtn: document.getElementById('change-cv-btn'),
-    message: document.getElementById('message'),
-    uploadArea: document.getElementById('upload-area'),
-    cvFile: document.getElementById('cv-file'),
-    pageStatusDot: document.getElementById('page-status-dot'),
-    pageStatusText: document.getElementById('page-status-text'),
-    activateBtn: document.getElementById('activate-btn'),
-    // LLM settings
-    toggleLlmBtn: document.getElementById('toggle-llm-btn'),
-    llmSettingsPanel: document.getElementById('llm-settings-panel'),
-    llmBadge: document.getElementById('llm-badge'),
-    llmProviderSelect: document.getElementById('llm-provider-select'),
-    llmKeyField: document.getElementById('llm-key-field'),
-    llmModelField: document.getElementById('llm-model-field'),
-    llmApiKey: document.getElementById('llm-api-key'),
-    llmModel: document.getElementById('llm-model'),
-    saveLlmBtn: document.getElementById('save-llm-btn'),
-    resetLlmBtn: document.getElementById('reset-llm-btn'),
+    cvText:          document.getElementById('cv-text'),
+    cvPreview:       document.getElementById('cv-preview'),
+    saveCvBtn:       document.getElementById('save-cv-btn'),
+    changeCvBtn:     document.getElementById('change-cv-btn'),
+    message:         document.getElementById('message'),
+    uploadArea:      document.getElementById('upload-area'),
+    cvFile:          document.getElementById('cv-file'),
+    pageStatusDot:   document.getElementById('page-status-dot'),
+    pageStatusText:  document.getElementById('page-status-text'),
+    activateBtn:     document.getElementById('activate-btn'),
+    tailorOpenBtn:   document.getElementById('tailor-open-btn'),
+    // Tailor view
+    mainView:           document.getElementById('main-view'),
+    tailorView:         document.getElementById('tailor-view'),
+    tailorBackBtn:      document.getElementById('tailor-back-btn'),
+    tailorJd:           document.getElementById('tailor-jd'),
+    tailorJobTitle:     document.getElementById('tailor-job-title'),
+    tailorCompany:      document.getElementById('tailor-company'),
+    tailorGenerateBtn:  document.getElementById('tailor-generate-btn'),
+    tailorLoading:      document.getElementById('tailor-loading'),
+    tailorResults:      document.getElementById('tailor-results'),
+    matchScore:         document.getElementById('match-score'),
+    matchStrong:        document.getElementById('match-strong'),
+    matchStrongChips:   document.getElementById('match-strong-chips'),
+    matchMissing:       document.getElementById('match-missing'),
+    matchMissingChips:  document.getElementById('match-missing-chips'),
+    tailorWarningsBox:  document.getElementById('tailor-warnings-box'),
+    tailorOutput:       document.getElementById('tailor-output'),
+    tailorCopyBtn:      document.getElementById('tailor-copy-btn'),
+    tailorRedoBtn:      document.getElementById('tailor-redo-btn'),
+    tailorMessage:      document.getElementById('tailor-message'),
   };
 
   let proxyUrl = null; // Will be set by checkProxy()
@@ -52,19 +62,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.activateBtn.addEventListener('click', activateOnPage);
   }
 
-  // LLM settings
-  await loadLLMSettings();
-  elements.toggleLlmBtn.addEventListener('click', () => {
-    elements.llmSettingsPanel.hidden = !elements.llmSettingsPanel.hidden;
-  });
-  elements.llmProviderSelect.addEventListener('change', () => {
-    const hasProvider = !!elements.llmProviderSelect.value;
-    elements.llmKeyField.hidden = !hasProvider;
-    elements.llmModelField.hidden = !hasProvider;
-  });
-  elements.saveLlmBtn.addEventListener('click', saveLLMSettings);
-  elements.resetLlmBtn.addEventListener('click', resetLLMSettings);
-  
+  // Tailor CV
+  elements.tailorOpenBtn.addEventListener('click', openTailorView);
+  elements.tailorBackBtn.addEventListener('click', closeTailorView);
+  elements.tailorGenerateBtn.addEventListener('click', runTailorCV);
+  elements.tailorRedoBtn.addEventListener('click', runTailorCV);
+  elements.tailorCopyBtn.addEventListener('click', copyTailoredCV);
+
   // File upload handling
   elements.uploadArea.addEventListener('click', () => elements.cvFile.click());
   elements.cvFile.addEventListener('change', handleFileSelect);
@@ -216,9 +220,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.cvLoadedSection.hidden = false;
     elements.cvStatusDot.classList.add('ready');
     elements.cvStatusText.textContent = 'CV ready';
-    
-    // Avoid showing CV content in popup by default (privacy)
     elements.cvPreview.textContent = `Saved (${text.length.toLocaleString()} characters)`;
+    elements.tailorOpenBtn.hidden = false;
   }
 
   function showCVInput() {
@@ -227,6 +230,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.cvStatusDot.classList.remove('ready');
     elements.cvStatusText.textContent = 'No CV';
     elements.cvText.value = '';
+    elements.tailorOpenBtn.hidden = true;
   }
 
   function showMessage(text, type = 'success') {
@@ -289,50 +293,132 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // ── LLM Settings ──────────────────────────────────────────────────────────
+  // ── Tailor CV flow ────────────────────────────────────────────────────────
 
-  async function loadLLMSettings() {
-    const { llmConfig } = await chrome.storage.local.get('llmConfig');
-    if (llmConfig?.provider && llmConfig?.apiKey) {
-      elements.llmProviderSelect.value = llmConfig.provider;
-      elements.llmApiKey.value = llmConfig.apiKey;
-      elements.llmModel.value = llmConfig.model || '';
-      elements.llmKeyField.hidden = false;
-      elements.llmModelField.hidden = false;
-      elements.llmBadge.textContent = llmConfig.provider + (llmConfig.model ? ` / ${llmConfig.model}` : '');
-    }
+  function openTailorView() {
+    elements.mainView.hidden = true;
+    elements.tailorView.hidden = false;
+    // Reset results from any previous run
+    elements.tailorResults.hidden = true;
+    elements.tailorLoading.hidden = true;
+    elements.tailorMessage.hidden = true;
+    elements.tailorGenerateBtn.disabled = false;
+    elements.tailorGenerateBtn.textContent = 'Generate Tailored CV';
   }
 
-  async function saveLLMSettings() {
-    const provider = elements.llmProviderSelect.value;
-    const apiKey = elements.llmApiKey.value.trim();
-    const model = elements.llmModel.value.trim();
+  function closeTailorView() {
+    elements.tailorView.hidden = true;
+    elements.mainView.hidden = false;
+  }
 
-    if (provider && !apiKey) {
-      showMessage('Please enter an API key', 'error');
+  async function runTailorCV() {
+    const jd = elements.tailorJd.value.trim();
+    if (jd.length < 50) {
+      showTailorMessage('Please paste a job description (at least a few lines)', 'error');
       return;
     }
 
-    if (!provider) {
-      return resetLLMSettings();
+    elements.tailorGenerateBtn.disabled = true;
+    elements.tailorGenerateBtn.textContent = 'Generating…';
+    elements.tailorLoading.hidden = false;
+    elements.tailorResults.hidden = true;
+    elements.tailorMessage.hidden = true;
+
+    try {
+      const result = await chrome.runtime.sendMessage({
+        type: 'TAILOR_CV',
+        jobDescription: jd,
+        jobTitle: elements.tailorJobTitle.value.trim(),
+        company:  elements.tailorCompany.value.trim(),
+      });
+
+      if (result?.error) {
+        showTailorMessage(result.error, 'error');
+        return;
+      }
+
+      displayTailorResults(result);
+    } catch (e) {
+      showTailorMessage('Something went wrong: ' + e.message, 'error');
+    } finally {
+      elements.tailorLoading.hidden = true;
+      elements.tailorGenerateBtn.disabled = false;
+      elements.tailorGenerateBtn.textContent = 'Generate Tailored CV';
+    }
+  }
+
+  function displayTailorResults(result) {
+    const { tailoredCvText, matchReport, warnings } = result;
+
+    // Score
+    const score = matchReport?.score ?? null;
+    elements.matchScore.textContent = score != null ? `${score}%` : '–';
+    elements.matchScore.className = 'match-score-badge' +
+      (score >= 70 ? ' score-high' : score >= 40 ? ' score-mid' : ' score-low');
+
+    // Strong matches
+    const strong = matchReport?.strongMatches || [];
+    if (strong.length > 0) {
+      elements.matchStrongChips.innerHTML = strong
+        .map(s => `<span class="match-chip match-chip-strong">${esc(s)}</span>`)
+        .join('');
+      elements.matchStrong.hidden = false;
+    } else {
+      elements.matchStrong.hidden = true;
     }
 
-    const llmConfig = { provider, apiKey, model: model || '' };
-    await chrome.storage.local.set({ llmConfig });
-    elements.llmBadge.textContent = provider + (model ? ` / ${model}` : '');
-    elements.llmSettingsPanel.hidden = true;
-    showMessage(`Saved — using ${provider}`);
+    // Missing requirements
+    const missing = matchReport?.unsupportedRequirements || [];
+    if (missing.length > 0) {
+      elements.matchMissingChips.innerHTML = missing
+        .map(s => `<span class="match-chip match-chip-missing">${esc(s)}</span>`)
+        .join('');
+      elements.matchMissing.hidden = false;
+    } else {
+      elements.matchMissing.hidden = true;
+    }
+
+    // Validation warnings
+    if (warnings?.length > 0) {
+      elements.tailorWarningsBox.textContent = warnings.map(w => `⚠ ${w}`).join('\n');
+      elements.tailorWarningsBox.hidden = false;
+    } else {
+      elements.tailorWarningsBox.hidden = true;
+    }
+
+    // Tailored CV text
+    elements.tailorOutput.value = tailoredCvText || '';
+    elements.tailorResults.hidden = false;
+
+    // Scroll results into view
+    elements.tailorResults.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
-  async function resetLLMSettings() {
-    await chrome.storage.local.remove('llmConfig');
-    elements.llmProviderSelect.value = '';
-    elements.llmApiKey.value = '';
-    elements.llmModel.value = '';
-    elements.llmKeyField.hidden = true;
-    elements.llmModelField.hidden = true;
-    elements.llmBadge.textContent = 'Default (Groq)';
-    elements.llmSettingsPanel.hidden = true;
-    showMessage('Reset to default (Groq)');
+  async function copyTailoredCV() {
+    const text = elements.tailorOutput.value;
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      const orig = elements.tailorCopyBtn.textContent;
+      elements.tailorCopyBtn.textContent = 'Copied!';
+      setTimeout(() => { elements.tailorCopyBtn.textContent = orig; }, 1800);
+    } catch {
+      showTailorMessage('Could not copy — try selecting the text manually', 'error');
+    }
   }
+
+  function showTailorMessage(text, type = 'success') {
+    elements.tailorMessage.textContent = text;
+    elements.tailorMessage.className = 'message' + (type === 'error' ? ' error' : '');
+    elements.tailorMessage.hidden = false;
+    setTimeout(() => { elements.tailorMessage.hidden = true; }, 5000);
+  }
+
+  function esc(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
 });

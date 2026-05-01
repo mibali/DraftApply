@@ -271,6 +271,7 @@ class DraftApplyExtension {
     if (hasRealContext) {
       badge.textContent = '✓ Job context detected';
       badge.className = 'da-context-badge da-badge-success';
+      info.className = 'da-context-info';
 
       // Avoid innerHTML: page content is untrusted
       info.replaceChildren();
@@ -291,11 +292,13 @@ class DraftApplyExtension {
     } else if (hasNoisyContext) {
       badge.textContent = '⚠ Partial context';
       badge.className = 'da-context-badge da-badge-warning';
-      info.textContent = 'Job description section not found — using page text. Answers may be less tailored.';
+      info.className = 'da-context-info da-context-warning';
+      info.textContent = 'Job description section not found — answers will be based on your CV only and may not be tailored to this specific role.';
     } else {
-      badge.textContent = 'No job context';
+      badge.textContent = 'No context';
       badge.className = 'da-context-badge';
-      info.textContent = 'Could not detect job description on this page.';
+      info.className = 'da-context-info da-context-none';
+      info.textContent = 'No job description detected. Open the job listing tab before generating, or paste the job description into your CV.';
     }
   }
 
@@ -527,21 +530,11 @@ class DraftApplyExtension {
         
         field.addEventListener('focus', () => {
           showBtn();
-          // Prefetch: debounce 600ms then silently generate answer in background
-          clearTimeout(this._prefetchTimer);
-          this._prefetchField = field;
-          this._prefetchTimer = setTimeout(() => {
-            if (this._prefetchField === field && !this._prefetchCache.has(field)) {
-              this._startPrefetch(field);
-            }
-          }, 600);
         });
         field.addEventListener('mouseenter', showBtn);
         field.addEventListener('blur', (e) => {
           // Don't hide if focus moved to the button
           if (e.relatedTarget === btn) return;
-          // Cancel any pending prefetch — user left this field
-          clearTimeout(this._prefetchTimer);
           setTimeout(hideBtn, 400);
         });
         field.addEventListener('mouseleave', (e) => {

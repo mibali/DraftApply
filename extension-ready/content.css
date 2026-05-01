@@ -189,6 +189,23 @@
   border-top: 1px solid #bbf7d0;
 }
 
+.da-context-info.da-context-warning {
+  background: #fffbeb;
+  border-color: #fde68a;
+  color: #92400e;
+}
+
+.da-context-info.da-context-warning::before {
+  content: '⚠ ';
+  font-weight: 600;
+}
+
+.da-context-info.da-context-none {
+  background: #f8fafc;
+  border-color: #e2e8f0;
+  color: #64748b;
+}
+
 .da-question-label,
 .da-answer-label {
   font-size: 10.5px;

@@ -348,9 +348,193 @@
     }
 
     [hidden] { display: none !important; }
+
+    /* ── Tailor view ── */
+    .tailor-nav {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid #f1f5f9;
+      margin-bottom: 14px;
+    }
+
+    .tailor-back-btn {
+      background: none;
+      border: none;
+      color: #64748b;
+      font-size: 13px;
+      cursor: pointer;
+      padding: 4px 0;
+      font-family: inherit;
+      line-height: 1;
+    }
+    .tailor-back-btn:hover { color: #1e293b; }
+
+    .tailor-view-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: #1e293b;
+    }
+
+    .tailor-inputs-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .tailor-input {
+      flex: 1;
+      padding: 8px 10px;
+      border: 1.5px solid #e2e8f0;
+      border-radius: 8px;
+      font-size: 12.5px;
+      outline: none;
+      font-family: inherit;
+      color: #1e293b;
+      background: white;
+      transition: border-color 0.2s;
+    }
+    .tailor-input:focus { border-color: #2563eb; }
+    .tailor-input::placeholder { color: #94a3b8; }
+
+    @keyframes tailor-spin { to { transform: rotate(360deg); } }
+
+    .tailor-spinner {
+      width: 30px;
+      height: 30px;
+      border: 3px solid #e2e8f0;
+      border-top-color: #2563eb;
+      border-right-color: #7c3aed;
+      border-radius: 50%;
+      animation: tailor-spin 0.8s linear infinite;
+      margin: 0 auto;
+    }
+
+    .tailor-loading-wrap {
+      text-align: center;
+      padding: 24px 0 16px;
+      color: #64748b;
+    }
+
+    .tailor-loading-text {
+      font-size: 13px;
+      margin-top: 12px;
+    }
+
+    .tailor-loading-sub {
+      font-size: 11px;
+      color: #94a3b8;
+      margin-top: 4px;
+    }
+
+    /* Match report */
+    .match-report {
+      background: white;
+      border: 1.5px solid #e2e8f0;
+      border-radius: 10px;
+      padding: 12px 14px;
+      margin-top: 14px;
+    }
+
+    .match-report-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+
+    .match-report-title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #94a3b8;
+    }
+
+    .match-score-badge {
+      font-size: 20px;
+      font-weight: 700;
+      color: #2563eb;
+    }
+
+    .match-score-badge.score-high  { color: #16a34a; }
+    .match-score-badge.score-mid   { color: #d97706; }
+    .match-score-badge.score-low   { color: #94a3b8; }
+
+    .match-group { margin-top: 8px; }
+
+    .match-group-label {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 5px;
+    }
+
+    .match-label-green { color: #16a34a; }
+    .match-label-gray  { color: #94a3b8; }
+
+    .match-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+
+    .match-chip {
+      padding: 3px 8px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+
+    .match-chip-strong  { background: #dcfce7; color: #166534; }
+    .match-chip-missing { background: #f1f5f9; color: #64748b; }
+
+    .tailor-warning-box {
+      margin-top: 10px;
+      padding: 10px 12px;
+      background: #fffbeb;
+      border: 1px solid #fde68a;
+      border-radius: 8px;
+      font-size: 12px;
+      color: #92400e;
+      line-height: 1.5;
+      white-space: pre-line;
+    }
+
+    .tailor-output-ta {
+      min-height: 160px;
+      max-height: 280px;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .tailor-action-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .tailor-action-row .btn {
+      margin-top: 0;
+    }
+
+    .tailor-action-row .btn-redo {
+      flex: 0 0 auto;
+      padding: 10px 14px;
+    }
+
+    /* Tailor-open button — sits in the activate section */
+    #tailor-open-btn {
+      margin-top: 8px;
+      background: white;
+      border: 1.5px solid #e2e8f0;
+      color: #475569;
+    }
+    #tailor-open-btn:hover { background: #f8fafc; border-color: #7c3aed; color: #7c3aed; }
   </style>
 </head>
 <body>
+
+  <!-- ═══════════════ MAIN VIEW ═══════════════ -->
+  <div id="main-view">
 
   <!-- Header -->
   <div class="da-header">
@@ -421,50 +605,92 @@
         <span class="da-status-label" id="page-status-text">Checking…</span>
       </div>
       <button class="btn btn-primary" id="activate-btn" hidden>Activate on this page</button>
+
+      <!-- Tailor CV trigger (shown when CV is loaded) -->
+      <button class="btn" id="tailor-open-btn" hidden>✦ Tailor CV for this job</button>
     </div>
 
-  </div>
-
-  <!-- LLM Settings -->
-  <div style="padding: 0 14px 4px;">
-    <button id="toggle-llm-btn" style="width:100%;padding:7px 10px;background:#f1f5f9;border:1.5px solid #e2e8f0;border-radius:8px;font-size:12px;font-weight:600;color:#475569;cursor:pointer;text-align:left;display:flex;align-items:center;justify-content:space-between;">
-      <span>LLM Settings</span>
-      <span id="llm-badge" style="font-size:11px;color:#94a3b8;">Default (Groq)</span>
-    </button>
-    <div id="llm-settings-panel" hidden style="margin-top:8px;padding:12px;background:white;border:1.5px solid #e2e8f0;border-radius:8px;">
-      <p style="font-size:11.5px;color:#64748b;margin-bottom:10px;line-height:1.5;">Leave on Default to use the shared Groq backend. Set your own key to use a different provider.</p>
-      <div style="margin-bottom:8px;">
-        <label style="font-size:11px;font-weight:600;color:#475569;display:block;margin-bottom:4px;">Provider</label>
-        <select id="llm-provider-select" style="width:100%;padding:6px 8px;border:1.5px solid #e2e8f0;border-radius:6px;font-size:12.5px;font-family:inherit;color:#1e293b;background:white;">
-          <option value="">Default (Groq)</option>
-          <option value="groq">Groq</option>
-          <option value="openai">OpenAI</option>
-          <option value="anthropic">Anthropic (Claude)</option>
-          <option value="gemini">Google Gemini</option>
-          <option value="mistral">Mistral</option>
-          <option value="together">Together AI</option>
-        </select>
-      </div>
-      <div id="llm-key-field" hidden style="margin-bottom:8px;">
-        <label style="font-size:11px;font-weight:600;color:#475569;display:block;margin-bottom:4px;">API Key</label>
-        <input type="password" id="llm-api-key" placeholder="Enter your API key…" autocomplete="off"
-          style="width:100%;padding:6px 8px;border:1.5px solid #e2e8f0;border-radius:6px;font-size:12.5px;font-family:inherit;color:#1e293b;">
-      </div>
-      <div id="llm-model-field" hidden style="margin-bottom:10px;">
-        <label style="font-size:11px;font-weight:600;color:#475569;display:block;margin-bottom:4px;">Model <span style="font-weight:400;color:#94a3b8;">(optional)</span></label>
-        <input type="text" id="llm-model" placeholder="Leave empty for default model"
-          style="width:100%;padding:6px 8px;border:1.5px solid #e2e8f0;border-radius:6px;font-size:12.5px;font-family:inherit;color:#1e293b;">
-      </div>
-      <div style="display:flex;gap:6px;">
-        <button class="btn btn-primary" id="save-llm-btn" style="flex:1;margin-top:0;font-size:12.5px;padding:7px;">Save</button>
-        <button class="btn btn-secondary" id="reset-llm-btn" style="flex:1;margin-top:0;font-size:12.5px;padding:7px;">Reset</button>
-      </div>
-    </div>
   </div>
 
   <div class="da-footer">
     Click the <strong>DA</strong> button next to any field, or highlight a question and right-click.
   </div>
+
+  </div><!-- /main-view -->
+
+  <!-- ═══════════════ TAILOR VIEW ═══════════════ -->
+  <div id="tailor-view" hidden>
+
+    <!-- Reuse the same header gradient -->
+    <div class="da-header">
+      <div class="da-header-logo">
+        <img src="icons/icon128.png" alt="" onerror="this.style.display='none'">
+      </div>
+      <div class="da-header-text">
+        <div class="da-header-title">DraftApply</div>
+        <div class="da-header-sub">CV tailoring</div>
+      </div>
+    </div>
+
+    <div class="da-body">
+
+      <div class="tailor-nav">
+        <button class="tailor-back-btn" id="tailor-back-btn">← Back</button>
+        <span class="tailor-view-title">Tailor CV for this job</span>
+      </div>
+
+      <div class="da-section-label">Job Description</div>
+      <textarea id="tailor-jd" placeholder="Paste the full job description here…" style="min-height:110px;"></textarea>
+
+      <div class="tailor-inputs-row">
+        <input id="tailor-job-title" type="text" class="tailor-input" placeholder="Job title (optional)">
+        <input id="tailor-company"   type="text" class="tailor-input" placeholder="Company (optional)">
+      </div>
+
+      <button class="btn btn-primary" id="tailor-generate-btn">Generate Tailored CV</button>
+
+      <!-- Loading -->
+      <div id="tailor-loading" hidden>
+        <div class="tailor-loading-wrap">
+          <div class="tailor-spinner"></div>
+          <div class="tailor-loading-text">Tailoring your CV…</div>
+          <div class="tailor-loading-sub">This takes 15–30 seconds</div>
+        </div>
+      </div>
+
+      <!-- Results -->
+      <div id="tailor-results" hidden>
+
+        <div class="match-report">
+          <div class="match-report-header">
+            <span class="match-report-title">Match report</span>
+            <span class="match-score-badge" id="match-score">–</span>
+          </div>
+          <div class="match-group" id="match-strong" hidden>
+            <div class="match-group-label match-label-green">Matched from your CV</div>
+            <div class="match-chips" id="match-strong-chips"></div>
+          </div>
+          <div class="match-group" id="match-missing" hidden>
+            <div class="match-group-label match-label-gray">Not found in your CV</div>
+            <div class="match-chips" id="match-missing-chips"></div>
+          </div>
+        </div>
+
+        <div id="tailor-warnings-box" class="tailor-warning-box" hidden></div>
+
+        <div class="da-section-label" style="margin-top:14px;">Tailored CV</div>
+        <textarea id="tailor-output" class="tailor-output-ta"></textarea>
+
+        <div class="tailor-action-row">
+          <button class="btn btn-secondary" id="tailor-copy-btn" style="flex:1;">Copy to clipboard</button>
+          <button class="btn btn-secondary tailor-action-row btn-redo" id="tailor-redo-btn">↺ Redo</button>
+        </div>
+      </div>
+
+      <div class="message" id="tailor-message" hidden></div>
+
+    </div>
+  </div><!-- /tailor-view -->
 
   <script src="popup.js"></script>
 </body>

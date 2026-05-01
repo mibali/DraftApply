@@ -299,6 +299,62 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === 'TAILOR_CV') {
+    (async () => {
+      try {
+        const { cvText } = await chrome.storage.local.get('cvText');
+        if (!cvText) { sendResponse({ error: 'No CV loaded — please save your CV first' }); return; }
+
+        const proxyUrl = await getProxyUrl();
+        let token = await ensureInstallToken(proxyUrl);
+
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 90000);
+        const keepAlive = setInterval(() => chrome.storage.local.get('_sw_keepalive'), 20000);
+
+        try {
+          let response = await fetch(`${proxyUrl}/api/cv/tailor`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            signal: controller.signal,
+            body: JSON.stringify({
+              cvText,
+              jobDescription: message.jobDescription,
+              jobTitle: message.jobTitle || '',
+              company:  message.company  || '',
+            }),
+          });
+
+          if (response.status === 401) {
+            await clearInstallToken();
+            token = await ensureInstallToken(proxyUrl);
+            response = await fetch(`${proxyUrl}/api/cv/tailor`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+              signal: controller.signal,
+              body: JSON.stringify({ cvText, jobDescription: message.jobDescription, jobTitle: message.jobTitle || '', company: message.company || '' }),
+            });
+          }
+
+          if (!response.ok) {
+            const err = await response.json().catch(() => ({}));
+            throw new Error(err.error || `Error ${response.status}`);
+          }
+
+          const data = await response.json();
+          sendResponse({ success: true, ...data });
+        } finally {
+          clearTimeout(timeout);
+          clearInterval(keepAlive);
+        }
+      } catch (e) {
+        if (e?.name === 'AbortError') sendResponse({ error: 'Timed out — please try again' });
+        else sendResponse({ error: e.message });
+      }
+    })();
+    return true;
+  }
+
   if (message.type === 'CHECK_PROXY') {
     checkProxy()
       .then(sendResponse)
@@ -442,10 +498,7 @@ async function handleStreamingAPICall(payload, requestId, tabId, frameId) {
   // Touching chrome.storage every 20s keeps the SW alive during long streams.
   const keepAlive = setInterval(() => chrome.storage.local.get('_sw_keepalive'), 20000);
 
-  const { llmConfig } = await chrome.storage.local.get('llmConfig');
-  const enrichedPayload = (llmConfig?.provider && llmConfig?.apiKey)
-    ? { ...payload, llmConfig, stream: true }
-    : { ...payload, stream: true };
+  const enrichedPayload = { ...payload, stream: true };
 
   try {
     const token = await ensureInstallToken(proxyUrl);
@@ -539,11 +592,7 @@ async function handleAPICall(payload, requestId) {
   // Hard timeout so the UI never spins forever
   const timeout = setTimeout(() => controller.abort(), 120000);
 
-  // Attach user's custom LLM config if configured
-  const { llmConfig } = await chrome.storage.local.get('llmConfig');
-  const enrichedPayload = (llmConfig?.provider && llmConfig?.apiKey)
-    ? { ...payload, llmConfig }
-    : payload;
+  const enrichedPayload = payload;
 
   try {
     let token = await ensureInstallToken(proxyUrl);

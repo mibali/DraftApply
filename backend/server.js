@@ -3,17 +3,17 @@
  * 
  * Supports multiple FREE LLM providers:
  * 
- * LOCAL (no API key, fully private):
- * - Ollama (default)
- * - LM Studio
- * - LocalAI
- * 
  * CLOUD (free tiers):
- * - Groq (recommended - fast & generous)
+ * - Groq (default — fast & generous)
  * - Google Gemini
  * - Mistral
  * - Together AI
  * - OpenAI (paid)
+ *
+ * LOCAL (no API key, fully private):
+ * - Ollama
+ * - LM Studio
+ * - LocalAI
  */
 
 import express from 'express';
@@ -35,6 +35,8 @@ import {
 } from './llm-providers.js';
 import { CVParser } from '../shared/cv-parser.js';
 import { PromptBuilder } from '../shared/prompt-builder.js';
+import { JDParser } from '../shared/jd-parser.js';
+import { CVTailor } from '../shared/cv-tailor.js';
 
 dotenv.config();
 
@@ -297,6 +299,52 @@ app.post('/api/cv/text', (req, res) => {
     text: text.trim(),
     size: text.length
   });
+});
+
+/**
+ * CV Tailoring endpoint
+ */
+app.post('/api/cv/tailor', async (req, res) => {
+  try {
+    const { cvText, jobTitle = '', company = '', jobDescription } = req.body || {};
+
+    if (!cvText || cvText.length < 100) {
+      return res.status(400).json({ error: 'cvText must be at least 100 characters' });
+    }
+    if (!jobDescription || jobDescription.length < 50) {
+      return res.status(400).json({ error: 'jobDescription must be at least 50 characters' });
+    }
+
+    const cvData   = new CVParser().parse(cvText);
+    const jdData   = new JDParser().parse(jobDescription, jobTitle, company);
+    const tailor   = new CVTailor();
+    const matchMap = tailor.buildMatchMap(cvData, jdData);
+    const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(cvData, jdData, matchMap);
+
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user',   content: userPrompt   }
+    ];
+
+    const result = await generate(PROVIDER_NAME, PROVIDER_CONFIG, messages, {
+      temperature: 0.3,
+      max_tokens: 4000
+    });
+
+    const tailoredCvText = result.answer;
+    if (!tailoredCvText?.trim()) {
+      return res.status(502).json({ error: 'No output from provider' });
+    }
+
+    const warnings        = tailor.validateTailoredCV(cvData, tailoredCvText);
+    const changedSections = tailor.detectChangedSections(cvText, tailoredCvText);
+    const matchReport     = tailor.buildMatchSummary(matchMap);
+
+    res.json({ tailoredCvText, matchReport, warnings, changedSections });
+  } catch (error) {
+    console.error('CV tailor error:', error);
+    res.status(500).json({ error: 'Failed to tailor CV', details: error.message });
+  }
 });
 
 // Serve frontend + shared modules (works in dev too)
