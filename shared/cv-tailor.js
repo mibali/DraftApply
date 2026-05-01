@@ -106,6 +106,7 @@ STRICT RULES:
 5. Do not remove any role or educational entry.
 
 WHAT YOU MAY DO:
+• Update the professional headline / title line (the short descriptor directly below the candidate's name, e.g. "Senior Frontend Engineer") to match the target role title exactly.
 • Rewrite the professional summary to align with the target role and seniority level.
 • Reorder the skills list to surface the most relevant skills first.
 • Rephrase existing responsibility bullets using vocabulary from the job description, as long as the underlying meaning is unchanged.
@@ -139,6 +140,12 @@ ORIGINAL CV
 ${cvData.rawText}
 
 INSTRUCTION
+1. If the CV has a professional headline/title below the name, update it to: "${jdData.jobTitle || 'the target role'}".
+2. Rewrite the professional summary targeting this role.
+3. Reorder skills so the most JD-relevant appear first.
+4. For each role: rewrite relevant bullets with JD vocabulary (same meaning, aligned language), reorder bullets so most relevant come first.
+5. Preserve all locked fields exactly — same spelling, capitalisation, and punctuation.
+
 Output the complete tailored CV text with no preamble, no commentary, and no markdown code fences. Begin directly with the candidate's name.`;
 
     return { systemPrompt, userPrompt, temperature: 0.3 };

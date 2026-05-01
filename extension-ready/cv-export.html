@@ -8,47 +8,35 @@
 
     body {
       font-family: 'Calibri', 'Segoe UI', Arial, sans-serif;
-      font-size: 11pt;
+      font-size: 10.5pt;
       line-height: 1.55;
       color: #111;
-      background: white;
-      padding: 28mm 24mm;
-      max-width: 900px;
-      margin: 0 auto;
+      background: #f4f4f5;
     }
 
-    pre {
-      font-family: inherit;
-      font-size: inherit;
-      line-height: inherit;
-      white-space: pre-wrap;
-      word-wrap: break-word;
-    }
-
-    /* Toolbar — hidden when printing */
+    /* ── Toolbar ── */
     #toolbar {
       position: fixed;
-      top: 0;
-      left: 0;
-      right: 0;
+      top: 0; left: 0; right: 0;
       background: linear-gradient(135deg, #2563eb, #7c3aed);
       color: white;
-      padding: 10px 20px;
+      padding: 10px 24px;
       display: flex;
       align-items: center;
       gap: 12px;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       font-size: 13px;
       z-index: 999;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
     }
 
-    #toolbar span { flex: 1; font-weight: 600; }
+    #toolbar-title { flex: 1; font-weight: 600; }
 
     #toolbar button {
-      background: rgba(255,255,255,0.18);
-      border: 1.5px solid rgba(255,255,255,0.4);
+      background: rgba(255,255,255,0.15);
+      border: 1.5px solid rgba(255,255,255,0.35);
       color: white;
-      padding: 6px 16px;
+      padding: 6px 18px;
       border-radius: 7px;
       font-size: 13px;
       font-weight: 600;
@@ -56,39 +44,136 @@
       font-family: inherit;
       transition: background 0.15s;
     }
-
     #toolbar button:hover { background: rgba(255,255,255,0.28); }
+    #toolbar button.btn-secondary {
+      background: transparent;
+      border-color: rgba(255,255,255,0.25);
+      opacity: 0.8;
+    }
+    #toolbar button.btn-secondary:hover { opacity: 1; background: rgba(255,255,255,0.1); }
 
-    #cv-content-wrap {
-      margin-top: 52px; /* below fixed toolbar */
+    /* ── CV page ── */
+    #cv-page {
+      margin: 64px auto 40px;
+      max-width: 820px;
+      background: white;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.1);
+      padding: 28mm 26mm 30mm;
+      min-height: 297mm;
     }
 
-    #loading {
+    /* ── CV typography ── */
+    .cv-name {
+      font-size: 22pt;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+      color: #0f172a;
+      line-height: 1.15;
+      margin-bottom: 4px;
+    }
+
+    .cv-headline {
+      font-size: 11.5pt;
+      font-weight: 500;
+      color: #475569;
+      margin-bottom: 6px;
+    }
+
+    .cv-contact {
+      font-size: 9.5pt;
       color: #64748b;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      font-size: 14px;
-      text-align: center;
-      margin-top: 80px;
+      margin-bottom: 2px;
+      line-height: 1.5;
     }
 
+    .cv-contact a {
+      color: #2563eb;
+      text-decoration: none;
+    }
+    .cv-contact a:hover { text-decoration: underline; }
+
+    .cv-section-header {
+      font-size: 8.5pt;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1.2px;
+      color: #2563eb;
+      border-bottom: 1.5px solid #2563eb;
+      padding-bottom: 3px;
+      margin-top: 18px;
+      margin-bottom: 7px;
+    }
+
+    .cv-role-header {
+      font-size: 10.5pt;
+      font-weight: 700;
+      color: #0f172a;
+      margin-top: 10px;
+      margin-bottom: 1px;
+    }
+
+    .cv-role-meta {
+      font-size: 9.5pt;
+      color: #64748b;
+      margin-bottom: 4px;
+    }
+
+    .cv-bullets {
+      padding-left: 14px;
+      margin: 4px 0 6px;
+    }
+
+    .cv-bullets li {
+      font-size: 10pt;
+      margin-bottom: 3px;
+      line-height: 1.5;
+    }
+
+    .cv-bullets li a { color: #2563eb; text-decoration: none; }
+
+    .cv-body {
+      font-size: 10.5pt;
+      margin-bottom: 3px;
+      line-height: 1.55;
+    }
+
+    .cv-body a { color: #2563eb; text-decoration: none; }
+
+    .cv-spacer { height: 5px; }
+
+    /* Loading */
+    #loading {
+      text-align: center;
+      margin-top: 120px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      color: #64748b;
+      font-size: 14px;
+    }
+
+    /* ── Print styles ── */
     @media print {
+      body { background: white; }
       #toolbar { display: none !important; }
-      #cv-content-wrap { margin-top: 0; }
-      body { padding: 0; }
+      #cv-page {
+        margin: 0;
+        box-shadow: none;
+        padding: 20mm 18mm;
+        min-height: auto;
+      }
     }
   </style>
 </head>
 <body>
 
   <div id="toolbar">
-    <span>DraftApply — Tailored CV</span>
+    <span id="toolbar-title">DraftApply — Tailored CV</span>
     <button onclick="window.print()">Save as PDF / Print</button>
-    <button onclick="window.close()">Close</button>
+    <button class="btn-secondary" onclick="window.close()">Close</button>
   </div>
 
-  <div id="cv-content-wrap">
+  <div id="cv-page">
     <div id="loading">Loading your tailored CV…</div>
-    <pre id="cv-content" hidden></pre>
+    <div id="cv-content" hidden></div>
   </div>
 
   <script src="cv-export.js"></script>

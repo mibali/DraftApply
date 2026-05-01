@@ -508,18 +508,38 @@
 
     .tailor-action-row {
       display: flex;
-      gap: 8px;
-      margin-top: 8px;
+      flex-direction: column;
+      gap: 6px;
+      margin-top: 10px;
     }
 
     .tailor-action-row .btn {
       margin-top: 0;
     }
 
-    .tailor-action-row .btn-redo {
+    .tailor-action-secondary {
+      display: flex;
+      gap: 6px;
+    }
+
+    .tailor-action-secondary .btn-copy {
+      flex: 1;
+      background: #f1f5f9;
+      color: #475569;
+      border: 1.5px solid #e2e8f0;
+      font-size: 13px;
+    }
+    .tailor-action-secondary .btn-copy:hover { background: #e2e8f0; }
+
+    .tailor-action-secondary .btn-redo {
       flex: 0 0 auto;
       padding: 10px 14px;
+      background: #f1f5f9;
+      color: #475569;
+      border: 1.5px solid #e2e8f0;
+      font-size: 13px;
     }
+    .tailor-action-secondary .btn-redo:hover { background: #e2e8f0; }
 
     /* Tailor-open button — sits in the activate section */
     #tailor-open-btn {
@@ -682,9 +702,11 @@
         <textarea id="tailor-output" class="tailor-output-ta"></textarea>
 
         <div class="tailor-action-row">
-          <button class="btn btn-secondary" id="tailor-copy-btn" style="flex:1;">Copy</button>
-          <button class="btn btn-primary"   id="tailor-pdf-btn"  style="flex:1; margin-top:0;">Download PDF</button>
-          <button class="btn btn-secondary tailor-action-row btn-redo" id="tailor-redo-btn">↺</button>
+          <button class="btn btn-primary" id="tailor-pdf-btn">Download PDF</button>
+          <div class="tailor-action-secondary">
+            <button class="btn btn-copy" id="tailor-copy-btn">Copy to clipboard</button>
+            <button class="btn btn-redo" id="tailor-redo-btn" title="Regenerate">↺ Redo</button>
+          </div>
         </div>
       </div>
 
