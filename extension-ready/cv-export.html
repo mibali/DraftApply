@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Tailored CV — DraftApply</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Calibri', 'Segoe UI', Arial, sans-serif;
+      font-size: 11pt;
+      line-height: 1.55;
+      color: #111;
+      background: white;
+      padding: 28mm 24mm;
+      max-width: 900px;
+      margin: 0 auto;
+    }
+
+    pre {
+      font-family: inherit;
+      font-size: inherit;
+      line-height: inherit;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+
+    /* Toolbar — hidden when printing */
+    #toolbar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      background: linear-gradient(135deg, #2563eb, #7c3aed);
+      color: white;
+      padding: 10px 20px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 13px;
+      z-index: 999;
+    }
+
+    #toolbar span { flex: 1; font-weight: 600; }
+
+    #toolbar button {
+      background: rgba(255,255,255,0.18);
+      border: 1.5px solid rgba(255,255,255,0.4);
+      color: white;
+      padding: 6px 16px;
+      border-radius: 7px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 0.15s;
+    }
+
+    #toolbar button:hover { background: rgba(255,255,255,0.28); }
+
+    #cv-content-wrap {
+      margin-top: 52px; /* below fixed toolbar */
+    }
+
+    #loading {
+      color: #64748b;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 14px;
+      text-align: center;
+      margin-top: 80px;
+    }
+
+    @media print {
+      #toolbar { display: none !important; }
+      #cv-content-wrap { margin-top: 0; }
+      body { padding: 0; }
+    }
+  </style>
+</head>
+<body>
+
+  <div id="toolbar">
+    <span>DraftApply — Tailored CV</span>
+    <button onclick="window.print()">Save as PDF / Print</button>
+    <button onclick="window.close()">Close</button>
+  </div>
+
+  <div id="cv-content-wrap">
+    <div id="loading">Loading your tailored CV…</div>
+    <pre id="cv-content" hidden></pre>
+  </div>
+
+  <script src="cv-export.js"></script>
+</body>
+</html>

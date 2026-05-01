@@ -42,6 +42,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     tailorWarningsBox:  document.getElementById('tailor-warnings-box'),
     tailorOutput:       document.getElementById('tailor-output'),
     tailorCopyBtn:      document.getElementById('tailor-copy-btn'),
+    tailorPdfBtn:       document.getElementById('tailor-pdf-btn'),
     tailorRedoBtn:      document.getElementById('tailor-redo-btn'),
     tailorMessage:      document.getElementById('tailor-message'),
   };
@@ -68,6 +69,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   elements.tailorGenerateBtn.addEventListener('click', runTailorCV);
   elements.tailorRedoBtn.addEventListener('click', runTailorCV);
   elements.tailorCopyBtn.addEventListener('click', copyTailoredCV);
+  elements.tailorPdfBtn.addEventListener('click', downloadAsPdf);
 
   // File upload handling
   elements.uploadArea.addEventListener('click', () => elements.cvFile.click());
@@ -405,6 +407,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     } catch {
       showTailorMessage('Could not copy — try selecting the text manually', 'error');
     }
+  }
+
+  async function downloadAsPdf() {
+    const text = elements.tailorOutput.value;
+    if (!text) return;
+    // Store CV text temporarily so the export page can read it
+    await chrome.storage.local.set({ tailoredCvExport: text });
+    // Open the export page — user clicks "Save as PDF" in the print dialog
+    chrome.tabs.create({ url: chrome.runtime.getURL('cv-export.html') });
   }
 
   function showTailorMessage(text, type = 'success') {
