@@ -226,12 +226,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.tailorOpenBtn.hidden = false;
   }
 
-  function showCVInput() {
+  async function showCVInput() {
+    const response = await chrome.runtime.sendMessage({ type: 'GET_CV' }).catch(() => ({}));
     elements.cvInputSection.hidden = false;
     elements.cvLoadedSection.hidden = true;
-    elements.cvStatusDot.classList.remove('ready');
-    elements.cvStatusText.textContent = 'No CV';
-    elements.cvText.value = '';
+    if (response?.cvText) {
+      elements.cvStatusDot.classList.add('ready');
+      elements.cvStatusText.textContent = 'Editing CV';
+      elements.cvText.value = response.cvText;
+    } else {
+      elements.cvStatusDot.classList.remove('ready');
+      elements.cvStatusText.textContent = 'No CV';
+      elements.cvText.value = '';
+    }
     elements.tailorOpenBtn.hidden = true;
   }
 

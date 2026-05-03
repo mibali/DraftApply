@@ -37,10 +37,18 @@ export class CVTailor {
 
     return deduped.map(({ req, type }) => {
       const evidence = this._findEvidence(req, cvSources);
+      const coreTokens = this._getCoreTokens(req);
+      const supportedCoreTokens = coreTokens.filter(tok =>
+        cvSources.some(source => source && this._normaliseText(source).includes(tok))
+      );
+      const fullySupported = coreTokens.length === 0 || supportedCoreTokens.length === coreTokens.length;
+      const isAtomicRequirement = coreTokens.length <= 1;
       let status;
-      if (evidence.length >= 2) {
+      if (!fullySupported) {
+        status = 'missing';
+      } else if (evidence.length >= 2) {
         status = 'strong_match';
-      } else if (evidence.length === 1 || this._hasAdjacentTech(req, cvLower)) {
+      } else if (evidence.length === 1 || (isAtomicRequirement && this._hasAdjacentTech(req, cvLower))) {
         status = 'partial_match';
       } else {
         status = 'missing';
@@ -85,9 +93,9 @@ export class CVTailor {
    * @returns {{ systemPrompt: string, userPrompt: string, temperature: number }}
    */
   buildTailoringPrompt(cvData, jdData, matchMap) {
+    const contactFields = this._getLockedContactFields(cvData.contactInfo);
     const lockedFields = [
-      'Full name', 'Email address', 'Phone number', 'LinkedIn URL', 'GitHub URL',
-      'Portfolio / website URLs',
+      ...contactFields,
       ...((cvData.experience || []).map(e => `Company: "${e.company}" | Job title: "${e.title}" | Dates: "${e.dates}"`)),
       ...((cvData.education  || []).map(e => `Institution: "${e.institution}" | Degree: "${e.degree}" | Dates: "${e.dates}"`)),
       ...((cvData.certifications || []).map(c => `Certification: "${c}"`)),
@@ -180,14 +188,14 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
       }
     }
 
-    // Name and email
-    const name = originalCvData.contactInfo?.name;
-    if (name && !t.includes(name)) {
-      warnings.push(`Candidate name may have changed or been removed: "${name}"`);
-    }
-    const email = originalCvData.contactInfo?.email;
-    if (email && !t.includes(email)) {
-      warnings.push(`Email address may have changed or been removed: "${email}"`);
+    // Contact details
+    for (const field of this._getLockedContactFields(originalCvData.contactInfo)) {
+      const m = field.match(/^([^:]+): "(.+)"$/);
+      if (!m) continue;
+      const [, label, value] = m;
+      if (value && !t.includes(value)) {
+        warnings.push(`${label} may have changed or been removed: "${value}"`);
+      }
     }
 
     // New metrics not in the original
@@ -233,28 +241,61 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
 
   // ── private helpers ──────────────────────────────────────────────────────
 
-  /** Find CV source snippets that mention the requirement. */
-  _findEvidence(requirement, cvSources) {
-    // Noise words common in long-form JD requirements that aren't the actual skill
-    const NOISE = new Set([
+  _getLockedContactFields(contactInfo = {}) {
+    const fields = [
+      ['Full name', contactInfo.name],
+      ['Email address', contactInfo.email],
+      ['Phone number', contactInfo.phone],
+      ['LinkedIn URL', contactInfo.linkedin],
+      ['GitHub URL', contactInfo.github],
+      ['Website URL', contactInfo.website],
+      ['Twitter/X URL', contactInfo.twitter],
+      ['Portfolio URL', contactInfo.portfolio],
+    ];
+    return fields
+      .filter(([, value]) => typeof value === 'string' && value.trim())
+      .map(([label, value]) => `${label}: "${value.trim()}"`);
+  }
+
+  _getCoreTokens(requirement) {
+    const NOISE = this._noiseWords();
+    const needle = this._normaliseText(requirement);
+    if (!needle) return [];
+    return [...new Set(
+      needle
+        .split(/\s+/)
+        .filter(t => t.length >= 3 && !NOISE.has(t))
+    )];
+  }
+
+  _noiseWords() {
+    return new Set([
       'years','year','experience','exp','strong','solid','good','deep','excellent',
       'proven','minimum','least','required','knowledge','familiarity','understanding',
       'proficiency','proficient','ability','skill','skills','background','working',
       'hands','on','with','and','or','in','of','the','a','an','to','for','at','by',
-      'have','has','ideally','preferably','ideally','including','such','as','use',
-      'using','ability','demonstrate','demonstrated','demonstrated','equivalent',
+      'have','has','ideally','preferably','including','such','as','use','using',
+      'demonstrate','demonstrated','equivalent',
     ]);
+  }
 
-    const needle = requirement.toLowerCase().replace(/[^\w\s.+#]/g, '').trim();
+  _normaliseText(text) {
+    return String(text || '').toLowerCase().replace(/[^\w\s.+#]/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  /** Find CV source snippets that mention the requirement. */
+  _findEvidence(requirement, cvSources) {
+    // Noise words common in long-form JD requirements that aren't the actual skill
+    const needle = this._normaliseText(requirement);
     if (!needle) return [];
 
     const allTokens = needle.split(/\s+/).filter(t => t.length >= 2);
-    const coreTokens = allTokens.filter(t => t.length >= 3 && !NOISE.has(t));
+    const coreTokens = this._getCoreTokens(requirement);
     const evidence = [];
 
     for (const source of cvSources) {
       if (!source) continue;
-      const lower = source.toLowerCase();
+      const lower = this._normaliseText(source);
 
       // Full phrase match (strongest signal)
       if (lower.includes(needle)) {
@@ -266,9 +307,9 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
         evidence.push(source.trim().slice(0, 150));
         continue;
       }
-      // Any meaningful core token present — handles "X years experience with React" → "react"
-      // Only applies when requirement is long-form (has noise), not when it's already a short keyword
-      if (allTokens.length > coreTokens.length && coreTokens.some(tok => tok.length >= 4 && lower.includes(tok))) {
+      // Atomic long-form requirement: "X years experience with React" → "React".
+      // Compound requirements must be fully supported before evidence is accepted.
+      if (coreTokens.length === 1 && allTokens.length > coreTokens.length && lower.includes(coreTokens[0])) {
         evidence.push(source.trim().slice(0, 150));
       }
     }

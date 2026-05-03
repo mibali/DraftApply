@@ -187,6 +187,7 @@ export async function streamOllama(config, messages, options = {}, res) {
  */
 export async function generateOpenAICompatible(config, messages, options = {}) {
   const headers = { 'Content-Type': 'application/json' };
+  const maxTokens = options.max_tokens ?? options.maxTokens;
   
   if (config.apiKey) {
     headers['Authorization'] = `Bearer ${config.apiKey}`;
@@ -198,7 +199,8 @@ export async function generateOpenAICompatible(config, messages, options = {}) {
     body: JSON.stringify({
       model: config.model,
       messages,
-      temperature: options.temperature || 0.7
+      temperature: options.temperature ?? 0.7,
+      ...(maxTokens ? { max_tokens: maxTokens } : {})
     })
   });
 
