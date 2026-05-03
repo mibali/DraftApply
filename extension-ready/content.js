@@ -175,8 +175,9 @@ class DraftApplyExtension {
           <div class="da-context-info" id="da-context-info"></div>
           <div class="da-question-label">Question <span class="da-question-hint">(editable)</span></div>
           <textarea class="da-question-preview" id="da-question-preview" rows="2" spellcheck="false"></textarea>
-          <div class="da-answer-label">Generated Answer</div>
+          <div class="da-answer-label">Generated Answer <span id="da-char-hint" class="da-char-hint"></span></div>
           <textarea class="da-answer-output" id="da-answer-output" placeholder="Your answer will appear here. You can edit it before inserting."></textarea>
+          <div id="da-char-counter" class="da-char-counter" hidden></div>
           <div class="da-modal-actions">
             <div class="da-controls-row">
               <div class="da-control-group">
@@ -237,6 +238,11 @@ class DraftApplyExtension {
       pill.classList.add('da-pill-active');
       modal.querySelector('#da-tone-select').value = pill.dataset.value;
     };
+
+    // Live character counter — only active when field has a maxLength
+    modal.querySelector('#da-answer-output').addEventListener('input', () => {
+      this._updateCharCounter();
+    });
     
     modal.onclick = (e) => {
       if (e.target === modal) this.hideModal();
@@ -481,6 +487,8 @@ class DraftApplyExtension {
           e.stopPropagation();
           clickPending = false;
           this.currentField = field;
+          // maxLength is -1 when unset; treat anything <= 0 as "no limit"
+          this.currentFieldMaxLength = (field.maxLength > 0) ? field.maxLength : null;
 
           const label = this.findFieldLabel(field);
           const fieldHint = field.name || field.id || field.placeholder || null;
@@ -592,6 +600,52 @@ class DraftApplyExtension {
     window.addEventListener('resize', repositionVisible, { passive: true });
   }
 
+  // ── Field constraint helpers ─────────────────────────────────────────────
+
+  _inferLengthFromField(field) {
+    if (!field) return null;
+    const maxLen = (field.maxLength > 0) ? field.maxLength : null;
+    const isSingleLine = field.tagName === 'INPUT';
+    if (isSingleLine) return 'short';
+    if (maxLen && maxLen <= 250) return 'short';
+    if (maxLen && maxLen <= 700) return 'medium';
+    return null; // no constraint — don't override user's selection
+  }
+
+  _setLengthPill(length) {
+    const modal = this.modal;
+    if (!modal) return;
+    modal.querySelectorAll('.da-length-pill').forEach(p => p.classList.remove('da-pill-active'));
+    const pill = modal.querySelector(`.da-length-pill[data-value="${length}"]`);
+    if (pill) pill.classList.add('da-pill-active');
+    modal.querySelector('#da-length-select').value = length;
+  }
+
+  _applyCharLimit(text) {
+    const maxLen = this.currentFieldMaxLength;
+    if (!maxLen || !text || text.length <= maxLen) return text;
+    // Try to end at a sentence boundary within the limit
+    const cut = text.slice(0, maxLen);
+    const sentenceEnd = cut.search(/[.!?][^.!?]*$/);
+    if (sentenceEnd > maxLen * 0.6) return text.slice(0, sentenceEnd + 1).trim();
+    // Fall back to last word boundary
+    const wordEnd = cut.lastIndexOf(' ');
+    return (wordEnd > maxLen * 0.7 ? cut.slice(0, wordEnd) : cut).trim();
+  }
+
+  _updateCharCounter() {
+    const maxLen = this.currentFieldMaxLength;
+    const counter = this.modal?.querySelector('#da-char-counter');
+    if (!counter) return;
+    if (!maxLen) { counter.hidden = true; return; }
+    const text = this.modal.querySelector('#da-answer-output')?.value || '';
+    const count = text.length;
+    const over = count > maxLen;
+    counter.hidden = false;
+    counter.textContent = `${count} / ${maxLen} characters`;
+    counter.className = over ? 'da-char-counter da-char-over' : 'da-char-counter';
+  }
+
   findFieldLabel(field) {
     // 1. Explicit <label for="...">
     if (field.id) {
@@ -686,15 +740,17 @@ class DraftApplyExtension {
       (ctx.contextQuality === 'structured' || ctx.contextQuality === 'heuristic')
         ? ctx.jobDescription
         : undefined;
+    const fieldMaxLen = (field.maxLength > 0) ? field.maxLength : null;
     const payload = {
       question,
-      length: 'medium',
+      length: this._inferLengthFromField(field) || 'medium',
       tone:   'natural',
       cvText:         cvResponse.cvText,
       jobTitle:       ctx.jobTitle || undefined,
       company:        ctx.company || undefined,
       jobDescription: jobDescriptionForPayload,
       requirements:   (ctx.requirements?.length > 0) ? ctx.requirements : undefined,
+      maxChars:       fieldMaxLen || undefined,
     };
 
     const cacheEntry = { status: 'loading', question, answer: null };
@@ -747,6 +803,18 @@ class DraftApplyExtension {
     modal.querySelector('#da-question-preview').value = question;
     modal.querySelector('#da-answer-output').value = '';
     modal.querySelector('#da-loading').hidden = true;
+
+    // Auto-select length based on field constraints
+    const autoLength = this._inferLengthFromField(this.currentField);
+    if (autoLength) this._setLengthPill(autoLength);
+
+    // Show/hide char limit hint and counter
+    const maxLen = this.currentFieldMaxLength;
+    const charHint = modal.querySelector('#da-char-hint');
+    if (charHint) charHint.textContent = maxLen ? `· limit: ${maxLen} chars` : '';
+    const counter = modal.querySelector('#da-char-counter');
+    if (counter) counter.hidden = !maxLen;
+    this._updateCharCounter();
     // Force-show with max-priority inline styles to override any page CSS
     modal.setAttribute('style',
       'display:flex !important;position:fixed !important;' +
@@ -820,6 +888,7 @@ class DraftApplyExtension {
         requirements:   (ctx.requirements && ctx.requirements.length > 0) ? ctx.requirements : undefined,
         pageUrl:        ctx.url || window.location.href,
         platform:       ctx.platform || undefined,
+        maxChars:       this.currentFieldMaxLength || undefined,
       };
 
       requestId = globalThis.crypto?.randomUUID?.() ?? `req_${Date.now()}_${Math.random().toString(16).slice(2)}`;
@@ -859,8 +928,9 @@ class DraftApplyExtension {
         });
         if (this.currentRequestId !== requestId) return;
         if (fallback?.answer) {
-          output.value = fallback.answer;
-          this.lastAnswer = fallback.answer;
+          output.value = this._applyCharLimit(fallback.answer);
+          this.lastAnswer = output.value;
+          this._updateCharCounter();
         } else if (fallback?.error) {
           output.value = `Error: ${fallback.error}`;
         } else {
@@ -898,7 +968,9 @@ class DraftApplyExtension {
 
       const answer = output.value.trim();
       if (answer) {
-        this.lastAnswer = answer;
+        output.value = this._applyCharLimit(answer);
+        this.lastAnswer = output.value;
+        this._updateCharCounter();
       } else {
         // No chunks received — proxy may not support SSE or buffered the response.
         // Fall back to non-streaming CALL_API and display the result normally.
@@ -911,8 +983,9 @@ class DraftApplyExtension {
         if (this.currentRequestId !== requestId) return; // cancelled while falling back
 
         if (fallback?.answer) {
-          output.value = fallback.answer;
-          this.lastAnswer = fallback.answer;
+          output.value = this._applyCharLimit(fallback.answer);
+          this.lastAnswer = output.value;
+          this._updateCharCounter();
         } else if (fallback?.error) {
           output.value = `Error: ${fallback.error}`;
         } else {

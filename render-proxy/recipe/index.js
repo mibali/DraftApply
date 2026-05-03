@@ -639,6 +639,7 @@ export function buildPrompts(input) {
     company,
     jobDescription,
     requirements,
+    maxChars,
   } = input;
 
   // Plain field labels (name, email, LinkedIn, phone, etc.)
@@ -650,35 +651,49 @@ export function buildPrompts(input) {
   const candidateName = extractCandidateName(cvText);
   const qType = detectQuestionType(question);
 
+  let result;
   switch (qType) {
     case 'short_factual':
-      return buildShortFactualPrompt(cvText, question);
+      result = buildShortFactualPrompt(cvText, question);
+      break;
     case 'yes_no':
-      return buildYesNoPrompt(cvText, question, jobCtx, candidateName, tone);
+      result = buildYesNoPrompt(cvText, question, jobCtx, candidateName, tone);
+      break;
     case 'brief':
-      return buildBriefPrompt(cvText, question, jobCtx, candidateName, tone);
+      result = buildBriefPrompt(cvText, question, jobCtx, candidateName, tone);
+      break;
     case 'behavioral':
-      return buildBehavioralPrompt(cvText, question, length, jobCtx, candidateName, tone);
+      result = buildBehavioralPrompt(cvText, question, length, jobCtx, candidateName, tone);
+      break;
     case 'strength_weakness': {
-      // Dispatch to a focused builder based on which sub-type is being asked.
-      // If the question asks for BOTH (e.g. "strengths and weaknesses"), fall
-      // through to the general builder so neither sub-topic is ignored.
       const isWeakness = /weakness(es)?|areas?\s+(for|of|to)\s+improve(ment)?|development\s+area|improve\s+about\s+yourself/i.test(question);
       const isStrength = /\bstrength(s)?\b/i.test(question);
-      if (isStrength && isWeakness) {
-        return buildGeneralPrompt(cvText, question, length, jobCtx, candidateName, tone);
-      }
-      return isWeakness
-        ? buildWeaknessPrompt(cvText, question, length, jobCtx, candidateName, tone)
-        : buildStrengthPrompt(cvText, question, length, jobCtx, candidateName, tone);
+      result = (isStrength && isWeakness)
+        ? buildGeneralPrompt(cvText, question, length, jobCtx, candidateName, tone)
+        : isWeakness
+          ? buildWeaknessPrompt(cvText, question, length, jobCtx, candidateName, tone)
+          : buildStrengthPrompt(cvText, question, length, jobCtx, candidateName, tone);
+      break;
     }
     case 'motivation':
-      return buildMotivationPrompt(cvText, question, length, jobCtx, candidateName, tone);
+      result = buildMotivationPrompt(cvText, question, length, jobCtx, candidateName, tone);
+      break;
     case 'why_company':
-      return buildWhyCompanyPrompt(cvText, question, length, jobCtx, jobTitle, company, candidateName, tone);
+      result = buildWhyCompanyPrompt(cvText, question, length, jobCtx, jobTitle, company, candidateName, tone);
+      break;
     case 'cover_letter':
-      return buildCoverLetterPrompt(cvText, question, length, jobCtx, jobTitle, company, candidateName, tone);
+      result = buildCoverLetterPrompt(cvText, question, length, jobCtx, jobTitle, company, candidateName, tone);
+      break;
     default:
-      return buildGeneralPrompt(cvText, question, length, jobCtx, candidateName, tone);
+      result = buildGeneralPrompt(cvText, question, length, jobCtx, candidateName, tone);
   }
+
+  // Append a hard character limit instruction when the form field has a known maxlength.
+  // This is more reliable than post-generation truncation — the model targets the right
+  // length from the start rather than needing to be cut afterwards.
+  if (maxChars > 0) {
+    result.userPrompt += `\n\nHARD LIMIT: This form field accepts a maximum of ${maxChars} characters. Your entire answer must be ${maxChars} characters or fewer (including spaces). Write concisely to stay within this limit.`;
+  }
+
+  return result;
 }

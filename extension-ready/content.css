@@ -274,6 +274,27 @@
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
 }
 
+.da-char-hint {
+  font-size: 9px;
+  font-weight: 500;
+  color: #94a3b8;
+  text-transform: lowercase;
+  letter-spacing: 0;
+  margin-left: 4px;
+}
+
+.da-char-counter {
+  font-size: 11px;
+  color: #94a3b8;
+  text-align: right;
+  margin-top: 4px;
+}
+
+.da-char-counter.da-char-over {
+  color: #ef4444;
+  font-weight: 600;
+}
+
 .da-modal-actions {
   display: flex;
   flex-direction: column;
