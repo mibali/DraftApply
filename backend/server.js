@@ -301,12 +301,39 @@ app.post('/api/cv/text', (req, res) => {
   });
 });
 
+app.post('/api/cv/analyze', async (req, res) => {
+  try {
+    const { cvText, jobTitle = '', company = '', jobDescription, confirmedSkills = [] } = req.body || {};
+
+    if (!cvText || cvText.length < 100) {
+      return res.status(400).json({ error: 'cvText must be at least 100 characters' });
+    }
+    if (!jobDescription || jobDescription.length < 50) {
+      return res.status(400).json({ error: 'jobDescription must be at least 50 characters' });
+    }
+
+    const cvData = new CVParser().parse(cvText);
+    const jdData = new JDParser().parse(jobDescription, jobTitle, company);
+    const tailor = new CVTailor();
+    const matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
+
+    res.json({
+      matchReport: tailor.buildMatchSummary(matchMap),
+      jobTitle: jdData.jobTitle,
+      company: jdData.company,
+    });
+  } catch (error) {
+    console.error('CV analyze error:', error);
+    res.status(500).json({ error: 'Failed to analyze CV match', details: error.message });
+  }
+});
+
 /**
  * CV Tailoring endpoint
  */
 app.post('/api/cv/tailor', async (req, res) => {
   try {
-    const { cvText, jobTitle = '', company = '', jobDescription } = req.body || {};
+    const { cvText, jobTitle = '', company = '', jobDescription, confirmedSkills = [] } = req.body || {};
 
     if (!cvText || cvText.length < 100) {
       return res.status(400).json({ error: 'cvText must be at least 100 characters' });
@@ -318,7 +345,7 @@ app.post('/api/cv/tailor', async (req, res) => {
     const cvData   = new CVParser().parse(cvText);
     const jdData   = new JDParser().parse(jobDescription, jobTitle, company);
     const tailor   = new CVTailor();
-    const matchMap = tailor.buildMatchMap(cvData, jdData);
+    const matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
     const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(cvData, jdData, matchMap);
 
     const messages = [
@@ -331,7 +358,10 @@ app.post('/api/cv/tailor', async (req, res) => {
       max_tokens: 4000
     });
 
-    const tailoredCvText = result.answer;
+    const tailoredCvText = tailor.removeTailoringMetaPhrases(
+      tailor.enforceTargetHeadline(result.answer, jdData.jobTitle),
+      jdData.company
+    );
     if (!tailoredCvText?.trim()) {
       return res.status(502).json({ error: 'No output from provider' });
     }

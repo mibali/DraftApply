@@ -443,8 +443,35 @@ app.post('/api/cv/upload', authRequired, generateLimiter, upload.single('cv'), a
   }
 });
 
+app.post('/api/cv/analyze', authRequired, generateLimiter, async (req, res) => {
+  const { cvText, jobTitle = '', company = '', jobDescription, confirmedSkills = [] } = req.body || {};
+
+  if (!cvText || cvText.length < 100) {
+    return res.status(400).json({ error: 'cvText must be at least 100 characters' });
+  }
+  if (!jobDescription || jobDescription.length < 50) {
+    return res.status(400).json({ error: 'jobDescription must be at least 50 characters' });
+  }
+
+  try {
+    const cvData = new CVParser().parse(cvText);
+    const jdData = new JDParser().parse(jobDescription, jobTitle, company);
+    const tailor = new CVTailor();
+    const matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
+
+    return res.json({
+      matchReport: tailor.buildMatchSummary(matchMap),
+      jobTitle: jdData.jobTitle,
+      company: jdData.company,
+    });
+  } catch (e) {
+    console.error('[DraftApply] Analyze error:', e.message);
+    return res.status(500).json({ error: 'Failed to analyze CV match.' });
+  }
+});
+
 app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
-  const { cvText, jobTitle = '', company = '', jobDescription } = req.body || {};
+  const { cvText, jobTitle = '', company = '', jobDescription, confirmedSkills = [] } = req.body || {};
 
   if (!cvText || cvText.length < 100) {
     return res.status(400).json({ error: 'cvText must be at least 100 characters' });
@@ -456,7 +483,7 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
   const cvData   = new CVParser().parse(cvText);
   const jdData   = new JDParser().parse(jobDescription, jobTitle, company);
   const tailor   = new CVTailor();
-  const matchMap = tailor.buildMatchMap(cvData, jdData);
+  const matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
   const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(cvData, jdData, matchMap);
 
   const controller = new AbortController();
@@ -493,7 +520,10 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
     }
 
     const data = await response.json();
-    const tailoredCvText = data?.choices?.[0]?.message?.content;
+    const tailoredCvText = tailor.removeTailoringMetaPhrases(
+      tailor.enforceTargetHeadline(data?.choices?.[0]?.message?.content, jdData.jobTitle),
+      jdData.company
+    );
     if (!tailoredCvText?.trim()) {
       return res.status(502).json({ error: 'No output from provider' });
     }
@@ -517,4 +547,3 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
 app.listen(PORT, () => {
   console.log(`DraftApply Render proxy listening on :${PORT}`);
 });
-

@@ -3,9 +3,14 @@ export class CVTailor {
    * Build a match map between JD requirements and CV evidence.
    * @returns {{ requirement, type, status, evidence, allowedToMention }[]}
    */
-  buildMatchMap(cvData, jdData) {
+  buildMatchMap(cvData, jdData, confirmedSkills = []) {
     const cvText = cvData.rawText || '';
     const cvLower = cvText.toLowerCase();
+    const confirmedSet = new Set(
+      (Array.isArray(confirmedSkills) ? confirmedSkills : [])
+        .map(skill => this._normaliseText(skill))
+        .filter(Boolean)
+    );
 
     // Flatten all CV text sources for searching
     const cvSources = [
@@ -22,20 +27,22 @@ export class CVTailor {
     const allRequirements = [
       ...(jdData.requiredSkills  || []).map(r => ({ req: r, type: 'required' })),
       ...(jdData.preferredSkills || []).map(r => ({ req: r, type: 'preferred' })),
+      ...(jdData.tools           || []).map(r => ({ req: r, type: 'tool' })),
       ...(jdData.softSkills      || []).map(r => ({ req: r, type: 'soft' })),
     ];
 
-    // Deduplicate: remove exact duplicates and bare keywords already embedded in a longer entry
+    // Deduplicate exact repeats only. Keep standalone tools even if they also
+    // appear inside a longer compound requirement, because the compound may be
+    // only partially supported while the atomic tool is legitimately supported.
     const reqTexts = allRequirements.map(r => r.req.toLowerCase().trim());
     const deduped = allRequirements.filter(({ req }, i) => {
       const key = req.toLowerCase().trim();
       if (reqTexts.indexOf(key) < i) return false; // exact duplicate, already seen
-      // Short bare keyword whose text is already captured by a longer requirement
-      if (key.length <= 25 && reqTexts.some((other, j) => j !== i && other !== key && other.includes(key) && other.length > key.length)) return false;
       return true;
     });
 
     return deduped.map(({ req, type }) => {
+      const confirmedByUser = confirmedSet.has(this._normaliseText(req));
       const evidence = this._findEvidence(req, cvSources);
       const coreTokens = this._getCoreTokens(req);
       const supportedCoreTokens = coreTokens.filter(tok =>
@@ -44,7 +51,9 @@ export class CVTailor {
       const fullySupported = coreTokens.length === 0 || supportedCoreTokens.length === coreTokens.length;
       const isAtomicRequirement = coreTokens.length <= 1;
       let status;
-      if (!fullySupported) {
+      if (confirmedByUser) {
+        status = 'user_confirmed';
+      } else if (!fullySupported) {
         status = 'missing';
       } else if (evidence.length >= 2) {
         status = 'strong_match';
@@ -57,8 +66,9 @@ export class CVTailor {
         requirement: req,
         type,
         status,
-        evidence,
+        evidence: confirmedByUser ? ['Confirmed by user during missing skills review'] : evidence,
         allowedToMention: status !== 'missing',
+        confirmedByUser,
       };
     });
   }
@@ -68,13 +78,14 @@ export class CVTailor {
     const required = matchMap.filter(m => m.type === 'required');
     const strong   = matchMap.filter(m => m.status === 'strong_match');
     const partial  = matchMap.filter(m => m.status === 'partial_match');
+    const confirmed = matchMap.filter(m => m.status === 'user_confirmed');
     const missing  = matchMap.filter(m => m.status === 'missing');
 
     // Score: weight required matches more heavily
     const reqTotal    = required.length || 1;
     const reqMatched  = required.filter(m => m.status !== 'missing').length;
     const allTotal    = matchMap.length || 1;
-    const allMatched  = strong.length + partial.length * 0.5;
+    const allMatched  = strong.length + confirmed.length + partial.length * 0.5;
 
     const score = Math.round(
       ((reqMatched / reqTotal) * 0.7 + (allMatched / allTotal) * 0.3) * 100
@@ -84,6 +95,7 @@ export class CVTailor {
       score:                   Math.min(100, score),
       strongMatches:           strong.map(m => m.requirement),
       partialMatches:          partial.map(m => m.requirement),
+      confirmedAdditions:      confirmed.map(m => m.requirement),
       unsupportedRequirements: missing.map(m => m.requirement),
     };
   }
@@ -112,19 +124,26 @@ STRICT RULES:
 3. Preserve every locked field exactly as written — same spelling, capitalisation, and format.
 4. Do not add new employment entries, new education entries, or new certifications.
 5. Do not remove any role or educational entry.
+6. Exact product/tool names from the JD may be added to skills, summaries, or bullets only when supported by the original CV or match report.
+7. If the JD mentions an unsupported tool, you may emphasize adjacent supported experience instead, but do not name the unsupported tool as a candidate skill.
+8. Do not write meta phrases such as "Tailored for", "customized for", "aligned to this job", or "for this application".
+9. Do not mention the target company name in the CV body unless it already appears in the original CV as part of the candidate's history.
 
 WHAT YOU MAY DO:
 • Update the professional headline / title line (the short descriptor directly below the candidate's name, e.g. "Senior Frontend Engineer") to match the target role title exactly.
 • Rewrite the professional summary to align with the target role and seniority level.
-• Reorder the skills list to surface the most relevant skills first.
+• Reorder the skills list to surface the most relevant supported skills first, and de-emphasize less relevant skills by moving them lower or shortening them.
 • Rephrase existing responsibility bullets using vocabulary from the job description, as long as the underlying meaning is unchanged.
 • Reorder bullets within a role to put the most relevant ones first.
 • Expand or compress bullet points within the bounds of what the original bullet states.`;
 
     const supported = matchMap.filter(m => m.allowedToMention).map(m => m.requirement);
     const unsupported = matchMap.filter(m => !m.allowedToMention).map(m => m.requirement);
+    const confirmed = matchMap.filter(m => m.confirmedByUser).map(m => m.requirement);
     const topResponsibilities = (jdData.responsibilities || []).slice(0, 8);
     const topRequired = (jdData.requiredSkills || []).slice(0, 15);
+    const topTools = (jdData.tools || []).slice(0, 20);
+    const topKeywords = (jdData.atsKeywords || []).slice(0, 20);
 
     const userPrompt = `TARGET ROLE
   Job title:  ${jdData.jobTitle || 'Not specified'}
@@ -134,9 +153,16 @@ WHAT YOU MAY DO:
 REQUIRED SKILLS (up to 15)
 ${topRequired.map(s => `  • ${s}`).join('\n') || '  (none listed)'}
 
+TECHNOLOGIES / ATS KEYWORDS FROM THE JD
+${topTools.length ? topTools.map(s => `  • ${s}`).join('\n') : '  (none listed)'}
+${topKeywords.length ? `\nRepeated JD keywords:\n${topKeywords.map(s => `  • ${s}`).join('\n')}` : ''}
+
 MATCH REPORT
   Supported requirements (you MAY reference these):
 ${supported.length ? supported.map(s => `    ✓ ${s}`).join('\n') : '    (none)'}
+
+  User-confirmed additions (not found in the uploaded CV, but the user says they have real experience):
+${confirmed.length ? confirmed.map(s => `    + ${s}`).join('\n') : '    (none)'}
 
   Unsupported requirements (do NOT claim these):
 ${unsupported.length ? unsupported.map(s => `    ✗ ${s}`).join('\n') : '    (none)'}
@@ -148,15 +174,66 @@ ORIGINAL CV
 ${cvData.rawText}
 
 INSTRUCTION
-1. If the CV has a professional headline/title below the name, update it to: "${jdData.jobTitle || 'the target role'}".
-2. Rewrite the professional summary targeting this role.
-3. Reorder skills so the most JD-relevant appear first.
-4. For each role: rewrite relevant bullets with JD vocabulary (same meaning, aligned language), reorder bullets so most relevant come first.
-5. Preserve all locked fields exactly — same spelling, capitalisation, and punctuation.
+1. The professional headline/title line near the top of the CV MUST be exactly: "${jdData.jobTitle || 'the target role'}".
+2. Rewrite the professional summary so it clearly positions the candidate for this exact role and domain without saying it was tailored for a company or application. It must mention only supported evidence from the CV.
+3. Reorder and rename skills/competencies so supported JD-relevant items appear first, especially supported technologies, methods, domain terms, and operational practices from the JD.
+4. For each role: rewrite relevant bullets with JD vocabulary (same meaning, aligned language), reorder bullets so the most relevant role-specific evidence comes first.
+5. You may include user-confirmed additions as skills/tools, but do not attach them to a specific employer, project, metric, certification, or achievement unless that context exists in the original CV.
+6. Preserve all locked fields exactly — same spelling, capitalisation, and punctuation.
+7. The final CV must read like a polished CV for "${jdData.jobTitle || 'the target role'}", not like a generic CV and not like generated marketing copy.
 
 Output the complete tailored CV text with no preamble, no commentary, and no markdown code fences. Begin directly with the candidate's name.`;
 
     return { systemPrompt, userPrompt, temperature: 0.3 };
+  }
+
+  enforceTargetHeadline(tailoredText, jobTitle) {
+    const title = String(jobTitle || '').trim();
+    if (!title || !tailoredText) return tailoredText;
+
+    const lines = String(tailoredText).split('\n');
+    const firstTextIdx = lines.findIndex(l => l.trim());
+    if (firstTextIdx === -1) return tailoredText;
+
+    let i = firstTextIdx + 1;
+    while (i < lines.length) {
+      const line = lines[i].trim();
+      if (!line || this._isHeaderContactLine(line) || this._isLikelyLocationLine(line)) {
+        i++;
+        continue;
+      }
+      break;
+    }
+
+    if (i >= lines.length) {
+      lines.push('', title);
+      return lines.join('\n');
+    }
+
+    if (this._isLikelySectionHeader(lines[i])) {
+      lines.splice(i, 0, title, '');
+    } else {
+      lines[i] = title;
+    }
+
+    return lines.join('\n');
+  }
+
+  removeTailoringMetaPhrases(tailoredText, company = '') {
+    if (!tailoredText) return tailoredText;
+
+    const companyName = this._escapeRegExp(String(company || '').trim());
+    const genericCompanyPattern = companyName || '[A-Z][A-Za-z0-9&.,\\- ]{1,80}';
+
+    return String(tailoredText)
+      .split('\n')
+      .map(line => line
+        .replace(new RegExp(`\\bTailored\\s+for\\s+${genericCompanyPattern}\\s+using\\s+`, 'gi'), 'Experienced in ')
+        .replace(new RegExp(`\\bTailored\\s+for\\s+${genericCompanyPattern}\\s*(?:role|position|application)?\\s*[:\\-–—]?\\s*`, 'gi'), '')
+        .replace(/\b(?:customi[sz]ed|optimised|optimized)\s+for\s+(?:this\s+)?(?:role|position|job|application)\s*[:\-–—]?\s*/gi, '')
+        .replace(/\bAligned\s+to\s+(?:this\s+)?(?:role|position|job|application)\s*[:\-–—]?\s*/gi, '')
+      )
+      .join('\n');
   }
 
   /**
@@ -281,6 +358,29 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
 
   _normaliseText(text) {
     return String(text || '').toLowerCase().replace(/[^\w\s.+#]/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  _escapeRegExp(text) {
+    return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  _isHeaderContactLine(line) {
+    return /[\w.+-]+@[\w-]+\.\w+/.test(line)
+      || /https?:\/\//i.test(line)
+      || /^(linkedin|github|website|portfolio|personal\s+website|personal\s+site)$/i.test(line)
+      || /(?:\+\d[\d\s\-.()]{5,}|\b\d{3,5}[\s\-.]\d{3,5}[\s\-.]\d{3,6}\b)/.test(line);
+  }
+
+  _isLikelyLocationLine(line) {
+    return line.length <= 80
+      && /,/.test(line)
+      && /\b(uk|united kingdom|usa|united states|belgium|canada|germany|france|ireland|netherlands|remote)\b/i.test(line)
+      && !/\b(engineer|developer|manager|architect|support|mlops|devops|sre|data|platform)\b/i.test(line);
+  }
+
+  _isLikelySectionHeader(line) {
+    return /^(professional\s+summary|core\s+competenc(?:y|ies)|professional\s+experience|technical\s+skills?|education|certifications?\s*(?:&|and)\s*awards?|technical\s+leadership|achievements?|projects?)\s*[:\-]?$/i
+      .test(String(line || '').trim());
   }
 
   /** Find CV source snippets that mention the requirement. */

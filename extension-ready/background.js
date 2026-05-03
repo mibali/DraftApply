@@ -322,6 +322,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               jobDescription: message.jobDescription,
               jobTitle: message.jobTitle || '',
               company:  message.company  || '',
+              confirmedSkills: message.confirmedSkills || [],
             }),
           });
 
@@ -332,7 +333,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
               signal: controller.signal,
-              body: JSON.stringify({ cvText, jobDescription: message.jobDescription, jobTitle: message.jobTitle || '', company: message.company || '' }),
+              body: JSON.stringify({
+                cvText,
+                jobDescription: message.jobDescription,
+                jobTitle: message.jobTitle || '',
+                company: message.company || '',
+                confirmedSkills: message.confirmedSkills || [],
+              }),
             });
           }
 
@@ -350,6 +357,57 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       } catch (e) {
         if (e?.name === 'AbortError') sendResponse({ error: 'Timed out — please try again' });
         else sendResponse({ error: e.message });
+      }
+    })();
+    return true;
+  }
+
+  if (message.type === 'ANALYZE_CV_MATCH') {
+    (async () => {
+      try {
+        const { cvText } = await chrome.storage.local.get('cvText');
+        if (!cvText) { sendResponse({ error: 'No CV loaded — please save your CV first' }); return; }
+
+        const proxyUrl = await getProxyUrl();
+        let token = await ensureInstallToken(proxyUrl);
+
+        let response = await fetch(`${proxyUrl}/api/cv/analyze`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            cvText,
+            jobDescription: message.jobDescription,
+            jobTitle: message.jobTitle || '',
+            company: message.company || '',
+            confirmedSkills: message.confirmedSkills || [],
+          }),
+        });
+
+        if (response.status === 401) {
+          await clearInstallToken();
+          token = await ensureInstallToken(proxyUrl);
+          response = await fetch(`${proxyUrl}/api/cv/analyze`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({
+              cvText,
+              jobDescription: message.jobDescription,
+              jobTitle: message.jobTitle || '',
+              company: message.company || '',
+              confirmedSkills: message.confirmedSkills || [],
+            }),
+          });
+        }
+
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.error || `Error ${response.status}`);
+        }
+
+        const data = await response.json();
+        sendResponse({ success: true, ...data });
+      } catch (e) {
+        sendResponse({ error: e.message });
       }
     })();
     return true;

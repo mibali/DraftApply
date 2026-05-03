@@ -473,6 +473,7 @@
     }
 
     .match-label-green { color: #16a34a; }
+    .match-label-blue  { color: #2563eb; }
     .match-label-gray  { color: #94a3b8; }
 
     .match-chips { display: flex; flex-wrap: wrap; gap: 4px; }
@@ -485,7 +486,36 @@
     }
 
     .match-chip-strong  { background: #dcfce7; color: #166534; }
+    .match-chip-confirmed { background: #dbeafe; color: #1e40af; }
     .match-chip-missing { background: #f1f5f9; color: #64748b; }
+
+    .missing-skill-check {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 8px;
+      border-radius: 12px;
+      background: #f8fafc;
+      color: #475569;
+      font-size: 11px;
+      font-weight: 500;
+      border: 1px solid #e2e8f0;
+      cursor: pointer;
+    }
+
+    .missing-skill-check input {
+      width: 12px;
+      height: 12px;
+      margin: 0;
+      accent-color: #2563eb;
+    }
+
+    .missing-skill-help {
+      margin: 3px 0 7px;
+      color: #64748b;
+      font-size: 11px;
+      line-height: 1.35;
+    }
 
     .tailor-warning-box {
       margin-top: 10px;
@@ -667,7 +697,8 @@
         <input id="tailor-company"   type="text" class="tailor-input" placeholder="Company (optional)">
       </div>
 
-      <button class="btn btn-primary" id="tailor-generate-btn">Generate Tailored CV</button>
+      <button class="btn btn-primary" id="tailor-analyze-btn">Analyze JD</button>
+      <button class="btn btn-primary" id="tailor-generate-btn" hidden>Generate Tailored CV</button>
 
       <!-- Loading -->
       <div id="tailor-loading" hidden>
@@ -690,22 +721,29 @@
             <div class="match-group-label match-label-green">Matched from your CV</div>
             <div class="match-chips" id="match-strong-chips"></div>
           </div>
+          <div class="match-group" id="match-confirmed" hidden>
+            <div class="match-group-label match-label-blue">Confirmed by you</div>
+            <div class="match-chips" id="match-confirmed-chips"></div>
+          </div>
           <div class="match-group" id="match-missing" hidden>
             <div class="match-group-label match-label-gray">Not found in your CV</div>
+            <div class="missing-skill-help">Tick any skills you genuinely have before generating the tailored CV.</div>
             <div class="match-chips" id="match-missing-chips"></div>
           </div>
         </div>
 
         <div id="tailor-warnings-box" class="tailor-warning-box" hidden></div>
 
-        <div class="da-section-label" style="margin-top:14px;">Tailored CV</div>
-        <textarea id="tailor-output" class="tailor-output-ta"></textarea>
+        <div id="tailor-output-wrap" hidden>
+          <div class="da-section-label" style="margin-top:14px;">Tailored CV</div>
+          <textarea id="tailor-output" class="tailor-output-ta"></textarea>
+        </div>
 
-        <div class="tailor-action-row">
+        <div class="tailor-action-row" id="tailor-action-row" hidden>
           <button class="btn btn-primary" id="tailor-pdf-btn">Download PDF</button>
           <div class="tailor-action-secondary">
             <button class="btn btn-copy" id="tailor-copy-btn">Copy to clipboard</button>
-            <button class="btn btn-redo" id="tailor-redo-btn" title="Regenerate">↺ Redo</button>
+            <button class="btn btn-redo" id="tailor-redo-btn" title="Regenerate">↺ Regenerate</button>
           </div>
         </div>
       </div>

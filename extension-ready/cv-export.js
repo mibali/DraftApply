@@ -17,7 +17,7 @@
 
 // ── CV text → Harvard-style HTML ──────────────────────────────────────────────
 
-const SECTION_RE = /^(experience|employment|work\s*history|education|academic|qualifications|skills|technologies|competencies|expertise|summary|profile|about|objective|certifications?|licenses?|credentials|achievements?|awards?|projects?|publications?|languages?|interests?|hobbies|references?|contact|links?)s?\s*[:\-]?\s*$/i;
+const SECTION_RE = /^(professional\s+summary|core\s+competenc(?:y|ies)|professional\s+experience|technical\s+skills?|certifications?\s*(?:&|and)\s*awards?|technical\s+leadership(?:,\s*achievements?\s*(?:&|and)\s*innovation)?|experience|employment|work\s*history|education|academic|qualifications|skills|technologies|competencies|expertise|summary|profile|about|objective|certifications?|licenses?|credentials|achievements?|awards?|projects?|publications?|languages?|interests?|hobbies|references?|contact|links?)s?\s*[:\-]?\s*$/i;
 
 const DATE_RE = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d{4}|present|current|to\s*date|now)\b/i;
 
@@ -28,11 +28,23 @@ function isSectionHeader(line) {
   return false;
 }
 
+function isEntrySectionHeader(line) {
+  return /\b(experience|employment|work|education|academic|qualifications|projects?)\b/i
+    .test(line.replace(/[:\-]\s*$/, '').trim());
+}
+
 function isContactLine(line) {
   return /[\w.+-]+@[\w-]+\.\w+/.test(line)
     || /https?:\/\//i.test(line)
     || /(?:linkedin|github|twitter|x\.com|portfolio)/i.test(line)
     || /(?:\+\d[\d\s\-.()]{5,}|\b\d{3}[\s\-.]\d{3}[\s\-.]\d{4}\b)/.test(line);
+}
+
+function isLocationLine(line) {
+  return line.length <= 80
+    && /,/.test(line)
+    && /\b(uk|united kingdom|usa|united states|belgium|canada|germany|france|ireland|netherlands|remote)\b/i.test(line)
+    && !/\b(engineer|developer|manager|architect|support|mlops|devops|sre|data|platform)\b/i.test(line);
 }
 
 function isDateLine(line) {
@@ -52,9 +64,40 @@ function esc(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+function normalizeUrl(url) {
+  return String(url || '').replace(/^https?:\/\//i, '').replace(/^www\./i, '').replace(/\/$/, '').toLowerCase();
+}
+
+function extractSocialUrls(text) {
+  const urls = {};
+  const allUrls = String(text || '').match(/https?:\/\/[^\s<>"')]+/gi) || [];
+  for (const url of allUrls) {
+    if (/linkedin\.com/i.test(url) && !urls.linkedin) urls.linkedin = url;
+    else if (/github\.com/i.test(url) && !urls.github) urls.github = url;
+    else if (/(?:portfolio|behance\.net|dribbble\.com|kaggle\.com)/i.test(url) && !urls.portfolio) urls.portfolio = url;
+    else if (!/(?:linkedin|github|twitter|x)\.com/i.test(url) && !urls.website) urls.website = url;
+  }
+  return urls;
+}
+
+function socialLabelUrl(line, socialUrls) {
+  if (/^linkedin$/i.test(line) && socialUrls.linkedin) return { label: 'LinkedIn', url: socialUrls.linkedin };
+  if (/^github$/i.test(line) && socialUrls.github) return { label: 'GitHub', url: socialUrls.github };
+  if (/^(website|portfolio|personal\s+website|personal\s+site)$/i.test(line) && (socialUrls.portfolio || socialUrls.website)) {
+    return { label: line, url: socialUrls.portfolio || socialUrls.website };
+  }
+  return null;
+}
+
+function contactLink(label, url) {
+  return `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(label)}</a>`;
+}
+
 function formatCvToHtml(rawText) {
   // Strip trailing "Links:" section added by PDF/DOCX extractor — links are
   // already inline in the text; we don't want them duplicated at the bottom.
+  const socialUrls = extractSocialUrls(rawText);
+  const knownSocialUrls = new Set(Object.values(socialUrls).filter(Boolean).map(normalizeUrl));
   const mainText = rawText.replace(/\n\nLinks:\n[\s\S]+$/i, '').trim();
   const lines = mainText.split('\n');
 
@@ -63,6 +106,7 @@ function formatCvToHtml(rawText) {
   let headlineSet = false;
   let listOpen = false;
   let inHeader = true;
+  let beforeFirstSection = true;
   let inEntrySection = false; // true inside Experience / Education sections
 
   // Buffer for a potential company name — flushed once we know what follows:
@@ -122,15 +166,18 @@ function formatCvToHtml(rawText) {
         html += '<hr class="cv-header-rule">';
       }
       inHeader = false;
-      inEntrySection = /\b(experience|employment|work|education|academic|qualifications|projects?)\b/i
-        .test(line.replace(/[:\-]\s*$/, '').trim());
+      beforeFirstSection = false;
+      inEntrySection = isEntrySectionHeader(line);
       html += `<h2 class="cv-section-header">${esc(line.replace(/[:\-]\s*$/, ''))}</h2>`;
       continue;
     }
 
     // ── Header block (contact / headline) ──
     if (inHeader) {
-      if (isContactLine(line)) {
+      const social = socialLabelUrl(line, socialUrls);
+      if (social) {
+        html += `<p class="cv-contact">${contactLink(social.label, social.url)}</p>`;
+      } else if (isContactLine(line) || isLocationLine(line)) {
         html += `<p class="cv-contact">${linkify(esc(line))}</p>`;
       } else if (!headlineSet) {
         html += `<p class="cv-headline">${esc(line)}</p>`;
@@ -138,6 +185,14 @@ function formatCvToHtml(rawText) {
       } else {
         html += `<p class="cv-contact">${linkify(esc(line))}</p>`;
       }
+      continue;
+    }
+
+    // Some LLM/CV outputs insert a blank line before the professional title.
+    // Still treat the first pre-section, non-contact line as the headline.
+    if (beforeFirstSection && !headlineSet && !isContactLine(line) && !isLocationLine(line) && !isDateLine(line)) {
+      html += `<p class="cv-headline">${esc(line)}</p>`;
+      headlineSet = true;
       continue;
     }
 
@@ -151,6 +206,12 @@ function formatCvToHtml(rawText) {
     }
 
     closeList();
+
+    // If a PDF/DOCX extractor put a raw social URL at the bottom, keep the
+    // header link and omit the duplicated standalone URL from the body.
+    if (/^https?:\/\//i.test(line) && knownSocialUrls.has(normalizeUrl(line))) {
+      continue;
+    }
 
     // ── Entry-section logic (Experience / Education) ──
     if (inEntrySection) {

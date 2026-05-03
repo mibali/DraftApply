@@ -31,16 +31,21 @@ document.addEventListener('DOMContentLoaded', async () => {
     tailorJd:           document.getElementById('tailor-jd'),
     tailorJobTitle:     document.getElementById('tailor-job-title'),
     tailorCompany:      document.getElementById('tailor-company'),
+    tailorAnalyzeBtn:   document.getElementById('tailor-analyze-btn'),
     tailorGenerateBtn:  document.getElementById('tailor-generate-btn'),
     tailorLoading:      document.getElementById('tailor-loading'),
     tailorResults:      document.getElementById('tailor-results'),
     matchScore:         document.getElementById('match-score'),
     matchStrong:        document.getElementById('match-strong'),
     matchStrongChips:   document.getElementById('match-strong-chips'),
+    matchConfirmed:     document.getElementById('match-confirmed'),
+    matchConfirmedChips: document.getElementById('match-confirmed-chips'),
     matchMissing:       document.getElementById('match-missing'),
     matchMissingChips:  document.getElementById('match-missing-chips'),
     tailorWarningsBox:  document.getElementById('tailor-warnings-box'),
+    tailorOutputWrap:   document.getElementById('tailor-output-wrap'),
     tailorOutput:       document.getElementById('tailor-output'),
+    tailorActionRow:    document.getElementById('tailor-action-row'),
     tailorCopyBtn:      document.getElementById('tailor-copy-btn'),
     tailorPdfBtn:       document.getElementById('tailor-pdf-btn'),
     tailorRedoBtn:      document.getElementById('tailor-redo-btn'),
@@ -66,10 +71,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Tailor CV
   elements.tailorOpenBtn.addEventListener('click', openTailorView);
   elements.tailorBackBtn.addEventListener('click', closeTailorView);
+  elements.tailorAnalyzeBtn.addEventListener('click', runAnalyzeCV);
   elements.tailorGenerateBtn.addEventListener('click', runTailorCV);
   elements.tailorRedoBtn.addEventListener('click', runTailorCV);
   elements.tailorCopyBtn.addEventListener('click', copyTailoredCV);
   elements.tailorPdfBtn.addEventListener('click', downloadAsPdf);
+  elements.tailorJd.addEventListener('input', resetTailorReview);
+  elements.tailorJobTitle.addEventListener('input', resetTailorReview);
+  elements.tailorCompany.addEventListener('input', resetTailorReview);
 
   // File upload handling
   elements.uploadArea.addEventListener('click', () => elements.cvFile.click());
@@ -311,6 +320,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.tailorResults.hidden = true;
     elements.tailorLoading.hidden = true;
     elements.tailorMessage.hidden = true;
+    elements.tailorAnalyzeBtn.hidden = false;
+    elements.tailorAnalyzeBtn.disabled = false;
+    elements.tailorAnalyzeBtn.textContent = 'Analyze JD';
+    elements.tailorGenerateBtn.hidden = true;
     elements.tailorGenerateBtn.disabled = false;
     elements.tailorGenerateBtn.textContent = 'Generate Tailored CV';
   }
@@ -318,6 +331,59 @@ document.addEventListener('DOMContentLoaded', async () => {
   function closeTailorView() {
     elements.tailorView.hidden = true;
     elements.mainView.hidden = false;
+  }
+
+  function resetTailorReview() {
+    elements.tailorGenerateBtn.hidden = true;
+    elements.tailorGenerateBtn.disabled = false;
+    elements.tailorGenerateBtn.textContent = 'Generate Tailored CV';
+    elements.tailorResults.hidden = true;
+    elements.tailorOutputWrap.hidden = true;
+    elements.tailorActionRow.hidden = true;
+    elements.tailorWarningsBox.hidden = true;
+    elements.tailorOutput.value = '';
+  }
+
+  async function runAnalyzeCV() {
+    const jd = elements.tailorJd.value.trim();
+    if (jd.length < 50) {
+      showTailorMessage('Please paste a job description (at least a few lines)', 'error');
+      return;
+    }
+
+    elements.tailorAnalyzeBtn.disabled = true;
+    elements.tailorAnalyzeBtn.textContent = 'Analyzing…';
+    elements.tailorLoading.hidden = false;
+    elements.tailorResults.hidden = true;
+    elements.tailorMessage.hidden = true;
+
+    try {
+      const result = await chrome.runtime.sendMessage({
+        type: 'ANALYZE_CV_MATCH',
+        jobDescription: jd,
+        jobTitle: elements.tailorJobTitle.value.trim(),
+        company:  elements.tailorCompany.value.trim(),
+      });
+
+      if (result?.error) {
+        showTailorMessage(result.error, 'error');
+        return;
+      }
+
+      displayMatchReport(result.matchReport, { reviewMode: true });
+      elements.tailorGenerateBtn.hidden = false;
+      elements.tailorOutputWrap.hidden = true;
+      elements.tailorActionRow.hidden = true;
+      elements.tailorOutput.value = '';
+      elements.tailorResults.hidden = false;
+      elements.tailorResults.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } catch (e) {
+      showTailorMessage('Something went wrong: ' + e.message, 'error');
+    } finally {
+      elements.tailorLoading.hidden = true;
+      elements.tailorAnalyzeBtn.disabled = false;
+      elements.tailorAnalyzeBtn.textContent = 'Analyze JD';
+    }
   }
 
   async function runTailorCV() {
@@ -330,8 +396,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.tailorGenerateBtn.disabled = true;
     elements.tailorGenerateBtn.textContent = 'Generating…';
     elements.tailorLoading.hidden = false;
-    elements.tailorResults.hidden = true;
     elements.tailorMessage.hidden = true;
+    const confirmedSkills = getConfirmedMissingSkills();
+    elements.tailorOutputWrap.hidden = true;
+    elements.tailorActionRow.hidden = true;
 
     try {
       const result = await chrome.runtime.sendMessage({
@@ -339,6 +407,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         jobDescription: jd,
         jobTitle: elements.tailorJobTitle.value.trim(),
         company:  elements.tailorCompany.value.trim(),
+        confirmedSkills,
       });
 
       if (result?.error) {
@@ -358,7 +427,28 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   function displayTailorResults(result) {
     const { tailoredCvText, matchReport, warnings } = result;
+    displayMatchReport(matchReport, { reviewMode: false });
 
+    // Validation warnings
+    if (warnings?.length > 0) {
+      elements.tailorWarningsBox.textContent = warnings.map(w => `⚠ ${w}`).join('\n');
+      elements.tailorWarningsBox.hidden = false;
+    } else {
+      elements.tailorWarningsBox.hidden = true;
+    }
+
+    // Tailored CV text
+    elements.tailorOutput.value = tailoredCvText || '';
+    elements.tailorOutputWrap.hidden = false;
+    elements.tailorActionRow.hidden = false;
+    elements.tailorResults.hidden = false;
+    elements.tailorGenerateBtn.hidden = true;
+
+    // Scroll results into view
+    elements.tailorResults.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function displayMatchReport(matchReport, { reviewMode } = {}) {
     // Score
     const score = matchReport?.score ?? null;
     elements.matchScore.textContent = score != null ? `${score}%` : '–';
@@ -376,31 +466,56 @@ document.addEventListener('DOMContentLoaded', async () => {
       elements.matchStrong.hidden = true;
     }
 
+    // User-confirmed additions
+    const confirmed = matchReport?.confirmedAdditions || [];
+    if (confirmed.length > 0) {
+      elements.matchConfirmedChips.innerHTML = confirmed
+        .map(s => `<span class="match-chip match-chip-confirmed">${esc(s)}</span>`)
+        .join('');
+      elements.matchConfirmed.hidden = false;
+    } else {
+      elements.matchConfirmed.hidden = true;
+    }
+
     // Missing requirements
     const missing = matchReport?.unsupportedRequirements || [];
     if (missing.length > 0) {
-      elements.matchMissingChips.innerHTML = missing
-        .map(s => `<span class="match-chip match-chip-missing">${esc(s)}</span>`)
-        .join('');
+      if (reviewMode) {
+        renderMissingSkillChecks(missing);
+      } else {
+        elements.matchMissingChips.innerHTML = missing
+          .map(s => `<span class="match-chip match-chip-missing">${esc(s)}</span>`)
+          .join('');
+      }
       elements.matchMissing.hidden = false;
     } else {
       elements.matchMissing.hidden = true;
     }
+  }
 
-    // Validation warnings
-    if (warnings?.length > 0) {
-      elements.tailorWarningsBox.textContent = warnings.map(w => `⚠ ${w}`).join('\n');
-      elements.tailorWarningsBox.hidden = false;
-    } else {
-      elements.tailorWarningsBox.hidden = true;
+  function renderMissingSkillChecks(missing) {
+    elements.matchMissingChips.textContent = '';
+    for (const skill of missing) {
+      const label = document.createElement('label');
+      label.className = 'missing-skill-check';
+
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.value = skill;
+      checkbox.dataset.missingSkill = 'true';
+
+      const text = document.createElement('span');
+      text.textContent = skill;
+
+      label.append(checkbox, text);
+      elements.matchMissingChips.append(label);
     }
+  }
 
-    // Tailored CV text
-    elements.tailorOutput.value = tailoredCvText || '';
-    elements.tailorResults.hidden = false;
-
-    // Scroll results into view
-    elements.tailorResults.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  function getConfirmedMissingSkills() {
+    return Array.from(elements.matchMissingChips.querySelectorAll('input[data-missing-skill="true"]:checked'))
+      .map(input => input.value)
+      .filter(Boolean);
   }
 
   async function copyTailoredCV() {
