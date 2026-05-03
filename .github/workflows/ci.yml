@@ -50,9 +50,10 @@ jobs:
           "
 
       - name: Check JS syntax (shared modules)
+        working-directory: shared
         run: |
-          node --input-type=module < shared/jd-parser.js   && echo "jd-parser.js OK"
-          node --input-type=module < shared/cv-tailor.js   && echo "cv-tailor.js OK"
-          node --input-type=module < shared/cv-parser.js   && echo "cv-parser.js OK"
-          node --input-type=module < shared/prompt-builder.js && echo "prompt-builder.js OK"
-          node --input-type=module < shared/answer-generator.js && echo "answer-generator.js OK"
+          node --input-type=module < jd-parser.js      && echo "jd-parser.js OK"
+          node --input-type=module < cv-tailor.js      && echo "cv-tailor.js OK"
+          node --input-type=module < cv-parser.js      && echo "cv-parser.js OK"
+          node --input-type=module < prompt-builder.js && echo "prompt-builder.js OK"
+          node --input-type=module < answer-generator.js && echo "answer-generator.js OK"
