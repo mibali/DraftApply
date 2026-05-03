@@ -98,8 +98,11 @@ function formatCvToHtml(rawText) {
       closeList();
       flushPendingCompany(null);
       afterEntryRow = false;
+      if (inHeader) {
+        inHeader = false;
+        html += '<hr class="cv-header-rule">';
+      }
       html += '<div class="cv-spacer"></div>';
-      if (inHeader) inHeader = false;
       continue;
     }
 
@@ -115,8 +118,11 @@ function formatCvToHtml(rawText) {
       closeList();
       flushPendingCompany(null);
       afterEntryRow = false;
+      if (inHeader) {
+        html += '<hr class="cv-header-rule">';
+      }
       inHeader = false;
-      inEntrySection = /^(experience|employment|work|education|academic|qualifications|projects?)\b/i
+      inEntrySection = /\b(experience|employment|work|education|academic|qualifications|projects?)\b/i
         .test(line.replace(/[:\-]\s*$/, '').trim());
       html += `<h2 class="cv-section-header">${esc(line.replace(/[:\-]\s*$/, ''))}</h2>`;
       continue;
@@ -158,7 +164,7 @@ function formatCvToHtml(rawText) {
       }
 
       // Pending company + this is a date line → complete entry row
-      if (pendingCompany !== null && isDateLine(line) && line.length < 55) {
+      if (pendingCompany !== null && isDateLine(line)) {
         flushPendingCompany(line);
         continue;
       }
@@ -172,8 +178,9 @@ function formatCvToHtml(rawText) {
       afterEntryRow = false;
 
       // Pending company + next short non-date line → flush company (no dates), emit as job title
-      if (pendingCompany !== null && line.length < 70 && !isContactLine(line)) {
+      if (pendingCompany !== null && line.length < 70 && !isContactLine(line) && !isDateLine(line)) {
         flushPendingCompany(null);
+        afterEntryRow = false;
         html += `<p class="cv-job-title">${esc(line)}</p>`;
         continue;
       }
@@ -196,7 +203,7 @@ function formatCvToHtml(rawText) {
     afterEntryRow = false;
 
     // Standalone date line (outside entry section accumulator)
-    if (isDateLine(line) && line.length < 55) {
+    if (isDateLine(line)) {
       html += `<p class="cv-date-line">${esc(line)}</p>`;
       continue;
     }
