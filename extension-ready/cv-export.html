@@ -7,14 +7,14 @@
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
-      font-family: 'Calibri', 'Segoe UI', Arial, sans-serif;
-      font-size: 10.5pt;
-      line-height: 1.55;
+      font-family: 'Calibri', 'Georgia', serif;
+      font-size: 11pt;
+      line-height: 1.5;
       color: #111;
-      background: #f4f4f5;
+      background: #e5e7eb;
     }
 
-    /* ── Toolbar ── */
+    /* ── Toolbar (screen only) ── */
     #toolbar {
       position: fixed;
       top: 0; left: 0; right: 0;
@@ -29,9 +29,7 @@
       z-index: 999;
       box-shadow: 0 2px 8px rgba(0,0,0,0.2);
     }
-
     #toolbar-title { flex: 1; font-weight: 600; }
-
     #toolbar button {
       background: rgba(255,255,255,0.15);
       border: 1.5px solid rgba(255,255,255,0.35);
@@ -45,101 +43,138 @@
       transition: background 0.15s;
     }
     #toolbar button:hover { background: rgba(255,255,255,0.28); }
-    #toolbar button.btn-secondary {
+    #toolbar button.btn-close {
       background: transparent;
       border-color: rgba(255,255,255,0.25);
       opacity: 0.8;
     }
-    #toolbar button.btn-secondary:hover { opacity: 1; background: rgba(255,255,255,0.1); }
+    #toolbar button.btn-close:hover { opacity: 1; }
 
-    /* ── CV page ── */
+    /* ── CV page wrapper ── */
     #cv-page {
-      margin: 64px auto 40px;
-      max-width: 820px;
+      margin: 62px auto 48px;
+      max-width: 840px;
       background: white;
-      box-shadow: 0 4px 24px rgba(0,0,0,0.1);
-      padding: 28mm 26mm 30mm;
+      box-shadow: 0 4px 32px rgba(0,0,0,0.12);
+      padding: 25mm 22mm 28mm;
       min-height: 297mm;
     }
 
-    /* ── CV typography ── */
+    /* ══════════════════════════════════
+       HARVARD CV TEMPLATE
+    ══════════════════════════════════ */
+
+    /* Name — centered, large, spaced caps */
     .cv-name {
-      font-size: 22pt;
+      font-size: 18pt;
       font-weight: 700;
-      letter-spacing: -0.3px;
-      color: #0f172a;
-      line-height: 1.15;
-      margin-bottom: 4px;
+      text-align: center;
+      text-transform: uppercase;
+      letter-spacing: 3px;
+      color: #0a0a0a;
+      margin-bottom: 5px;
     }
 
+    /* Professional headline — centered italic */
     .cv-headline {
-      font-size: 11.5pt;
-      font-weight: 500;
-      color: #475569;
-      margin-bottom: 6px;
+      font-size: 11pt;
+      font-style: italic;
+      text-align: center;
+      color: #444;
+      margin-bottom: 3px;
     }
 
+    /* Contact line — centered, subdued */
     .cv-contact {
       font-size: 9.5pt;
-      color: #64748b;
-      margin-bottom: 2px;
-      line-height: 1.5;
+      text-align: center;
+      color: #555;
+      line-height: 1.6;
     }
-
     .cv-contact a {
-      color: #2563eb;
+      color: #1a1a1a;
       text-decoration: none;
+      border-bottom: 1px solid #ccc;
     }
-    .cv-contact a:hover { text-decoration: underline; }
+    .cv-contact a:hover { border-color: #555; }
 
+    /* Horizontal rule after header block */
+    .cv-header-rule {
+      border: none;
+      border-top: 1.5px solid #0a0a0a;
+      margin: 10px 0 0;
+    }
+
+    /* Section heading — ALL CAPS bold with full underline */
     .cv-section-header {
-      font-size: 8.5pt;
+      font-size: 10pt;
       font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: 1.2px;
-      color: #2563eb;
-      border-bottom: 1.5px solid #2563eb;
-      padding-bottom: 3px;
-      margin-top: 18px;
+      letter-spacing: 1.5px;
+      color: #0a0a0a;
+      border-bottom: 2px solid #0a0a0a;
+      padding-bottom: 2px;
+      margin-top: 16px;
       margin-bottom: 7px;
     }
 
-    .cv-role-header {
+    /* Entry: company (left) + dates (right) on one row */
+    .cv-entry-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-top: 9px;
+    }
+    .cv-company {
       font-size: 10.5pt;
       font-weight: 700;
-      color: #0f172a;
-      margin-top: 10px;
-      margin-bottom: 1px;
+      color: #0a0a0a;
     }
-
-    .cv-role-meta {
+    .cv-entry-dates {
       font-size: 9.5pt;
-      color: #64748b;
-      margin-bottom: 4px;
+      color: #444;
+      white-space: nowrap;
+      margin-left: 12px;
+      flex-shrink: 0;
     }
 
-    .cv-bullets {
-      padding-left: 14px;
-      margin: 4px 0 6px;
-    }
-
-    .cv-bullets li {
-      font-size: 10pt;
+    /* Job title / degree — italic, below company row */
+    .cv-job-title {
+      font-size: 10.5pt;
+      font-style: italic;
+      color: #333;
       margin-bottom: 3px;
-      line-height: 1.5;
     }
 
-    .cv-bullets li a { color: #2563eb; text-decoration: none; }
+    /* Bullet list */
+    .cv-bullets {
+      padding-left: 18px;
+      margin: 4px 0 4px;
+    }
+    .cv-bullets li {
+      font-size: 10.5pt;
+      line-height: 1.5;
+      margin-bottom: 2px;
+    }
+    .cv-bullets li a { color: #111; text-decoration: underline; }
 
+    /* Body paragraph (summaries, skills lists, etc.) */
     .cv-body {
       font-size: 10.5pt;
-      margin-bottom: 3px;
       line-height: 1.55;
+      margin-bottom: 3px;
+      color: #111;
+    }
+    .cv-body a { color: #111; text-decoration: underline; }
+
+    /* Generic date-only line (fallback) */
+    .cv-date-line {
+      font-size: 9.5pt;
+      color: #555;
+      margin-bottom: 2px;
     }
 
-    .cv-body a { color: #2563eb; text-decoration: none; }
-
-    .cv-spacer { height: 5px; }
+    .cv-spacer { height: 4px; }
 
     /* Loading */
     #loading {
@@ -150,7 +185,7 @@
       font-size: 14px;
     }
 
-    /* ── Print styles ── */
+    /* ── Print ── */
     @media print {
       body { background: white; }
       #toolbar { display: none !important; }
@@ -166,9 +201,9 @@
 <body>
 
   <div id="toolbar">
-    <span id="toolbar-title">DraftApply — Tailored CV</span>
+    <span id="toolbar-title">DraftApply — Harvard CV</span>
     <button onclick="window.print()">Save as PDF / Print</button>
-    <button class="btn-secondary" onclick="window.close()">Close</button>
+    <button class="btn-close" onclick="window.close()">Close</button>
   </div>
 
   <div id="cv-page">
