@@ -7,7 +7,13 @@
     "start": "npm run start --prefix backend",
     "dev": "npm run dev --prefix backend",
     "serve-frontend": "npx serve frontend -p 3000",
-    "install-all": "npm install --prefix backend"
+    "install-all": "npm install --prefix backend",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.0"
   },
   "keywords": [
     "cv",

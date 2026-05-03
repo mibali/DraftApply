@@ -241,8 +241,9 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
    * @returns {string[]} warnings
    */
   validateTailoredCV(originalCvData, tailoredText) {
+    if (!tailoredText) return [];
     const warnings = [];
-    const t = tailoredText || '';
+    const t = tailoredText;
 
     // Company names
     for (const exp of (originalCvData.experience || [])) {

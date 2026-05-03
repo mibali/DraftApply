@@ -1,8 +1,8 @@
 /**
  * DraftApply Popup Script
- * 
- * Handles CV management and backend status display
- * No API key configuration needed - backend handles LLM
+ *
+ * Handles CV management and backend status display.
+ * No API key configuration needed — backend handles LLM.
  */
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -25,57 +25,72 @@ document.addEventListener('DOMContentLoaded', async () => {
     activateBtn:     document.getElementById('activate-btn'),
     tailorOpenBtn:   document.getElementById('tailor-open-btn'),
     // Tailor view
-    mainView:           document.getElementById('main-view'),
-    tailorView:         document.getElementById('tailor-view'),
-    tailorBackBtn:      document.getElementById('tailor-back-btn'),
-    tailorJd:           document.getElementById('tailor-jd'),
-    tailorJobTitle:     document.getElementById('tailor-job-title'),
-    tailorCompany:      document.getElementById('tailor-company'),
-    tailorAnalyzeBtn:   document.getElementById('tailor-analyze-btn'),
-    tailorGenerateBtn:  document.getElementById('tailor-generate-btn'),
-    tailorLoading:      document.getElementById('tailor-loading'),
-    tailorResults:      document.getElementById('tailor-results'),
-    matchScore:         document.getElementById('match-score'),
-    matchStrong:        document.getElementById('match-strong'),
-    matchStrongChips:   document.getElementById('match-strong-chips'),
-    matchConfirmed:     document.getElementById('match-confirmed'),
-    matchConfirmedChips: document.getElementById('match-confirmed-chips'),
-    matchMissing:       document.getElementById('match-missing'),
-    matchMissingChips:  document.getElementById('match-missing-chips'),
-    tailorWarningsBox:  document.getElementById('tailor-warnings-box'),
-    tailorOutputWrap:   document.getElementById('tailor-output-wrap'),
-    tailorOutput:       document.getElementById('tailor-output'),
-    tailorActionRow:    document.getElementById('tailor-action-row'),
-    tailorCopyBtn:      document.getElementById('tailor-copy-btn'),
-    tailorPdfBtn:       document.getElementById('tailor-pdf-btn'),
-    tailorRedoBtn:      document.getElementById('tailor-redo-btn'),
-    tailorMessage:      document.getElementById('tailor-message'),
+    mainView:              document.getElementById('main-view'),
+    tailorView:            document.getElementById('tailor-view'),
+    tailorBackBtn:         document.getElementById('tailor-back-btn'),
+    tailorJd:              document.getElementById('tailor-jd'),
+    tailorJobTitle:        document.getElementById('tailor-job-title'),
+    tailorCompany:         document.getElementById('tailor-company'),
+    tailorAnalyzeBtn:      document.getElementById('tailor-analyze-btn'),
+    tailorReanalyzeBtn:    document.getElementById('tailor-reanalyze-btn'),
+    tailorGenerateBtn:     document.getElementById('tailor-generate-btn'),
+    tailorLoading:         document.getElementById('tailor-loading'),
+    tailorLoadingText:     document.getElementById('tailor-loading-text'),
+    tailorLoadingSub:      document.getElementById('tailor-loading-sub'),
+    tailorResults:         document.getElementById('tailor-results'),
+    matchScore:            document.getElementById('match-score'),
+    matchStrong:           document.getElementById('match-strong'),
+    matchStrongChips:      document.getElementById('match-strong-chips'),
+    matchConfirmed:        document.getElementById('match-confirmed'),
+    matchConfirmedChips:   document.getElementById('match-confirmed-chips'),
+    matchAllClear:         document.getElementById('match-all-clear'),
+    matchMissing:          document.getElementById('match-missing'),
+    matchMissingChips:     document.getElementById('match-missing-chips'),
+    tailorWarningsBox:     document.getElementById('tailor-warnings-box'),
+    tailorOutputWrap:      document.getElementById('tailor-output-wrap'),
+    tailorOutput:          document.getElementById('tailor-output'),
+    tailorActionRow:       document.getElementById('tailor-action-row'),
+    tailorCopyBtn:         document.getElementById('tailor-copy-btn'),
+    tailorPdfBtn:          document.getElementById('tailor-pdf-btn'),
+    tailorRedoBtn:         document.getElementById('tailor-redo-btn'),
+    tailorMessage:         document.getElementById('tailor-message'),
+    // Step indicators
+    stepPaste:    document.getElementById('step-paste'),
+    stepReview:   document.getElementById('step-review'),
+    stepGenerate: document.getElementById('step-generate'),
+    stepExport:   document.getElementById('step-export'),
   };
 
-  let proxyUrl = null; // Will be set by checkProxy()
+  let proxyUrl = null;
+
+  // Stale-response guard: incremented on every new analyze call.
+  // If the value changes while a request is in flight, the response is discarded.
+  let analyzeToken = 0;
 
   // Load saved state
   await loadState();
   await checkProxy();
   await checkPageStatus();
 
-  // Event listeners
+  // ── Event listeners ──────────────────────────────────────────────────────
+
   elements.saveCvBtn.addEventListener('click', saveCV);
   elements.changeCvBtn.addEventListener('click', showCVInput);
 
-  // Activate on this page
   if (elements.activateBtn) {
     elements.activateBtn.addEventListener('click', activateOnPage);
   }
 
-  // Tailor CV
   elements.tailorOpenBtn.addEventListener('click', openTailorView);
   elements.tailorBackBtn.addEventListener('click', closeTailorView);
   elements.tailorAnalyzeBtn.addEventListener('click', runAnalyzeCV);
+  elements.tailorReanalyzeBtn.addEventListener('click', runAnalyzeCV);
   elements.tailorGenerateBtn.addEventListener('click', runTailorCV);
   elements.tailorRedoBtn.addEventListener('click', runTailorCV);
   elements.tailorCopyBtn.addEventListener('click', copyTailoredCV);
   elements.tailorPdfBtn.addEventListener('click', downloadAsPdf);
+
+  // Reset analysis when JD inputs change
   elements.tailorJd.addEventListener('input', resetTailorReview);
   elements.tailorJobTitle.addEventListener('input', resetTailorReview);
   elements.tailorCompany.addEventListener('input', resetTailorReview);
@@ -83,16 +98,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   // File upload handling
   elements.uploadArea.addEventListener('click', () => elements.cvFile.click());
   elements.cvFile.addEventListener('change', handleFileSelect);
-  
+
   elements.uploadArea.addEventListener('dragover', (e) => {
     e.preventDefault();
     elements.uploadArea.classList.add('dragover');
   });
-  
+
   elements.uploadArea.addEventListener('dragleave', () => {
     elements.uploadArea.classList.remove('dragover');
   });
-  
+
   elements.uploadArea.addEventListener('drop', (e) => {
     e.preventDefault();
     elements.uploadArea.classList.remove('dragover');
@@ -100,18 +115,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (file) processFile(file);
   });
 
+  // ── CV management ─────────────────────────────────────────────────────────
+
   async function loadState() {
     const response = await chrome.runtime.sendMessage({ type: 'GET_CV' });
-    
-    if (response.cvText) {
-      showCVLoaded(response.cvText);
-    }
+    if (response.cvText) showCVLoaded(response.cvText);
   }
 
   async function checkProxy() {
     try {
       const status = await chrome.runtime.sendMessage({ type: 'CHECK_PROXY' });
-      
       if (status && !status.error) {
         elements.proxyStatusDot.classList.add('ready');
         elements.proxyStatusText.textContent = `Proxy: ${status.provider || 'Online'}`;
@@ -134,10 +147,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   async function processFile(file) {
-    const validTypes = ['application/pdf', 'application/msword', 
+    const validTypes = [
+      'application/pdf',
+      'application/msword',
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      'text/plain'];
-    
+      'text/plain',
+    ];
+
     if (!validTypes.includes(file.type) && !file.name.match(/\.(pdf|docx?|txt)$/i)) {
       showMessage('Please upload a PDF, DOCX, or TXT file', 'error');
       return;
@@ -145,12 +161,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     elements.uploadArea.classList.add('has-file');
     elements.uploadArea.querySelector('.upload-text').textContent = file.name;
-    elements.uploadArea.querySelector('.upload-hint').textContent = 'Extracting text...';
+    elements.uploadArea.querySelector('.upload-hint').textContent = 'Extracting text…';
 
     try {
       const text = await extractTextFromFile(file);
       elements.cvText.value = text;
-      elements.uploadArea.querySelector('.upload-hint').textContent = 'Text extracted - click Save CV';
+      elements.uploadArea.querySelector('.upload-hint').textContent = 'Text extracted — click Save CV';
       showMessage('File loaded. Review and click Save CV.');
     } catch (err) {
       elements.uploadArea.classList.remove('has-file');
@@ -166,8 +182,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     if (!proxyUrl) {
-      // Proxy check may have failed when the popup first opened (cold start).
-      // Retry once before giving up — the service may now be awake.
       await checkProxy();
       if (!proxyUrl) {
         throw new Error('Proxy not available. Please wait a few seconds and try again.');
@@ -178,13 +192,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     const timer = setTimeout(() => controller.abort(), 30000);
 
     try {
-      // For PDF/DOCX, send to proxy for extraction (server-side parsing)
       const formData = new FormData();
       formData.append('cv', file);
 
-      // Use the shared token from background (cached, mutex-protected).
-      // Never call /api/register directly from popup — it bypasses caching
-      // and mints a fresh orphaned token on every upload.
       const tokenResult = await chrome.runtime.sendMessage({ type: 'GET_TOKEN' });
       const token = tokenResult?.token;
       if (!token) throw new Error(tokenResult?.error || 'Could not get proxy token');
@@ -193,7 +203,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
         body: formData,
-        signal: controller.signal
+        signal: controller.signal,
       });
 
       if (!response.ok) {
@@ -215,12 +225,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   async function saveCV() {
     const text = elements.cvText.value.trim();
-    
     if (text.length < 50) {
       showMessage('Please enter more CV content', 'error');
       return;
     }
-
     await chrome.runtime.sendMessage({ type: 'SAVE_CV', cvText: text });
     showCVLoaded(text);
     showMessage('CV saved successfully');
@@ -255,23 +263,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.message.textContent = text;
     elements.message.className = 'message' + (type === 'error' ? ' error' : '');
     elements.message.hidden = false;
-    
-    setTimeout(() => {
-      elements.message.hidden = true;
-    }, 4000);
+    setTimeout(() => { elements.message.hidden = true; }, 4000);
   }
 
-  /**
-   * Check if DraftApply is active on the current page.
-   */
   async function checkPageStatus() {
     try {
       const result = await chrome.runtime.sendMessage({ type: 'CHECK_PAGE_ACTIVE' });
-      if (result?.active) {
-        setPageActive();
-      } else {
-        setPageInactive();
-      }
+      if (result?.active) setPageActive();
+      else setPageInactive();
     } catch {
       setPageInactive();
     }
@@ -292,8 +291,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   async function activateOnPage() {
     elements.activateBtn.disabled = true;
-    elements.activateBtn.textContent = 'Activating...';
-
+    elements.activateBtn.textContent = 'Activating…';
     try {
       const result = await chrome.runtime.sendMessage({ type: 'ACTIVATE_PAGE' });
       if (result?.success) {
@@ -316,16 +314,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   function openTailorView() {
     elements.mainView.hidden = true;
     elements.tailorView.hidden = false;
-    // Reset results from any previous run
     elements.tailorResults.hidden = true;
     elements.tailorLoading.hidden = true;
     elements.tailorMessage.hidden = true;
     elements.tailorAnalyzeBtn.hidden = false;
     elements.tailorAnalyzeBtn.disabled = false;
     elements.tailorAnalyzeBtn.textContent = 'Analyze JD';
+    elements.tailorReanalyzeBtn.style.display = 'none';
     elements.tailorGenerateBtn.hidden = true;
     elements.tailorGenerateBtn.disabled = false;
     elements.tailorGenerateBtn.textContent = 'Generate Tailored CV';
+    setStep('paste');
   }
 
   function closeTailorView() {
@@ -334,6 +333,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function resetTailorReview() {
+    // Invalidate any in-flight analyze response
+    analyzeToken++;
+
+    elements.tailorAnalyzeBtn.hidden = false;
+    elements.tailorAnalyzeBtn.disabled = false;
+    elements.tailorAnalyzeBtn.textContent = 'Analyze JD';
+    elements.tailorReanalyzeBtn.style.display = 'none';
     elements.tailorGenerateBtn.hidden = true;
     elements.tailorGenerateBtn.disabled = false;
     elements.tailorGenerateBtn.textContent = 'Generate Tailored CV';
@@ -342,6 +348,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.tailorActionRow.hidden = true;
     elements.tailorWarningsBox.hidden = true;
     elements.tailorOutput.value = '';
+    setStep('paste');
   }
 
   async function runAnalyzeCV() {
@@ -351,11 +358,19 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
 
+    // Stamp this request so stale responses can be detected
+    analyzeToken++;
+    const myToken = analyzeToken;
+
     elements.tailorAnalyzeBtn.disabled = true;
     elements.tailorAnalyzeBtn.textContent = 'Analyzing…';
+    elements.tailorReanalyzeBtn.style.display = 'none';
     elements.tailorLoading.hidden = false;
+    elements.tailorLoadingText.textContent = 'Analyzing job description…';
+    elements.tailorLoadingSub.textContent = 'Matching against your CV';
     elements.tailorResults.hidden = true;
     elements.tailorMessage.hidden = true;
+    setStep('paste'); // keep at step 1 while loading
 
     try {
       const result = await chrome.runtime.sendMessage({
@@ -365,24 +380,33 @@ document.addEventListener('DOMContentLoaded', async () => {
         company:  elements.tailorCompany.value.trim(),
       });
 
+      // Discard if the JD was edited while this request was in flight
+      if (myToken !== analyzeToken) return;
+
       if (result?.error) {
         showTailorMessage(result.error, 'error');
         return;
       }
 
       displayMatchReport(result.matchReport, { reviewMode: true });
+      elements.tailorAnalyzeBtn.hidden = true;
+      elements.tailorReanalyzeBtn.style.display = 'block';
       elements.tailorGenerateBtn.hidden = false;
       elements.tailorOutputWrap.hidden = true;
       elements.tailorActionRow.hidden = true;
       elements.tailorOutput.value = '';
       elements.tailorResults.hidden = false;
       elements.tailorResults.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      setStep('review');
     } catch (e) {
+      if (myToken !== analyzeToken) return;
       showTailorMessage('Something went wrong: ' + e.message, 'error');
     } finally {
-      elements.tailorLoading.hidden = true;
-      elements.tailorAnalyzeBtn.disabled = false;
-      elements.tailorAnalyzeBtn.textContent = 'Analyze JD';
+      if (myToken === analyzeToken) {
+        elements.tailorLoading.hidden = true;
+        elements.tailorAnalyzeBtn.disabled = false;
+        elements.tailorAnalyzeBtn.textContent = 'Analyze JD';
+      }
     }
   }
 
@@ -396,10 +420,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.tailorGenerateBtn.disabled = true;
     elements.tailorGenerateBtn.textContent = 'Generating…';
     elements.tailorLoading.hidden = false;
+    elements.tailorLoadingText.textContent = 'Tailoring your CV…';
+    elements.tailorLoadingSub.textContent = 'This takes 15–30 seconds';
     elements.tailorMessage.hidden = true;
     const confirmedSkills = getConfirmedMissingSkills();
     elements.tailorOutputWrap.hidden = true;
     elements.tailorActionRow.hidden = true;
+    setStep('generate');
 
     try {
       const result = await chrome.runtime.sendMessage({
@@ -429,7 +456,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     const { tailoredCvText, matchReport, warnings } = result;
     displayMatchReport(matchReport, { reviewMode: false });
 
-    // Validation warnings
     if (warnings?.length > 0) {
       elements.tailorWarningsBox.textContent = warnings.map(w => `⚠ ${w}`).join('\n');
       elements.tailorWarningsBox.hidden = false;
@@ -437,25 +463,22 @@ document.addEventListener('DOMContentLoaded', async () => {
       elements.tailorWarningsBox.hidden = true;
     }
 
-    // Tailored CV text
     elements.tailorOutput.value = tailoredCvText || '';
     elements.tailorOutputWrap.hidden = false;
     elements.tailorActionRow.hidden = false;
     elements.tailorResults.hidden = false;
     elements.tailorGenerateBtn.hidden = true;
 
-    // Scroll results into view
     elements.tailorResults.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    setStep('export');
   }
 
   function displayMatchReport(matchReport, { reviewMode } = {}) {
-    // Score
     const score = matchReport?.score ?? null;
     elements.matchScore.textContent = score != null ? `${score}%` : '–';
     elements.matchScore.className = 'match-score-badge' +
       (score >= 70 ? ' score-high' : score >= 40 ? ' score-mid' : ' score-low');
 
-    // Strong matches
     const strong = matchReport?.strongMatches || [];
     if (strong.length > 0) {
       elements.matchStrongChips.innerHTML = strong
@@ -466,7 +489,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       elements.matchStrong.hidden = true;
     }
 
-    // User-confirmed additions
     const confirmed = matchReport?.confirmedAdditions || [];
     if (confirmed.length > 0) {
       elements.matchConfirmedChips.innerHTML = confirmed
@@ -477,7 +499,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       elements.matchConfirmed.hidden = true;
     }
 
-    // Missing requirements
     const missing = matchReport?.unsupportedRequirements || [];
     if (missing.length > 0) {
       if (reviewMode) {
@@ -488,8 +509,11 @@ document.addEventListener('DOMContentLoaded', async () => {
           .join('');
       }
       elements.matchMissing.hidden = false;
+      elements.matchAllClear.hidden = true;
     } else {
       elements.matchMissing.hidden = true;
+      // Show "all clear" only in review mode (before generation)
+      elements.matchAllClear.hidden = !reviewMode;
     }
   }
 
@@ -513,10 +537,32 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function getConfirmedMissingSkills() {
-    return Array.from(elements.matchMissingChips.querySelectorAll('input[data-missing-skill="true"]:checked'))
-      .map(input => input.value)
-      .filter(Boolean);
+    return Array.from(
+      elements.matchMissingChips.querySelectorAll('input[data-missing-skill="true"]:checked')
+    ).map(input => input.value).filter(Boolean);
   }
+
+  // ── Step indicator ────────────────────────────────────────────────────────
+
+  function setStep(name) {
+    const order = ['paste', 'review', 'generate', 'export'];
+    const stepEls = {
+      paste:    elements.stepPaste,
+      review:   elements.stepReview,
+      generate: elements.stepGenerate,
+      export:   elements.stepExport,
+    };
+    const activeIdx = order.indexOf(name);
+    order.forEach((step, idx) => {
+      const el = stepEls[step];
+      if (!el) return;
+      el.classList.remove('active', 'done');
+      if (idx < activeIdx)       el.classList.add('done');
+      else if (idx === activeIdx) el.classList.add('active');
+    });
+  }
+
+  // ── Actions ───────────────────────────────────────────────────────────────
 
   async function copyTailoredCV() {
     const text = elements.tailorOutput.value;
@@ -534,9 +580,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   async function downloadAsPdf() {
     const text = elements.tailorOutput.value;
     if (!text) return;
-    // Store CV text temporarily so the export page can read it
     await chrome.storage.local.set({ tailoredCvExport: text });
-    // Open the export page — user clicks "Save as PDF" in the print dialog
     chrome.tabs.create({ url: chrome.runtime.getURL('cv-export.html') });
   }
 

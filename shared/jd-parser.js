@@ -15,22 +15,52 @@ export class JDParser {
   }
 
   _extractJobTitle(text) {
-    // Look for common heading patterns at top of JD
-    const m = text.match(/^(?:job\s*title|role|position)[:\s]+(.+)/im)
-           || text.match(/^([^\n]{5,80})\n/);
-    return m ? m[1].trim() : '';
+    // Explicit label patterns take priority
+    const labeled = text.match(
+      /^(?:job\s*title|role|position|opening|vacancy|title)[:\s]+(.+)/im
+    );
+    if (labeled) return labeled[1].trim();
+
+    // Check the first 5 non-empty lines for something that looks like a job title
+    // (contains role-level words, or short and plausible)
+    const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+    for (const line of lines.slice(0, 5)) {
+      if (
+        line.length >= 5 &&
+        line.length <= 80 &&
+        /\b(engineer|developer|manager|designer|analyst|scientist|architect|lead|director|specialist|consultant|coordinator|officer|head|principal|staff)\b/i.test(line)
+      ) return line;
+    }
+
+    // Fall back to first short line
+    const first = text.match(/^([^\n]{5,80})\n/);
+    return first ? first[1].trim() : '';
   }
 
   _extractCompany(text) {
-    const m = text.match(/(?:at|@|company|employer)[:\s]+([A-Z][^\n,]{2,60})/i)
-           || text.match(/(?:about us|about\s+)([A-Z][^\n.]{2,60})/i);
-    return m ? m[1].trim() : '';
+    // Explicit label patterns
+    const labeled = text.match(
+      /(?:^|\n)\s*(?:company|employer|organization|organisation|hiring\s+company)[:\s]+([A-Z][^\n,]{2,60})/im
+    );
+    if (labeled) return labeled[1].trim();
+
+    // "at CompanyName" or "@ CompanyName"
+    const atPattern = text.match(/\bat\s+([A-Z][a-zA-Z0-9\s&.,'-]{2,50})(?=[\s,.\n]|$)/m);
+    if (atPattern && atPattern[1].trim().length >= 2) return atPattern[1].trim();
+
+    // "About CompanyName" (but not "About us" or "About the role")
+    const about = text.match(
+      /\bAbout\s+(?!us\b|the\s+role\b|this\s+role\b|the\s+position\b|the\s+company\b)([A-Z][^\n.]{2,60})/i
+    );
+    if (about) return about[1].trim();
+
+    return '';
   }
 
   extractSeniority(text) {
     const t = text.toLowerCase();
 
-    // Check title-level signals first
+    // Title-level signals take priority over YOE
     if (/\b(vp|vice\s*president|chief|c[tos]o|director|head\s+of|principal)\b/.test(t)) return 'senior/executive';
     if (/\b(senior|sr\.?|lead|staff|architect)\b/.test(t)) return 'senior';
 
@@ -55,20 +85,16 @@ export class JDParser {
   extractRequiredSkills(text) {
     const skills = new Set();
 
-    // Detect "Required" section and pull bullets
+    // Detect requirement section by a broad set of header synonyms
     const reqSection = text.match(
-      /(?:requirements?|required\s+(?:skills?|qualifications?|experience))[:\s]*\n([\s\S]*?)(?=\n\s*(?:preferred|nice[- ]to|bonus|responsibilities?|what\s+you|about|benefits?|$))/i
+      /(?:requirements?|required\s+(?:skills?|qualifications?|experience)|must[- ]have|minimum\s+qualifications?|what\s+(?:we(?:'re|\s+are)\s+looking\s+for|you(?:'ll|\s+will)\s+bring|you\s+have|you\s+must\s+have)|who\s+you\s+are|your\s+background|qualifications?)[:\s]*\n([\s\S]*?)(?=\n\s*(?:preferred|nice[- ]to|good\s+to\s+have|bonus|responsibilities?|what\s+you|about|benefits?|compensation|perks|$))/i
     );
     if (reqSection) {
-      const bullets = reqSection[1]
-        .split('\n')
-        .map(l => l.replace(/^[\s•\-\*•●]+/, '').trim())
-        .filter(l => l.length > 2 && l.length < 200);
-      bullets.forEach(b => skills.add(b));
+      this._extractBulletsAndSentences(reqSection[1]).forEach(b => skills.add(b));
     }
 
-    // Also pick up common tech keywords scattered anywhere
-    const techRe = /\b(React(?:\.js)?|Vue(?:\.js)?|Angular|Next\.js|Nuxt(?:\.js)?|Svelte|Node(?:\.js)?|Express(?:\.js)?|NestJS|Django|Flask|FastAPI|Spring(?:\s*Boot)?|Laravel|Rails|Ruby\s+on\s+Rails|Python|TypeScript|JavaScript|Go(?:lang)?|Rust|Java|C#|\.NET|PHP|Swift|Kotlin|Scala|Elixir|GraphQL|REST(?:ful)?|gRPC|SQL|PostgreSQL|MySQL|MongoDB|Redis|Elasticsearch|Kafka|RabbitMQ|AWS|GCP|Azure|Docker|Kubernetes|Terraform|CI\/CD|Git(?:Hub|Lab)?|Jira|Linux|Bash|Shell)\b/gi;
+    // Also scan the full text for common tech keywords
+    const techRe = /\b(React(?:\.js)?|Vue(?:\.js)?|Angular|Next\.js|Nuxt(?:\.js)?|Svelte(?:Kit)?|Remix|Astro|Node(?:\.js)?|Express(?:\.js)?|NestJS|Fastify|Django|Flask|FastAPI|Spring(?:\s*Boot)?|Laravel|Rails|Ruby\s+on\s+Rails|Python|TypeScript|JavaScript|Go(?:lang)?|Rust|Java|C#|\.NET|PHP|Swift|Kotlin|Scala|Elixir|GraphQL|REST(?:ful)?|gRPC|tRPC|SQL|PostgreSQL|MySQL|MongoDB|Redis|Elasticsearch|Kafka|RabbitMQ|AWS|GCP|Azure|Docker|Kubernetes|Terraform|CI\/CD|Git(?:Hub|Lab)?|Jira|Linux|Bash|Shell)\b/gi;
     let m;
     while ((m = techRe.exec(text)) !== null) {
       skills.add(m[0]);
@@ -78,7 +104,7 @@ export class JDParser {
   }
 
   extractPreferredSkills(text) {
-    const HEADER_RE = /^(preferred|nice\s+to\s+have|nice-to-have|bonus|plus|advantageous)\s*[:\-]?\s*$/i;
+    const HEADER_RE = /^(preferred|nice\s+to\s+have|nice-to-have|good\s+to\s+have|bonus(?:\s+points?)?|plus|advantageous|desired(?:\s+qualifications?)?|would\s+be\s+(?:great|ideal|a\s+plus)|ideal\s+but\s+not\s+required|not\s+required\s+but|if\s+you\s+(?:also\s+)?have)\s*[:\-]?\s*$/i;
     const NEXT_RE = /^(requirements?|must.have|qualifications?|essential|responsibilities?|what\s+you|about\s+us?|benefits?|compensation|perks|the\s+role|the\s+company|our\s+team)\s*[:\-]?\s*$/i;
     const items = [];
     let inSection = false;
@@ -97,7 +123,7 @@ export class JDParser {
   }
 
   extractTools(text) {
-    const toolRe = /\b(React(?:\.js)?|Vue(?:\.js)?|Angular|Next\.js|Nuxt(?:\.js)?|Svelte|Node(?:\.js)?|Express(?:\.js)?|NestJS|Django|Flask|FastAPI|Spring(?:\s*Boot)?|Laravel|Rails|Python|TypeScript|JavaScript|Go(?:lang)?|Rust|Java|C#|\.NET|PHP|Swift|Kotlin|Scala|Elixir|GraphQL|gRPC|PostgreSQL|MySQL|MariaDB|MongoDB|Redis|DynamoDB|Cassandra|Elasticsearch|Kafka|RabbitMQ|SQS|SNS|AWS|GCP|Azure|Docker|Kubernetes|Helm|Terraform|Ansible|Jenkins|GitHub\s*Actions|GitLab\s*CI|CircleCI|Travis\s*CI|Datadog|Prometheus|Grafana|Splunk|Sentry|Figma|Jira|Confluence|Slack|Linear|Notion|dbt|Airflow|Spark|Hadoop|Snowflake|BigQuery|Redshift|Tableau|Power\s*BI|Looker|pandas|NumPy|scikit[- ]learn|TensorFlow|PyTorch|Keras|OpenAI|LangChain|Pinecone|Weaviate|Stripe|Twilio|SendGrid|Firebase|Supabase|Vercel|Netlify|Heroku|Linux|Bash|Shell|Git)\b/gi;
+    const toolRe = /\b(React(?:\.js)?|Vue(?:\.js)?|Angular|Next\.js|Nuxt(?:\.js)?|Svelte(?:Kit)?|Remix|Astro|Node(?:\.js)?|Express(?:\.js)?|NestJS|Fastify|Django|Flask|FastAPI|Spring(?:\s*Boot)?|Laravel|Rails|Python|TypeScript|JavaScript|Go(?:lang)?|Rust|Java|C#|\.NET|PHP|Swift|Kotlin|Scala|Elixir|GraphQL|gRPC|tRPC|PostgreSQL|MySQL|MariaDB|MongoDB|Redis|DynamoDB|Cassandra|Elasticsearch|Kafka|RabbitMQ|SQS|SNS|AWS|GCP|Azure|Docker|Kubernetes|Helm|Terraform|Ansible|Jenkins|GitHub\s*Actions|GitLab\s*CI|CircleCI|Travis\s*CI|Datadog|Prometheus|Grafana|Splunk|Sentry|Figma|Jira|Confluence|Slack|Linear|Notion|dbt|Airflow|Spark|Hadoop|Snowflake|BigQuery|Redshift|Tableau|Power\s*BI|Looker|pandas|NumPy|scikit[- ]learn|TensorFlow|PyTorch|Keras|OpenAI|LangChain|Pinecone|Weaviate|Qdrant|ChromaDB|Celery|Prisma|Drizzle|Stripe|Twilio|SendGrid|Firebase|Supabase|PlanetScale|Neon|Vercel|Netlify|Fly\.io|Cloudflare|Heroku|Turborepo|Nx|Vite|Webpack|Rollup|Pydantic|Linux|Bash|Shell|Git)\b/gi;
     const found = new Set();
     let m;
     while ((m = toolRe.exec(text)) !== null) {
@@ -107,8 +133,8 @@ export class JDParser {
   }
 
   extractResponsibilities(text) {
-    const HEADER_RE = /^(responsibilities?|what\s+you(?:'ll|\s+will)\s+do|role\s+overview|key\s+duties|your\s+role|day[- ]to[- ]day|the\s+role)\s*[:\-]?\s*$/i;
-    const NEXT_RE = /^(requirements?|must.have|qualifications?|essential|preferred|nice\s+to\s+have|about\s+us?|benefits?|compensation|perks|our\s+team|the\s+company)\s*[:\-]?\s*$/i;
+    const HEADER_RE = /^(responsibilities?|what\s+you(?:'ll|\s+will)\s+do|role\s+overview|key\s+duties|your\s+role|day[- ]to[- ]day|the\s+role|in\s+this\s+role(?:\s+you\s+will)?|you(?:'ll|\s+will)\s+be\s+(?:responsible)?|your\s+day[- ]to[- ]day|the\s+position\s+involves?)\s*[:\-]?\s*$/i;
+    const NEXT_RE = /^(requirements?|must.have|qualifications?|essential|preferred|nice\s+to\s+have|good\s+to\s+have|about\s+us?|benefits?|compensation|perks|our\s+team|the\s+company)\s*[:\-]?\s*$/i;
     const items = [];
     let inSection = false;
     for (const line of text.split('\n')) {
@@ -133,6 +159,7 @@ export class JDParser {
       'analytical', 'initiative', 'self-motivated', 'self-starter', 'proactive',
       'ownership', 'accountability', 'empathy', 'interpersonal', 'presentation skills',
       'written communication', 'verbal communication', 'cross-functional', 'stakeholder management',
+      'conflict resolution', 'decision making', 'strategic thinking', 'detail-oriented',
     ];
     const lower = text.toLowerCase();
     return KNOWN.filter(s => lower.includes(s));
@@ -173,13 +200,14 @@ export class JDParser {
 
   extractDealBreakers(text) {
     const breakers = [];
-    const t = text.toLowerCase();
 
-    if (/no\s+(?:visa\s+)?sponsor|sponsorship\s+not\s+available|unable\s+to\s+sponsor|must\s+be\s+authoriz/i.test(text)) {
+    if (/no\s+(?:visa\s+)?sponsor(?:ship)?|sponsorship\s+not\s+(?:available|provided|offered)|unable\s+to\s+sponsor|cannot\s+(?:provide|offer|support)(?:\s+visa)?\s+sponsor|must\s+be\s+(?:eligible\s+to\s+work|authorized|authorised)|not\s+eligible\s+to\s+sponsor|does\s+not\s+(?:provide|offer)\s+(?:visa\s+)?sponsor/i.test(text)) {
       breakers.push('No visa sponsorship');
     }
-    if (/must\s+have\s+(?:a\s+)?(?:bachelor|master|phd|degree)|(?:bachelor|master|phd|degree)\s+required/i.test(text)) {
-      const dm = text.match(/(?:bachelor'?s?|master'?s?|phd|doctorate|degree)[^\n,]{0,60}(?:required|mandatory)/i);
+
+    const degreeRe = /(?:must\s+have|requires?|require(?:d|ment)?)\s+(?:a\s+)?(?:bachelor|master|phd|doctorate|degree)|(?:bachelor'?s?|master'?s?|phd|doctorate|degree)\s+(?:in\s+\w+\s+)?(?:is\s+)?required/i;
+    if (degreeRe.test(text)) {
+      const dm = text.match(/(?:bachelor'?s?|master'?s?|phd|doctorate|degree)[^\n,]{0,80}(?:required|mandatory)/i);
       breakers.push(dm ? `Degree required: ${dm[0].slice(0, 80)}` : 'Degree required');
     }
 
@@ -197,6 +225,36 @@ export class JDParser {
     }
 
     return breakers;
+  }
+
+  // ── private helpers ───────────────────────────────────────────────────────
+
+  /**
+   * Extract items from a section block — handles both bulleted and numbered
+   * lists, and falls back to splitting on sentence boundaries.
+   */
+  _extractBulletsAndSentences(block) {
+    const items = [];
+
+    // Bulleted / numbered lines
+    for (const line of block.split('\n')) {
+      const t = line.trim();
+      if (!t) continue;
+      if (/^[\-•*●\d.]/.test(t)) {
+        const cleaned = t.replace(/^[\-•*●\d.]+\s*/, '').trim();
+        if (cleaned.length > 2 && cleaned.length < 200) items.push(cleaned);
+      }
+    }
+
+    // Plain-sentence fallback when bullets yielded nothing
+    if (items.length === 0) {
+      block.split(/[.;]\s+/).forEach(sent => {
+        const s = sent.trim();
+        if (s.length > 10 && s.length < 200) items.push(s);
+      });
+    }
+
+    return items;
   }
 }
 

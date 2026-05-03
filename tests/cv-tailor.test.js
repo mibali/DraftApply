@@ -1,0 +1,446 @@
+import { describe, it, expect, beforeEach } from 'vitest';
+import { CVTailor } from '../shared/cv-tailor.js';
+
+let tailor;
+beforeEach(() => { tailor = new CVTailor(); });
+
+// ── Fixtures ─────────────────────────────────────────────────────────────────
+
+const CV = {
+  rawText: `John Doe
+john@example.com | +44 7700 900000 | linkedin.com/in/johndoe | github.com/johndoe
+
+Senior Frontend Engineer
+
+EXPERIENCE
+Senior Frontend Engineer | TechCorp | Jan 2021 – Present
+- Built React and TypeScript dashboards used by 200+ internal users
+- Optimised PostgreSQL queries, reducing report generation time
+- Deployed containerised services to AWS using Docker
+
+Junior Developer | StartupXYZ | Jun 2019 – Dec 2020
+- Developed Node.js REST APIs serving 50k requests/day
+- Maintained Git workflows and CI pipelines
+
+EDUCATION
+BSc Computer Science | University of London | 2015–2019
+
+SKILLS
+React, TypeScript, Node.js, PostgreSQL, AWS, Docker, Git, JavaScript`,
+
+  contactInfo: {
+    name:     'John Doe',
+    email:    'john@example.com',
+    phone:    '+44 7700 900000',
+    linkedin: 'linkedin.com/in/johndoe',
+    github:   'github.com/johndoe',
+  },
+  experience: [
+    {
+      title: 'Senior Frontend Engineer', company: 'TechCorp', dates: 'Jan 2021 – Present',
+      responsibilities: [
+        'Built React and TypeScript dashboards used by 200+ internal users',
+        'Optimised PostgreSQL queries, reducing report generation time',
+        'Deployed containerised services to AWS using Docker',
+      ],
+    },
+    {
+      title: 'Junior Developer', company: 'StartupXYZ', dates: 'Jun 2019 – Dec 2020',
+      responsibilities: [
+        'Developed Node.js REST APIs serving 50k requests/day',
+        'Maintained Git workflows and CI pipelines',
+      ],
+    },
+  ],
+  education: [
+    { institution: 'University of London', degree: 'BSc Computer Science', dates: '2015–2019' },
+  ],
+  skills: ['React', 'TypeScript', 'Node.js', 'PostgreSQL', 'AWS', 'Docker', 'Git', 'JavaScript'],
+  certifications: [],
+  achievements: [],
+  summary: 'Experienced frontend engineer with a focus on React and TypeScript.',
+};
+
+const JD = {
+  jobTitle:        'Senior Software Engineer',
+  company:         'NewCo',
+  seniority:       'senior',
+  requiredSkills:  ['React', 'TypeScript', 'Node.js', '3+ years experience'],
+  preferredSkills: ['GraphQL', 'Kubernetes'],
+  tools:           ['React', 'TypeScript', 'Node.js', 'AWS', 'Docker'],
+  softSkills:      ['communication', 'teamwork'],
+  responsibilities: ['Build frontend features', 'Code review', 'Mentor junior engineers'],
+  atsKeywords:     ['react', 'typescript', 'frontend'],
+  dealBreakers:    [],
+};
+
+// Completely foreign tech stack — nothing in CV
+const JD_NO_MATCH = {
+  jobTitle: 'COBOL Developer',
+  company: 'OldBank',
+  seniority: 'senior',
+  requiredSkills: ['COBOL', 'Fortran', 'CICS', 'Mainframe'],
+  preferredSkills: ['JCL'],
+  tools: ['COBOL', 'Fortran'],
+  softSkills: [],
+  responsibilities: [],
+  atsKeywords: [],
+  dealBreakers: [],
+};
+
+// Builds a faithful tailored CV preserving all locked fields
+function faithfulTailoring() {
+  return `John Doe
+john@example.com | +44 7700 900000 | linkedin.com/in/johndoe | github.com/johndoe
+
+Senior Software Engineer
+
+EXPERIENCE
+Senior Frontend Engineer | TechCorp | Jan 2021 – Present
+- Engineered scalable React and TypeScript dashboards for internal tooling
+- Improved PostgreSQL query performance significantly
+- Deployed services on AWS using Docker containers
+
+Junior Developer | StartupXYZ | Jun 2019 – Dec 2020
+- Built Node.js REST APIs handling high request volumes
+- Managed Git-based CI/CD workflows
+
+EDUCATION
+BSc Computer Science | University of London | 2015–2019
+
+SKILLS
+React, TypeScript, Node.js, AWS, Docker, PostgreSQL, Git, JavaScript`;
+}
+
+
+// ── buildMatchMap ─────────────────────────────────────────────────────────────
+
+describe('buildMatchMap', () => {
+  it('marks skills present in the CV as matched', () => {
+    const map = tailor.buildMatchMap(CV, JD);
+    const react = map.find(m => m.requirement === 'React');
+    expect(react).toBeDefined();
+    expect(['strong_match', 'partial_match']).toContain(react.status);
+    expect(react.allowedToMention).toBe(true);
+  });
+
+  it('marks skills absent from the CV as missing', () => {
+    const map = tailor.buildMatchMap(CV, JD);
+    const graphql = map.find(m => m.requirement === 'GraphQL');
+    expect(graphql).toBeDefined();
+    expect(graphql.status).toBe('missing');
+    expect(graphql.allowedToMention).toBe(false);
+  });
+
+  it('marks user-confirmed skills as user_confirmed regardless of CV content', () => {
+    const map = tailor.buildMatchMap(CV, JD, ['GraphQL', 'Kubernetes']);
+    const graphql = map.find(m => m.requirement === 'GraphQL');
+    expect(graphql.status).toBe('user_confirmed');
+    expect(graphql.allowedToMention).toBe(true);
+    expect(graphql.confirmedByUser).toBe(true);
+  });
+
+  it('user_confirmed evidence mentions user confirmation', () => {
+    const map = tailor.buildMatchMap(CV, JD, ['GraphQL']);
+    const graphql = map.find(m => m.requirement === 'GraphQL');
+    expect(graphql.evidence[0]).toMatch(/confirmed by user/i);
+  });
+
+  it('deduplicates the same requirement appearing across types', () => {
+    // React appears in both requiredSkills and tools in JD
+    const map = tailor.buildMatchMap(CV, JD);
+    const reactEntries = map.filter(m => m.requirement === 'React');
+    expect(reactEntries.length).toBe(1);
+  });
+
+  it('returns empty array for a JD with no requirements', () => {
+    const emptyJd = { ...JD, requiredSkills: [], preferredSkills: [], tools: [], softSkills: [] };
+    expect(tailor.buildMatchMap(CV, emptyJd)).toEqual([]);
+  });
+
+  it('marks all requirements missing for a blank CV', () => {
+    const blankCv = { rawText: '', contactInfo: {}, experience: [], education: [], skills: [] };
+    const map = tailor.buildMatchMap(blankCv, JD);
+    expect(map.every(m => m.status === 'missing')).toBe(true);
+  });
+
+  it('handles undefined confirmedSkills gracefully', () => {
+    expect(() => tailor.buildMatchMap(CV, JD, undefined)).not.toThrow();
+    expect(() => tailor.buildMatchMap(CV, JD, null)).not.toThrow();
+  });
+});
+
+
+// ── buildMatchSummary ─────────────────────────────────────────────────────────
+
+describe('buildMatchSummary', () => {
+  it('returns a score between 0 and 100', () => {
+    const map = tailor.buildMatchMap(CV, JD);
+    const summary = tailor.buildMatchSummary(map);
+    expect(summary.score).toBeGreaterThanOrEqual(0);
+    expect(summary.score).toBeLessThanOrEqual(100);
+  });
+
+  it('surfaces confirmed additions in the summary', () => {
+    const map = tailor.buildMatchMap(CV, JD, ['GraphQL']);
+    const summary = tailor.buildMatchSummary(map);
+    expect(summary.confirmedAdditions).toContain('GraphQL');
+  });
+
+  it('surfaces unsupported requirements in the summary', () => {
+    const map = tailor.buildMatchMap(CV, JD);
+    const summary = tailor.buildMatchSummary(map);
+    expect(summary.unsupportedRequirements).toContain('GraphQL');
+    expect(summary.unsupportedRequirements).toContain('Kubernetes');
+  });
+
+  it('returns a low score when the CV has nothing relevant', () => {
+    const map = tailor.buildMatchMap(CV, JD_NO_MATCH);
+    const summary = tailor.buildMatchSummary(map);
+    expect(summary.score).toBeLessThan(20);
+  });
+
+  it('returns a high score when the CV strongly matches the JD', () => {
+    // JD that only asks for skills the CV clearly has
+    const jdAllMatch = {
+      ...JD,
+      requiredSkills: ['React', 'TypeScript', 'Node.js'],
+      preferredSkills: [],
+      tools: ['AWS', 'Docker'],
+      softSkills: [],
+    };
+    const map = tailor.buildMatchMap(CV, jdAllMatch);
+    const summary = tailor.buildMatchSummary(map);
+    expect(summary.score).toBeGreaterThan(60);
+  });
+
+  it('returns all four list properties as arrays', () => {
+    const map = tailor.buildMatchMap(CV, JD);
+    const summary = tailor.buildMatchSummary(map);
+    expect(Array.isArray(summary.strongMatches)).toBe(true);
+    expect(Array.isArray(summary.partialMatches)).toBe(true);
+    expect(Array.isArray(summary.confirmedAdditions)).toBe(true);
+    expect(Array.isArray(summary.unsupportedRequirements)).toBe(true);
+  });
+});
+
+
+// ── validateTailoredCV ────────────────────────────────────────────────────────
+
+describe('validateTailoredCV', () => {
+  it('returns no warnings for a faithful tailoring', () => {
+    const warnings = tailor.validateTailoredCV(CV, faithfulTailoring());
+    expect(warnings).toEqual([]);
+  });
+
+  it('warns when a company name is missing from the output', () => {
+    const corrupted = faithfulTailoring().replace('TechCorp', 'SomeOtherCorp');
+    const warnings = tailor.validateTailoredCV(CV, corrupted);
+    expect(warnings.some(w => w.includes('TechCorp'))).toBe(true);
+  });
+
+  it('warns when a job title is missing from the output', () => {
+    const corrupted = faithfulTailoring().replace('Junior Developer', 'Software Developer');
+    const warnings = tailor.validateTailoredCV(CV, corrupted);
+    expect(warnings.some(w => w.includes('Junior Developer'))).toBe(true);
+  });
+
+  it('warns when education institution is removed', () => {
+    const corrupted = faithfulTailoring().replace('University of London', 'Online University');
+    const warnings = tailor.validateTailoredCV(CV, corrupted);
+    expect(warnings.some(w => w.includes('University of London'))).toBe(true);
+  });
+
+  it('warns when contact email is removed', () => {
+    const corrupted = faithfulTailoring().replace('john@example.com', '');
+    const warnings = tailor.validateTailoredCV(CV, corrupted);
+    expect(warnings.some(w => /email/i.test(w))).toBe(true);
+  });
+
+  it('warns when contact phone is removed', () => {
+    const corrupted = faithfulTailoring().replace('+44 7700 900000', '');
+    const warnings = tailor.validateTailoredCV(CV, corrupted);
+    expect(warnings.some(w => /phone/i.test(w))).toBe(true);
+  });
+
+  it('warns when a fabricated metric appears in the output', () => {
+    const withMetric = faithfulTailoring() + '\n- Increased throughput by 45% using caching';
+    const warnings = tailor.validateTailoredCV(CV, withMetric);
+    expect(warnings.some(w => /metric/i.test(w) && w.includes('45%'))).toBe(true);
+  });
+
+  it('does not warn for metrics already present in the original CV', () => {
+    // "200+" and "50k" are in the original CV raw text
+    const warnings = tailor.validateTailoredCV(CV, faithfulTailoring());
+    // No spurious warnings for numbers that were already there
+    expect(warnings.every(w => !w.includes('200+'))).toBe(true);
+  });
+
+  it('returns empty array for empty or null tailored text', () => {
+    expect(tailor.validateTailoredCV(CV, '')).toEqual([]);
+    expect(tailor.validateTailoredCV(CV, null)).toEqual([]);
+  });
+
+  it('returns empty array when CV has no locked fields', () => {
+    const minimalCv = { rawText: 'Foo', contactInfo: {}, experience: [], education: [] };
+    expect(tailor.validateTailoredCV(minimalCv, 'Foo bar baz')).toEqual([]);
+  });
+});
+
+
+// ── removeTailoringMetaPhrases ────────────────────────────────────────────────
+
+describe('removeTailoringMetaPhrases', () => {
+  it('removes "Tailored for <company>" prefix', () => {
+    const result = tailor.removeTailoringMetaPhrases(
+      'Tailored for Acme Corp: Experienced engineer with React expertise.',
+      'Acme Corp'
+    );
+    expect(result).not.toMatch(/tailored for acme corp/i);
+    expect(result).toContain('Experienced engineer');
+  });
+
+  it('removes generic "customized for this role" phrase', () => {
+    const result = tailor.removeTailoringMetaPhrases(
+      'Customized for this role — strong background in data engineering.'
+    );
+    expect(result).not.toMatch(/customized for this role/i);
+    expect(result).toContain('strong background');
+  });
+
+  it('removes "Aligned to this position" phrase', () => {
+    const result = tailor.removeTailoringMetaPhrases(
+      'Aligned to this position: 5 years of backend experience.'
+    );
+    expect(result).not.toMatch(/aligned to this position/i);
+    expect(result).toContain('5 years');
+  });
+
+  it('removes "Optimized for this application" variant', () => {
+    const result = tailor.removeTailoringMetaPhrases(
+      'Optimized for this application — distributed systems specialist.'
+    );
+    expect(result).not.toMatch(/optimized for this application/i);
+  });
+
+  it('preserves unrelated content on the same line', () => {
+    const result = tailor.removeTailoringMetaPhrases(
+      'Tailored for Acme Corp role: A results-driven engineer with 8 years.',
+      'Acme Corp'
+    );
+    expect(result).toContain('results-driven engineer');
+    expect(result).toContain('8 years');
+  });
+
+  it('handles null and empty string without throwing', () => {
+    expect(() => tailor.removeTailoringMetaPhrases(null)).not.toThrow();
+    expect(tailor.removeTailoringMetaPhrases('')).toBe('');
+  });
+
+  it('processes multi-line text correctly', () => {
+    const text = `John Doe\nTailored for Acme Corp role: Cloud architect.\nAWS expert.`;
+    const result = tailor.removeTailoringMetaPhrases(text, 'Acme Corp');
+    expect(result).toContain('John Doe');
+    expect(result).toContain('AWS expert');
+    expect(result).not.toMatch(/tailored for acme corp/i);
+  });
+});
+
+
+// ── enforceTargetHeadline ─────────────────────────────────────────────────────
+
+describe('enforceTargetHeadline', () => {
+  it('replaces the existing headline with the target job title', () => {
+    const cv = `John Doe\njohn@example.com\n\nFull Stack Developer\n\nEXPERIENCE`;
+    const result = tailor.enforceTargetHeadline(cv, 'Senior Software Engineer');
+    expect(result).toContain('Senior Software Engineer');
+  });
+
+  it('returns the text unchanged when no job title is provided', () => {
+    const cv = 'John Doe\nDeveloper\n\nEXPERIENCE';
+    expect(tailor.enforceTargetHeadline(cv, '')).toBe(cv);
+    expect(tailor.enforceTargetHeadline(cv, null)).toBe(cv);
+  });
+
+  it('does not duplicate the target title if already correct', () => {
+    const cv = 'John Doe\njohn@example.com\n\nSenior Software Engineer\n\nEXPERIENCE';
+    const result = tailor.enforceTargetHeadline(cv, 'Senior Software Engineer');
+    const count = (result.match(/Senior Software Engineer/g) || []).length;
+    expect(count).toBe(1);
+  });
+});
+
+
+// ── detectChangedSections ─────────────────────────────────────────────────────
+
+describe('detectChangedSections', () => {
+  it('detects a changed summary section', () => {
+    const original = 'Summary:\nExperienced developer.\n\nExperience:\nFoo Corp';
+    const tailored = 'Summary:\nSenior engineer with React expertise.\n\nExperience:\nFoo Corp';
+    expect(tailor.detectChangedSections(original, tailored)).toContain('summary');
+  });
+
+  it('detects a changed skills section', () => {
+    const original = 'Skills:\nJavaScript, CSS\n\nExperience:\nFoo';
+    const tailored = 'Skills:\nReact, TypeScript, JavaScript\n\nExperience:\nFoo';
+    expect(tailor.detectChangedSections(original, tailored)).toContain('skills');
+  });
+
+  it('returns empty array when nothing changed', () => {
+    const text = 'Summary:\nSame.\n\nExperience:\nSame.';
+    expect(tailor.detectChangedSections(text, text)).toEqual([]);
+  });
+
+  it('handles null/empty inputs without throwing', () => {
+    expect(() => tailor.detectChangedSections(null, null)).not.toThrow();
+    expect(() => tailor.detectChangedSections('', '')).not.toThrow();
+  });
+});
+
+
+// ── buildTailoringPrompt ──────────────────────────────────────────────────────
+
+describe('buildTailoringPrompt', () => {
+  it('returns systemPrompt, userPrompt, and temperature', () => {
+    const map = tailor.buildMatchMap(CV, JD);
+    const prompt = tailor.buildTailoringPrompt(CV, JD, map);
+    expect(prompt).toHaveProperty('systemPrompt');
+    expect(prompt).toHaveProperty('userPrompt');
+    expect(prompt).toHaveProperty('temperature');
+  });
+
+  it('embeds locked contact fields in the system prompt', () => {
+    const map = tailor.buildMatchMap(CV, JD);
+    const { systemPrompt } = tailor.buildTailoringPrompt(CV, JD, map);
+    expect(systemPrompt).toContain('john@example.com');
+    expect(systemPrompt).toContain('+44 7700 900000');
+  });
+
+  it('lists unsupported requirements in the user prompt', () => {
+    const map = tailor.buildMatchMap(CV, JD);
+    const { userPrompt } = tailor.buildTailoringPrompt(CV, JD, map);
+    expect(userPrompt).toContain('GraphQL');
+    // Unsupported items are marked with ✗
+    expect(userPrompt).toMatch(/✗.*GraphQL/);
+  });
+
+  it('lists supported requirements in the user prompt', () => {
+    const map = tailor.buildMatchMap(CV, JD);
+    const { userPrompt } = tailor.buildTailoringPrompt(CV, JD, map);
+    expect(userPrompt).toMatch(/✓.*React|✓.*TypeScript|✓.*Node/);
+  });
+
+  it('includes the original CV text in the user prompt', () => {
+    const map = tailor.buildMatchMap(CV, JD);
+    const { userPrompt } = tailor.buildTailoringPrompt(CV, JD, map);
+    expect(userPrompt).toContain(CV.rawText);
+  });
+
+  it('temperature is a number between 0 and 1', () => {
+    const map = tailor.buildMatchMap(CV, JD);
+    const { temperature } = tailor.buildTailoringPrompt(CV, JD, map);
+    expect(typeof temperature).toBe('number');
+    expect(temperature).toBeGreaterThanOrEqual(0);
+    expect(temperature).toBeLessThanOrEqual(1);
+  });
+});

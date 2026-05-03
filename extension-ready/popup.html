@@ -579,6 +579,114 @@
       color: #475569;
     }
     #tailor-open-btn:hover { background: #f8fafc; border-color: #7c3aed; color: #7c3aed; }
+
+    /* ── Step progress indicator ── */
+    .tailor-steps {
+      display: flex;
+      align-items: center;
+      gap: 0;
+      margin-bottom: 14px;
+      padding: 10px 0 4px;
+    }
+
+    .tailor-step {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      flex: 1;
+      position: relative;
+    }
+
+    .tailor-step:not(:last-child)::after {
+      content: '';
+      position: absolute;
+      top: 10px;
+      left: 55%;
+      width: 90%;
+      height: 1.5px;
+      background: #e2e8f0;
+      transition: background 0.3s;
+    }
+
+    .tailor-step.done:not(:last-child)::after { background: #22c55e; }
+    .tailor-step.active:not(:last-child)::after { background: #e2e8f0; }
+
+    .tailor-step-dot {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: #f1f5f9;
+      border: 1.5px solid #cbd5e1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 9px;
+      font-weight: 700;
+      color: #94a3b8;
+      transition: background 0.3s, border-color 0.3s, color 0.3s;
+      z-index: 1;
+    }
+
+    .tailor-step.active .tailor-step-dot {
+      background: #2563eb;
+      border-color: #2563eb;
+      color: white;
+    }
+
+    .tailor-step.done .tailor-step-dot {
+      background: #22c55e;
+      border-color: #22c55e;
+      color: white;
+    }
+
+    .tailor-step-label {
+      font-size: 9.5px;
+      color: #94a3b8;
+      margin-top: 4px;
+      font-weight: 500;
+      white-space: nowrap;
+      transition: color 0.3s;
+    }
+
+    .tailor-step.active .tailor-step-label { color: #2563eb; font-weight: 600; }
+    .tailor-step.done  .tailor-step-label  { color: #16a34a; }
+
+    /* Re-analyze link button */
+    .btn-reanalyze {
+      display: none;
+      background: none;
+      border: none;
+      color: #64748b;
+      font-size: 12px;
+      cursor: pointer;
+      padding: 0;
+      text-decoration: underline;
+      font-family: inherit;
+      margin-top: 6px;
+    }
+    .btn-reanalyze:hover { color: #1e293b; }
+
+    /* No-missing skills state */
+    .match-all-clear {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 8px 10px;
+      background: #f0fdf4;
+      border: 1px solid #bbf7d0;
+      border-radius: 8px;
+      font-size: 12px;
+      color: #166534;
+      font-weight: 500;
+    }
+
+    /* Disabled button state */
+    .btn:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+      transform: none !important;
+      box-shadow: none !important;
+    }
   </style>
 </head>
 <body>
@@ -686,7 +794,27 @@
 
       <div class="tailor-nav">
         <button class="tailor-back-btn" id="tailor-back-btn">← Back</button>
-        <span class="tailor-view-title">Tailor CV for this job</span>
+        <span class="tailor-view-title">Tailor CV</span>
+      </div>
+
+      <!-- Step progress indicator -->
+      <div class="tailor-steps" id="tailor-steps">
+        <div class="tailor-step active" id="step-paste">
+          <div class="tailor-step-dot">1</div>
+          <span class="tailor-step-label">Paste JD</span>
+        </div>
+        <div class="tailor-step" id="step-review">
+          <div class="tailor-step-dot">2</div>
+          <span class="tailor-step-label">Review</span>
+        </div>
+        <div class="tailor-step" id="step-generate">
+          <div class="tailor-step-dot">3</div>
+          <span class="tailor-step-label">Generate</span>
+        </div>
+        <div class="tailor-step" id="step-export">
+          <div class="tailor-step-dot">4</div>
+          <span class="tailor-step-label">Export</span>
+        </div>
       </div>
 
       <div class="da-section-label">Job Description</div>
@@ -698,14 +826,15 @@
       </div>
 
       <button class="btn btn-primary" id="tailor-analyze-btn">Analyze JD</button>
+      <button class="btn-reanalyze" id="tailor-reanalyze-btn">Re-analyze with updated JD</button>
       <button class="btn btn-primary" id="tailor-generate-btn" hidden>Generate Tailored CV</button>
 
       <!-- Loading -->
       <div id="tailor-loading" hidden>
         <div class="tailor-loading-wrap">
           <div class="tailor-spinner"></div>
-          <div class="tailor-loading-text">Tailoring your CV…</div>
-          <div class="tailor-loading-sub">This takes 15–30 seconds</div>
+          <div class="tailor-loading-text" id="tailor-loading-text">Working…</div>
+          <div class="tailor-loading-sub" id="tailor-loading-sub"></div>
         </div>
       </div>
 
@@ -725,9 +854,14 @@
             <div class="match-group-label match-label-blue">Confirmed by you</div>
             <div class="match-chips" id="match-confirmed-chips"></div>
           </div>
+          <div class="match-group" id="match-all-clear" hidden>
+            <div class="match-all-clear">
+              <span>✓</span> All requirements matched from your CV
+            </div>
+          </div>
           <div class="match-group" id="match-missing" hidden>
             <div class="match-group-label match-label-gray">Not found in your CV</div>
-            <div class="missing-skill-help">Tick any skills you genuinely have before generating the tailored CV.</div>
+            <div class="missing-skill-help">Tick any skills you genuinely have — they'll be included in the tailored CV.</div>
             <div class="match-chips" id="match-missing-chips"></div>
           </div>
         </div>
