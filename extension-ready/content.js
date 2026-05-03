@@ -25,6 +25,7 @@ class DraftApplyExtension {
     this._prefetchCache = new WeakMap(); // field -> { status, question, answer, promise }
     this._prefetchByQuestion = new Map(); // question -> answer (survives React re-renders)
     this._buttonMap = new WeakMap();    // field -> overlay button
+    this._observedRoots = new WeakSet(); // Document/ShadowRoot roots watched for new fields
     this._prefetchTimer = null;
     this._prefetchField = null;
     this._lastChunkTime = 0; // epoch ms; updated on each STREAM_CHUNK for watchdog
@@ -309,27 +310,23 @@ class DraftApplyExtension {
   }
 
   listenForMessages() {
-    const fieldSelector =
-      'textarea,' +
-      'input:not([type]),' +
-      'input[type="text"],input[type="email"],input[type="tel"],input[type="search"],input[type="url"],' +
-      'input[type="number"],' +
-      '[contenteditable="true"],[role="textbox"]';
+    const fieldSelector = this.fieldSelector();
 
     // Track last focused field for context menu insert
     document.addEventListener('focusin', (e) => {
-      if (e.target.matches(fieldSelector) && !e.target.closest('#draftapply-modal')) {
-        this.lastFocusedField = e.target;
+      const field = this.fieldFromEvent(e, fieldSelector);
+      if (field && !field.closest?.('#draftapply-modal')) {
+        this.lastFocusedField = field;
       }
-    });
+    }, true);
 
     // Also track on right-click
     document.addEventListener('contextmenu', (e) => {
-      const field = e.target.closest(fieldSelector);
+      const field = this.fieldFromEvent(e, fieldSelector);
       if (field && !field.closest('#draftapply-modal')) {
         this.lastFocusedField = field;
       }
-    });
+    }, true);
 
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (message.type === 'PING') {
@@ -443,14 +440,9 @@ class DraftApplyExtension {
 
     const addButtons = () => {
       if (!document.body) return; // Not ready yet (iframe still loading)
+      this.observeAllRoots(debouncedAddButtons);
 
-      const fields = document.querySelectorAll(
-        'textarea,' +
-        'input:not([type]),' +
-        'input[type="text"],input[type="email"],input[type="tel"],input[type="search"],input[type="url"],' +
-        'input[type="number"],' +
-        '[contenteditable="true"],[role="textbox"]'
-      );
+      const fields = this.querySelectorAllDeep(this.fieldSelector());
       
       fields.forEach(field => {
         // Skip if already has button or is too small/hidden
@@ -588,16 +580,71 @@ class DraftApplyExtension {
     this._rescanFields = addButtons;
 
     this.observer = new MutationObserver(debouncedAddButtons);
-    if (document.body) {
-      this.observer.observe(document.body, {
-        childList: true,
-        subtree: true
-      });
-    }
+    this.observeAllRoots(debouncedAddButtons);
     
     // Reposition on scroll/resize (lightweight — only moves visible buttons)
     window.addEventListener('scroll', repositionVisible, { passive: true });
     window.addEventListener('resize', repositionVisible, { passive: true });
+  }
+
+  fieldSelector() {
+    return 'textarea,' +
+      'input:not([type]),' +
+      'input[type="text"],input[type="email"],input[type="tel"],input[type="search"],input[type="url"],' +
+      'input[type="number"],' +
+      '[contenteditable="true"],[role="textbox"]';
+  }
+
+  fieldFromEvent(event, selector = this.fieldSelector()) {
+    const path = typeof event.composedPath === 'function' ? event.composedPath() : [event.target];
+    for (const node of path) {
+      if (!(node instanceof Element)) continue;
+      if (node.matches?.(selector)) return node;
+      const closest = node.closest?.(selector);
+      if (closest) return closest;
+    }
+    return null;
+  }
+
+  getOpenRoots(root = document, seen = new Set()) {
+    if (!root || seen.has(root)) return [];
+    seen.add(root);
+
+    const roots = [root];
+    const elements = root.querySelectorAll ? root.querySelectorAll('*') : [];
+    for (const el of elements) {
+      if (el.shadowRoot) {
+        roots.push(...this.getOpenRoots(el.shadowRoot, seen));
+      }
+    }
+    return roots;
+  }
+
+  querySelectorAllDeep(selector) {
+    const results = [];
+    for (const root of this.getOpenRoots()) {
+      try {
+        results.push(...root.querySelectorAll(selector));
+      } catch (e) {
+        // Ignore malformed selectors in hostile pages; callers use constants.
+      }
+    }
+    return [...new Set(results)];
+  }
+
+  observeAllRoots(callback) {
+    if (!this.observer || !document.body) return;
+
+    for (const root of this.getOpenRoots()) {
+      if (this._observedRoots.has(root)) continue;
+      try {
+        const target = root === document ? document.body : root;
+        this.observer.observe(target, { childList: true, subtree: true });
+        this._observedRoots.add(root);
+      } catch (e) {
+        // Some detached roots cannot be observed.
+      }
+    }
   }
 
   // ── Field constraint helpers ─────────────────────────────────────────────
@@ -647,13 +694,15 @@ class DraftApplyExtension {
   }
 
   findFieldLabel(field) {
+    const root = field.getRootNode?.() || document;
+
     // 1. Explicit <label for="...">
     if (field.id) {
       try {
-        const label = document.querySelector(`label[for="${CSS.escape(field.id)}"]`);
+        const label = root.querySelector?.(`label[for="${CSS.escape(field.id)}"]`);
         if (label) return label.textContent.trim();
       } catch (e) {
-        const label = document.querySelector(`label[for="${field.id}"]`);
+        const label = root.querySelector?.(`label[for="${field.id}"]`);
         if (label) return label.textContent.trim();
       }
     }
@@ -666,7 +715,11 @@ class DraftApplyExtension {
     const labelledBy = field.getAttribute('aria-labelledby');
     if (labelledBy) {
       const parts = labelledBy.split(/\s+/)
-        .map(id => document.getElementById(id)?.textContent?.trim())
+        .map(id => {
+          if (root.getElementById) return root.getElementById(id)?.textContent?.trim();
+          return root.querySelector?.(`#${CSS.escape(id)}`)?.textContent?.trim()
+            || document.getElementById(id)?.textContent?.trim();
+        })
         .filter(Boolean);
       if (parts.length) return parts.join(' ');
     }

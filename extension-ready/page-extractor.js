@@ -22,7 +22,7 @@ class PageExtractor {
    * but the page content (e.g. application step) changes.
    */
   _hashMainContent() {
-    const main = document.querySelector('main, [role="main"]') || document.body;
+    const main = this.querySelectorDeep('main, [role="main"]') || document.body;
     const text = main ? (main.innerText || '').slice(0, 4000) : '';
     let hash = 5381;
     for (let i = 0; i < text.length; i++) {
@@ -30,6 +30,38 @@ class PageExtractor {
       hash |= 0;
     }
     return hash;
+  }
+
+  openRoots(root = document, seen = new Set()) {
+    if (!root || seen.has(root)) return [];
+    seen.add(root);
+
+    const roots = [root];
+    const elements = root.querySelectorAll ? root.querySelectorAll('*') : [];
+    for (const el of elements) {
+      if (el.shadowRoot) roots.push(...this.openRoots(el.shadowRoot, seen));
+    }
+    return roots;
+  }
+
+  querySelectorDeep(selector) {
+    for (const root of this.openRoots()) {
+      try {
+        const found = root.querySelector?.(selector);
+        if (found) return found;
+      } catch (e) {}
+    }
+    return null;
+  }
+
+  querySelectorAllDeep(selector) {
+    const results = [];
+    for (const root of this.openRoots()) {
+      try {
+        results.push(...(root.querySelectorAll?.(selector) || []));
+      } catch (e) {}
+    }
+    return [...new Set(results)];
   }
 
   /**
@@ -114,7 +146,7 @@ class PageExtractor {
    * Extract from application/ld+json JobPosting schema (most reliable).
    */
   extractFromStructuredData() {
-    const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+    const scripts = this.querySelectorAllDeep('script[type="application/ld+json"]');
     for (const script of scripts) {
       try {
         const data = JSON.parse(script.textContent);
@@ -180,11 +212,11 @@ class PageExtractor {
     ];
 
     for (const selector of selectors) {
-      const el = document.querySelector(selector);
+      const el = this.querySelectorDeep(selector);
       if (el?.textContent?.trim()) return el.textContent.trim();
     }
 
-    const ogTitle = document.querySelector('meta[property="og:title"]');
+    const ogTitle = this.querySelectorDeep('meta[property="og:title"]');
     if (ogTitle?.content) return ogTitle.content;
 
     const titleCandidate = document.title.split('|')[0].split('-')[0].trim();
@@ -238,7 +270,7 @@ class PageExtractor {
     ];
 
     for (const selector of selectors) {
-      const el = document.querySelector(selector);
+      const el = this.querySelectorDeep(selector);
       if (el?.textContent?.trim() && el.textContent.trim().length < 100) {
         return el.textContent.trim();
       }
@@ -314,14 +346,14 @@ class PageExtractor {
     ];
 
     for (const selector of selectors) {
-      const el = document.querySelector(selector);
+      const el = this.querySelectorDeep(selector);
       if (el?.textContent?.trim().length > 200) {
         return { jobDescription: this.cleanText(el.textContent), contextQuality: 'heuristic' };
       }
     }
 
     // 2. Look for any element containing typical job description keywords
-    const allSections = document.querySelectorAll('section, article, div[class], div[id]');
+    const allSections = this.querySelectorAllDeep('section, article, div[class], div[id]');
     const keywords = /responsibilities|requirements|qualifications|about\s+the\s+role|what\s+you.ll\s+do|about\s+this\s+role|the\s+position/i;
     for (const el of allSections) {
       if (el.children.length > 2 && keywords.test(el.textContent) && el.textContent.trim().length > 300) {
@@ -355,7 +387,7 @@ class PageExtractor {
     const requirements = [];
 
     // Pass 1: section-based — requirement-section headers → list items
-    const headers = document.querySelectorAll('h2, h3, h4, strong, b');
+    const headers = this.querySelectorAllDeep('h2, h3, h4, strong, b');
     for (const header of headers) {
       if (header.textContent.toLowerCase().match(/requirement|qualification|what we.+look|must have|you.+have|skills|experience/)) {
         let sibling = header.nextElementSibling;
@@ -374,7 +406,7 @@ class PageExtractor {
     }
 
     // Pass 2: scan all list items (deduped against pass 1)
-    document.querySelectorAll('li').forEach(li => {
+    this.querySelectorAllDeep('li').forEach(li => {
       const text = li.textContent.trim();
       if (isValidRequirement(text) && !requirements.includes(text)) {
         requirements.push(text);
@@ -414,7 +446,12 @@ class PageExtractor {
       clone.querySelectorAll(selector).forEach(el => el.remove());
     }
 
-    return this.cleanText(clone.textContent);
+    const shadowText = this.openRoots()
+      .filter(root => root !== document)
+      .map(root => root.textContent || '')
+      .join('\n');
+
+    return this.cleanText(`${clone.textContent || ''}\n${shadowText}`);
   }
 
   /**
