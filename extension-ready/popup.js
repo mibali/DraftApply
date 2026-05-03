@@ -6,6 +6,8 @@
  */
 
 document.addEventListener('DOMContentLoaded', async () => {
+  const TAILOR_DRAFT_KEY = 'tailorCvDraft';
+
   const elements = {
     cvStatusDot:     document.getElementById('cv-status-dot'),
     cvStatusText:    document.getElementById('cv-status-text'),
@@ -66,11 +68,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Stale-response guard: incremented on every new analyze call.
   // If the value changes while a request is in flight, the response is discarded.
   let analyzeToken = 0;
+  let savingDraftTimer = null;
 
   // Load saved state
   await loadState();
   await checkProxy();
   await checkPageStatus();
+  await restoreTailorDraft();
 
   // ── Event listeners ──────────────────────────────────────────────────────
 
@@ -91,9 +95,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   elements.tailorPdfBtn.addEventListener('click', downloadAsPdf);
 
   // Reset analysis when JD inputs change
-  elements.tailorJd.addEventListener('input', resetTailorReview);
-  elements.tailorJobTitle.addEventListener('input', resetTailorReview);
-  elements.tailorCompany.addEventListener('input', resetTailorReview);
+  elements.tailorJd.addEventListener('input', handleTailorDraftInput);
+  elements.tailorJobTitle.addEventListener('input', handleTailorDraftInput);
+  elements.tailorCompany.addEventListener('input', handleTailorDraftInput);
 
   // File upload handling
   elements.uploadArea.addEventListener('click', () => elements.cvFile.click());
@@ -332,6 +336,50 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.mainView.hidden = false;
   }
 
+  async function restoreTailorDraft() {
+    try {
+      const stored = await chrome.storage.local.get(TAILOR_DRAFT_KEY);
+      const draft = stored?.[TAILOR_DRAFT_KEY];
+      if (!draft) return;
+
+      elements.tailorJd.value = draft.jobDescription || '';
+      elements.tailorJobTitle.value = draft.jobTitle || '';
+      elements.tailorCompany.value = draft.company || '';
+    } catch (e) {
+      // Draft restore is best-effort; the main popup must still load.
+    }
+  }
+
+  function handleTailorDraftInput() {
+    resetTailorReview();
+    scheduleTailorDraftSave();
+  }
+
+  function scheduleTailorDraftSave() {
+    clearTimeout(savingDraftTimer);
+    savingDraftTimer = setTimeout(saveTailorDraft, 250);
+  }
+
+  async function saveTailorDraft() {
+    try {
+      const draft = {
+        jobDescription: elements.tailorJd.value,
+        jobTitle: elements.tailorJobTitle.value,
+        company: elements.tailorCompany.value,
+        updatedAt: new Date().toISOString(),
+      };
+
+      const hasContent = draft.jobDescription.trim() || draft.jobTitle.trim() || draft.company.trim();
+      if (hasContent) {
+        await chrome.storage.local.set({ [TAILOR_DRAFT_KEY]: draft });
+      } else {
+        await chrome.storage.local.remove(TAILOR_DRAFT_KEY);
+      }
+    } catch (e) {
+      // Keep typing responsive even if storage is unavailable.
+    }
+  }
+
   function resetTailorReview() {
     // Invalidate any in-flight analyze response
     analyzeToken++;
@@ -389,6 +437,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       displayMatchReport(result.matchReport, { reviewMode: true });
+      await saveTailorDraft();
       elements.tailorAnalyzeBtn.hidden = true;
       elements.tailorReanalyzeBtn.style.display = 'block';
       elements.tailorGenerateBtn.hidden = false;
@@ -443,6 +492,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       displayTailorResults(result);
+      await saveTailorDraft();
     } catch (e) {
       showTailorMessage('Something went wrong: ' + e.message, 'error');
     } finally {
