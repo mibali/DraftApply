@@ -385,45 +385,52 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         const proxyUrl = await getProxyUrl();
         let token = await ensureInstallToken(proxyUrl);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 45000);
+        const keepAlive = setInterval(() => chrome.storage.local.get('_sw_keepalive'), 20000);
 
-        let response = await fetch(`${proxyUrl}/api/cv/analyze`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({
+        try {
+          const body = JSON.stringify({
             cvText,
             jobDescription: message.jobDescription,
             jobTitle: message.jobTitle || '',
             company: message.company || '',
             confirmedSkills: message.confirmedSkills || [],
-          }),
-        });
+          });
 
-        if (response.status === 401) {
-          await clearInstallToken();
-          token = await ensureInstallToken(proxyUrl);
-          response = await fetch(`${proxyUrl}/api/cv/analyze`, {
+          let response = await fetch(`${proxyUrl}/api/cv/analyze`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({
-              cvText,
-              jobDescription: message.jobDescription,
-              jobTitle: message.jobTitle || '',
-              company: message.company || '',
-              confirmedSkills: message.confirmedSkills || [],
-            }),
+            signal: controller.signal,
+            body,
           });
-        }
 
-        if (response.status === 429) throw new Error(rateLimitError(response));
-        if (!response.ok) {
-          const err = await response.json().catch(() => ({}));
-          throw new Error(err.error || `Error ${response.status}`);
-        }
+          if (response.status === 401) {
+            await clearInstallToken();
+            token = await ensureInstallToken(proxyUrl);
+            response = await fetch(`${proxyUrl}/api/cv/analyze`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+              signal: controller.signal,
+              body,
+            });
+          }
 
-        const data = await response.json();
-        sendResponse({ success: true, ...data });
+          if (response.status === 429) throw new Error(rateLimitError(response));
+          if (!response.ok) {
+            const err = await response.json().catch(() => ({}));
+            throw new Error(err.error || `Error ${response.status}`);
+          }
+
+          const data = await response.json();
+          sendResponse({ success: true, ...data });
+        } finally {
+          clearTimeout(timeout);
+          clearInterval(keepAlive);
+        }
       } catch (e) {
-        sendResponse({ error: e.message });
+        if (e?.name === 'AbortError') sendResponse({ error: 'Analysis timed out — please try again' });
+        else sendResponse({ error: e.message });
       }
     })();
     return true;
@@ -575,9 +582,9 @@ async function handleStreamingAPICall(payload, requestId, tabId, frameId) {
   const enrichedPayload = { ...payload, stream: true };
 
   try {
-    const token = await ensureInstallToken(proxyUrl);
+    let token = await ensureInstallToken(proxyUrl);
 
-    const response = await fetch(`${proxyUrl}/api/generate`, {
+    const doRequest = () => fetch(`${proxyUrl}/api/generate`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -587,10 +594,12 @@ async function handleStreamingAPICall(payload, requestId, tabId, frameId) {
       body: JSON.stringify(enrichedPayload)
     });
 
+    let response = await doRequest();
+
     if (response.status === 401) {
       await clearInstallToken();
-      await ensureInstallToken(proxyUrl); // refresh token for next attempt
-      throw new Error('Token expired — please try again');
+      token = await ensureInstallToken(proxyUrl);
+      response = await doRequest();
     }
 
     if (!response.ok) {

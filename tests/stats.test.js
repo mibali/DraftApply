@@ -131,4 +131,21 @@ describe('productivity stats helper', () => {
     expect(stored.totals.answersInserted).toBe(1);
     expect(stored.days['2026-05-04'].answersInserted).toBe(1);
   });
+
+  it('serializes same-context writes so quick repeated actions do not lose counts', async () => {
+    const stats = loadStatsHelper();
+    const storage = fakeStorage();
+
+    await Promise.all([
+      stats.track('answersInserted', { storage, date: new Date(2026, 4, 4, 9) }),
+      stats.track('answersInserted', { storage, date: new Date(2026, 4, 4, 9) }),
+      stats.track('cvExports', { storage, date: new Date(2026, 4, 4, 9) }),
+    ]);
+
+    const stored = storage.data[stats.STATS_KEY];
+    expect(stored.totals.answersInserted).toBe(2);
+    expect(stored.totals.cvExports).toBe(1);
+    expect(stored.days['2026-05-04'].answersInserted).toBe(2);
+    expect(stored.days['2026-05-04'].cvExports).toBe(1);
+  });
 });

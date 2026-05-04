@@ -170,7 +170,7 @@ class DraftApplyExtension {
           <img class="da-modal-logo" src="${chrome.runtime.getURL('icons/icon128.png')}" alt="">
           <span class="da-header-name">DraftApply</span>
           <span class="da-context-badge" id="da-context-badge">No context</span>
-          <button class="da-modal-close" aria-label="Close">&times;</button>
+          <button class="da-modal-close" type="button" aria-label="Close">&times;</button>
         </div>
         <div class="da-modal-body">
           <div class="da-context-info" id="da-context-info"></div>

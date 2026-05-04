@@ -89,13 +89,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   let savingDraftTimer = null;
   let statsResetTimer = null;
 
-  // Load saved state
-  await loadState();
-  await checkProxy();
-  await checkPageStatus();
-  await restoreTailorDraft();
-  await refreshStatsUI();
-
   // ── Event listeners ──────────────────────────────────────────────────────
 
   elements.saveCvBtn.addEventListener('click', saveCV);
@@ -140,6 +133,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     const file = e.dataTransfer.files[0];
     if (file) processFile(file);
   });
+
+  // Load saved state after binding handlers so the popup never feels dead while
+  // proxy/page checks are warming up.
+  await Promise.allSettled([
+    loadState(),
+    checkProxy(),
+    checkPageStatus(),
+    restoreTailorDraft(),
+    refreshStatsUI(),
+  ]);
 
   // ── CV management ─────────────────────────────────────────────────────────
 
@@ -723,10 +726,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   async function downloadAsPdf() {
     const text = elements.tailorOutput.value;
     if (!text) return;
-    await chrome.storage.local.set({ tailoredCvExport: text });
-    chrome.tabs.create({ url: chrome.runtime.getURL('cv-export.html') });
-    await window.DraftApplyStats?.track?.('cvExports');
-    await refreshStatsUI();
+    try {
+      await chrome.storage.local.set({ tailoredCvExport: text });
+      await chrome.tabs.create({ url: chrome.runtime.getURL('cv-export.html') });
+      await window.DraftApplyStats?.track?.('cvExports');
+      await refreshStatsUI();
+    } catch (e) {
+      showTailorMessage('Could not open the export page. Please try again.', 'error');
+    }
   }
 
   function showTailorMessage(text, type = 'success') {
