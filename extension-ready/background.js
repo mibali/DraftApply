@@ -104,7 +104,7 @@ async function ensureContentScriptInjected(tabId) {
     });
     await chrome.scripting.executeScript({
       target: { tabId, allFrames: true },
-      files: ['page-extractor.js', 'content.js']
+      files: ['stats.js', 'page-extractor.js', 'content.js']
     });
   } catch (err) {
     console.warn('Could not inject content script:', err.message);
@@ -456,7 +456,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (!mainFrameReady) {
         try {
           await chrome.scripting.insertCSS({ target: { tabId, frameIds: [0] }, files: ['content.css'] });
-          await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, files: ['page-extractor.js', 'content.js'] });
+          await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, files: ['stats.js', 'page-extractor.js', 'content.js'] });
         } catch { /* restricted page */ }
         // Brief delay for content script to initialize after fresh injection
         await new Promise(r => setTimeout(r, 300));

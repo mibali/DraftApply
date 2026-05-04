@@ -379,6 +379,7 @@ class DraftApplyExtension {
             this.setNativeValue(target, message.answer);
             this.dispatchInputEvents(target, message.answer);
             this.showNotification('Answer inserted!');
+            globalThis.DraftApplyStats?.track?.('answersInserted')?.catch?.(() => {});
           } catch (e) {
             console.warn('[DraftApply] Insert from parent failed:', e);
           }
@@ -1276,6 +1277,7 @@ class DraftApplyExtension {
       this.currentField = target;
       this.hideModal();
       this.showNotification('Answer inserted!');
+      globalThis.DraftApplyStats?.track?.('answersInserted')?.catch?.(() => {});
     } catch (e) {
       console.warn('[DraftApply] Insert failed:', e);
       this.showNotification('Could not insert into that field. Try clicking the field and typing once, then Insert again.', 'error');

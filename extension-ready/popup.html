@@ -308,6 +308,95 @@
       background: #fafafa;
     }
 
+    /* ── Productivity stats ── */
+    .stats-card {
+      background: white;
+      border: 1.5px solid #e2e8f0;
+      border-radius: 9px;
+      margin-top: 10px;
+      overflow: hidden;
+    }
+
+    .stats-toggle {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 11px;
+      background: transparent;
+      border: 0;
+      font-family: inherit;
+      text-align: left;
+      cursor: pointer;
+      color: inherit;
+    }
+
+    .stats-title {
+      font-size: 10.5px;
+      font-weight: 700;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.45px;
+      flex: 0 0 auto;
+    }
+
+    .stats-summary {
+      min-width: 0;
+      flex: 1;
+      color: #475569;
+      font-size: 11.5px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .stats-chevron {
+      color: #94a3b8;
+      font-size: 13px;
+      line-height: 1;
+      transition: transform 0.2s;
+    }
+
+    .stats-card.expanded .stats-chevron { transform: rotate(180deg); }
+
+    .stats-details {
+      border-top: 1px solid #f1f5f9;
+      padding: 10px 11px 11px;
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px 10px;
+    }
+
+    .stats-item-value {
+      color: #1e293b;
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1.2;
+    }
+
+    .stats-item-label {
+      color: #94a3b8;
+      font-size: 10.5px;
+      margin-top: 2px;
+      line-height: 1.25;
+    }
+
+    .stats-reset-btn {
+      margin-top: 10px;
+      padding: 0;
+      background: none;
+      border: 0;
+      color: #94a3b8;
+      font: inherit;
+      font-size: 11px;
+      cursor: pointer;
+    }
+
+    .stats-reset-btn:hover { color: #ef4444; }
+
     /* ── Page status ── */
     .page-status-card {
       display: flex;
@@ -758,6 +847,48 @@
 
     <div class="message" id="message" hidden></div>
 
+    <!-- Productivity Stats -->
+    <div class="stats-card" id="stats-card">
+      <button class="stats-toggle" id="stats-toggle" type="button" aria-expanded="false">
+        <span class="stats-title">Productivity</span>
+        <span class="stats-summary" id="stats-summary">No activity yet</span>
+        <span class="stats-chevron" aria-hidden="true">⌄</span>
+      </button>
+      <div class="stats-details" id="stats-details" hidden>
+        <div class="stats-grid">
+          <div>
+            <div class="stats-item-value" id="stats-answers">0</div>
+            <div class="stats-item-label">Answers inserted</div>
+          </div>
+          <div>
+            <div class="stats-item-value" id="stats-exports">0</div>
+            <div class="stats-item-label">CV exports</div>
+          </div>
+          <div>
+            <div class="stats-item-value" id="stats-tailored">0</div>
+            <div class="stats-item-label">CVs tailored</div>
+          </div>
+          <div>
+            <div class="stats-item-value" id="stats-saved">0m</div>
+            <div class="stats-item-label">Time saved</div>
+          </div>
+          <div>
+            <div class="stats-item-value" id="stats-week">0</div>
+            <div class="stats-item-label">This week</div>
+          </div>
+          <div>
+            <div class="stats-item-value" id="stats-streak">0 days</div>
+            <div class="stats-item-label">Assist streak</div>
+          </div>
+          <div>
+            <div class="stats-item-value" id="stats-top-action">None yet</div>
+            <div class="stats-item-label">Top action</div>
+          </div>
+        </div>
+        <button class="stats-reset-btn" id="stats-reset-btn" type="button">Reset stats</button>
+      </div>
+    </div>
+
     <!-- Current Page -->
     <div id="activate-section" style="margin-top: 14px;">
       <div class="da-section-label">Current Page</div>
@@ -895,6 +1026,7 @@
     </div>
   </div><!-- /tailor-view -->
 
+  <script src="stats.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>
