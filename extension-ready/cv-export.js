@@ -349,12 +349,21 @@ function formatCvToHtml(rawText) {
   let pendingCompany = null;
   // True immediately after emitting an entry row, so the next short line → cv-job-title
   let afterEntryRow = false;
+  let openEntry = false;
 
   const closeList = () => {
     if (listOpen) { html += '</ul>'; listOpen = false; }
   };
 
+  const closeEntry = () => {
+    if (openEntry) { html += '</div>'; openEntry = false; }
+  };
+
   const emitEntryRow = (company, dates) => {
+    closeList();
+    closeEntry();
+    html += '<div class="cv-entry">';
+    openEntry = true;
     html += '<div class="cv-entry-row">';
     html += `<span class="cv-company">${esc(company)}</span>`;
     if (dates) html += `<span class="cv-entry-dates">${esc(dates)}</span>`;
@@ -406,6 +415,7 @@ function formatCvToHtml(rawText) {
     if (isSectionHeader(line)) {
       closeList();
       flushPendingCompany(null);
+      closeEntry();
       afterEntryRow = false;
       if (inHeader) {
         html += '<hr class="cv-header-rule">';
@@ -490,7 +500,7 @@ function formatCvToHtml(rawText) {
       }
 
       // Line immediately after an entry row → job title (italic)
-      if (afterEntryRow && line.length < 70 && !isContactLine(line) && !isDateLine(line)) {
+      if (afterEntryRow && line.length < 120 && !isContactLine(line) && !isDateLine(line)) {
         const title = stripJobTitleLabel(line);
         if (title) html += `<p class="cv-job-title">${esc(title)}</p>`;
         afterEntryRow = false;
@@ -504,7 +514,7 @@ function formatCvToHtml(rawText) {
       }
 
       // Pending company + next short non-date line → flush company (no dates), emit as job title
-      if (pendingCompany !== null && line.length < 70 && !isContactLine(line) && !isDateLine(line)) {
+      if (pendingCompany !== null && line.length < 120 && !isContactLine(line) && !isDateLine(line)) {
         flushPendingCompany(null);
         afterEntryRow = false;
         const title = stripJobTitleLabel(line);
@@ -541,5 +551,6 @@ function formatCvToHtml(rawText) {
 
   closeList();
   flushPendingCompany(null);
+  closeEntry();
   return html;
 }

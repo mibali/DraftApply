@@ -198,6 +198,9 @@
        Chrome only adds those when no @page margin is set via CSS. */
     @page { margin: 0; }
 
+    /* Keep each experience/education entry together — no mid-entry page breaks */
+    .cv-entry { break-inside: avoid; }
+
     @media print {
       body { background: white; }
       #toolbar { display: none !important; }
@@ -207,6 +210,13 @@
         padding: 20mm 18mm;
         min-height: auto;
       }
+      .cv-entry { break-inside: avoid; }
+      .cv-entry-row { break-after: avoid; }
+      .cv-job-title { break-before: avoid; break-after: avoid; }
+      .cv-role-focus { break-before: avoid; break-after: avoid; }
+      .cv-bullets { break-before: avoid; }
+      .cv-bullets li { break-inside: avoid; }
+      .cv-section-header { break-after: avoid; }
     }
   </style>
 </head>
