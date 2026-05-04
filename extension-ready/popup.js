@@ -6,6 +6,10 @@
  */
 
 document.addEventListener('DOMContentLoaded', async () => {
+  // Hide logo images that fail to load (CSP-safe — no inline onerror attribute)
+  document.querySelectorAll('.da-popup-logo-img').forEach(img => {
+    img.addEventListener('error', () => { img.style.display = 'none'; });
+  });
   const TAILOR_DRAFT_KEY = 'tailorCvDraft';
 
   const elements = {

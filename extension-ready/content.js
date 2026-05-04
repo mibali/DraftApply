@@ -167,7 +167,7 @@ class DraftApplyExtension {
     modal.innerHTML = `
       <div class="da-modal-content">
         <div class="da-modal-header">
-          <img class="da-modal-logo" src="${chrome.runtime.getURL('icons/icon128.png')}" alt="" onerror="this.style.display='none'">
+          <img class="da-modal-logo" src="${chrome.runtime.getURL('icons/icon128.png')}" alt="">
           <span class="da-header-name">DraftApply</span>
           <span class="da-context-badge" id="da-context-badge">No context</span>
           <button class="da-modal-close" aria-label="Close">&times;</button>
@@ -217,6 +217,10 @@ class DraftApplyExtension {
     
     modal.style.display = 'none';
     this.modal = modal;
+
+    // Hide logo if icon fails to load (CSP-safe alternative to onerror attribute)
+    const logoImg = modal.querySelector('.da-modal-logo');
+    if (logoImg) logoImg.addEventListener('error', () => { logoImg.style.display = 'none'; });
 
     // Bind events first (they persist even if modal is detached from DOM)
     modal.querySelector('.da-modal-close').onclick = () => this.hideModal();
