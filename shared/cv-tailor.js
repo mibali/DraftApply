@@ -160,6 +160,7 @@ WHAT YOU MAY DO:
     const topRequired = (jdData.requiredSkills || []).slice(0, 15);
     const topTools = (jdData.tools || []).slice(0, 20);
     const topKeywords = (jdData.atsKeywords || []).slice(0, 20);
+    const tailoringPlan = this.buildTailoringPlan(cvData, jdData, matchMap);
 
     const userPrompt = `TARGET ROLE
   Job title:  ${jdData.jobTitle || 'Not specified'}
@@ -186,6 +187,17 @@ ${unsupported.length ? unsupported.map(s => `    ✗ ${s}`).join('\n') : '    (n
 KEY RESPONSIBILITIES TO HIGHLIGHT (up to 8)
 ${topResponsibilities.map(r => `  • ${r}`).join('\n') || '  (none listed)'}
 
+TAILORING BLUEPRINT
+  Target positioning: ${tailoringPlan.targetPositioning}
+  Highest-value supported keywords:
+${tailoringPlan.supportedKeywords.length ? tailoringPlan.supportedKeywords.map(s => `    • ${s}`).join('\n') : '    (none)'}
+  Suggested role focus lines:
+${tailoringPlan.roleFocusLines.length ? tailoringPlan.roleFocusLines.map(r => `    • ${r.company} / ${r.title}: ${r.focus}`).join('\n') : '    (none)'}
+  Quality bar:
+    • The CV must visibly prioritize the target role, not just lightly swap keywords.
+    • Summary, skills, focus lines, and the first bullets under each relevant role must all point toward the target role.
+    • Unsupported JD tools may appear only in the missing-skills/review context, never as claimed candidate experience.
+
 ORIGINAL CV
 ${cvData.rawText}
 
@@ -202,6 +214,53 @@ INSTRUCTION
 Output the complete tailored CV text with no preamble, no commentary, and no markdown code fences. Begin directly with the candidate's name.`;
 
     return { systemPrompt, userPrompt, temperature: 0.3 };
+  }
+
+  buildTailoringPlan(cvData, jdData, matchMap = []) {
+    const domain = this._detectDomain(jdData);
+    const domainLabel = {
+      mlops: 'MLOps, AI/ML platform engineering, production reliability, and automation',
+      data_engineering: 'data engineering, data pipelines, platform reliability, and automation',
+      devops: 'DevOps, cloud infrastructure, platform reliability, and automation',
+      ml_scientist: 'machine learning, experimentation, model development, and AI tooling',
+      frontend: 'frontend engineering, product delivery, UI quality, and modern web tooling',
+      backend: 'backend engineering, APIs, distributed systems, and service reliability',
+      cloud: 'cloud architecture, infrastructure automation, security, and reliability',
+    }[domain] || `${jdData.jobTitle || 'the target role'} responsibilities, supported technologies, and relevant achievements`;
+
+    const supportedKeywords = this._rankSupportedKeywords(matchMap, jdData).slice(0, 18);
+    const roleFocusLines = (cvData.experience || [])
+      .map(exp => {
+        const focus = this._buildRoleFocus(exp, jdData, matchMap);
+        return focus ? { company: exp.company || '', title: exp.title || '', focus } : null;
+      })
+      .filter(Boolean);
+
+    return {
+      domain,
+      targetPositioning: domainLabel,
+      supportedKeywords,
+      roleFocusLines,
+    };
+  }
+
+  finalizeTailoredCV(rawText, { cvData, jdData, matchMap = [], confirmedSkills = [] } = {}) {
+    return this.cleanSkillsSection(
+      this.ensureRoleFocusLines(
+        this.ensureConfirmedSkillsIncluded(
+          this.removeTailoringMetaPhrases(
+            this.enforceTargetHeadline(rawText, jdData?.jobTitle),
+            jdData?.company
+          ),
+          confirmedSkills
+        ),
+        cvData,
+        jdData,
+        matchMap
+      ),
+      matchMap,
+      confirmedSkills
+    );
   }
 
   enforceTargetHeadline(tailoredText, jobTitle) {
@@ -289,6 +348,32 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
     return lines.join('\n');
   }
 
+  ensureRoleFocusLines(tailoredText, cvData = {}, jdData = {}, matchMap = []) {
+    if (!tailoredText) return tailoredText;
+
+    const lines = String(tailoredText).split('\n');
+    let searchFrom = 0;
+
+    for (const exp of (cvData.experience || [])) {
+      const focus = this._buildRoleFocus(exp, jdData, matchMap);
+      if (!focus || !exp.title) continue;
+
+      const titleIdx = this._findTitleLineIndex(lines, exp.title, searchFrom);
+      if (titleIdx === -1) continue;
+
+      const nextMeaningfulIdx = this._nextMeaningfulLineIndex(lines, titleIdx + 1);
+      if (nextMeaningfulIdx !== -1 && /^focus\s*:/i.test(lines[nextMeaningfulIdx].trim())) {
+        searchFrom = nextMeaningfulIdx + 1;
+        continue;
+      }
+
+      lines.splice(titleIdx + 1, 0, `Focus: ${focus}`);
+      searchFrom = titleIdx + 2;
+    }
+
+    return lines.join('\n');
+  }
+
   cleanSkillsSection(tailoredText, matchMap = [], confirmedSkills = []) {
     if (!tailoredText) return tailoredText;
 
@@ -373,6 +458,48 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
     return warnings;
   }
 
+  validateTailoringQuality(originalCvData, jdData, matchMap, tailoredText, confirmedSkills = []) {
+    if (!tailoredText) return [];
+    const warnings = [];
+    const normalisedOutput = this._normaliseText(tailoredText);
+    const normalisedOriginal = this._normaliseText(originalCvData?.rawText || '');
+
+    const jobTitle = String(jdData?.jobTitle || '').trim();
+    if (jobTitle && !normalisedOutput.includes(this._normaliseText(jobTitle))) {
+      warnings.push(`Target job title may be missing from the tailored CV headline: "${jobTitle}"`);
+    }
+
+    for (const skill of this._uniqueDisplaySkills(confirmedSkills)) {
+      if (!normalisedOutput.includes(this._normaliseText(skill))) {
+        warnings.push(`User-confirmed skill was not included in the tailored CV: "${skill}"`);
+      }
+    }
+
+    for (const exp of (originalCvData?.experience || [])) {
+      const focus = this._buildRoleFocus(exp, jdData, matchMap);
+      if (!focus || !exp.title) continue;
+      const titleIdx = this._findTitleLineIndex(String(tailoredText).split('\n'), exp.title, 0);
+      if (titleIdx !== -1) {
+        const afterTitle = String(tailoredText).split('\n').slice(titleIdx + 1, titleIdx + 4).join('\n');
+        if (!/^focus\s*:/im.test(afterTitle)) {
+          warnings.push(`Role focus line may be missing under "${exp.title}"`);
+        }
+      }
+    }
+
+    for (const item of (matchMap || []).filter(m => !m.allowedToMention)) {
+      for (const candidate of this._extractAtomicSkillCandidates(item.requirement)) {
+        const key = this._normaliseText(candidate);
+        if (!key || normalisedOriginal.includes(key)) continue;
+        if (normalisedOutput.includes(key)) {
+          warnings.push(`Unsupported JD skill/tool may have been claimed without CV evidence or user confirmation: "${candidate}"`);
+        }
+      }
+    }
+
+    return [...new Set(warnings)];
+  }
+
   /**
    * Detect which sections changed between original and tailored text.
    * @returns {string[]} section names
@@ -429,6 +556,171 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
       result.push(clean);
     }
     return result;
+  }
+
+  _rankSupportedKeywords(matchMap = [], jdData = {}) {
+    const targetText = this._normaliseText([
+      jdData.jobTitle,
+      ...(jdData.requiredSkills || []),
+      ...(jdData.tools || []),
+      ...(jdData.responsibilities || []),
+      ...(jdData.atsKeywords || []),
+    ].join(' '));
+
+    return this._uniqueDisplaySkills(
+      (matchMap || [])
+        .filter(m => m.allowedToMention)
+        .map(m => m.requirement)
+        .flatMap(item => this._splitSkillLine(String(item || '')))
+        .map(item => this._cleanSkillItem(item))
+        .filter(item => this._isUsefulSkillItem(item))
+        .filter(item => !this._isJdRequirementProse(item))
+        .sort((a, b) => {
+          const aTarget = targetText.includes(this._normaliseText(a)) ? 1 : 0;
+          const bTarget = targetText.includes(this._normaliseText(b)) ? 1 : 0;
+          return bTarget - aTarget || a.length - b.length;
+        })
+    );
+  }
+
+  _buildRoleFocus(exp = {}, jdData = {}, matchMap = []) {
+    const roleText = this._normaliseText([
+      exp.title,
+      exp.company,
+      ...(exp.responsibilities || []),
+    ].join(' '));
+    if (!roleText) return '';
+
+    const targetText = this._normaliseText([
+      jdData.jobTitle,
+      ...(jdData.requiredSkills || []),
+      ...(jdData.preferredSkills || []),
+      ...(jdData.tools || []),
+      ...(jdData.responsibilities || []),
+      ...(jdData.atsKeywords || []),
+    ].join(' '));
+
+    const supportedText = this._normaliseText(
+      (matchMap || [])
+        .filter(m => m.allowedToMention)
+        .map(m => m.requirement)
+        .join(' ')
+    );
+    const combinedTarget = `${targetText} ${supportedText}`;
+
+    const categories = [
+      {
+        label: 'MLOps and AI platform enablement',
+        evidence: /\b(mlops|machine learning| ai | llm|model|cody|langchain|openai|ai-powered|security scanning)\b/,
+        target: /\b(mlops|machine learning| ai | llm|model|vertex|mlflow|pytorch|tensorflow|agent|data science)\b/,
+      },
+      {
+        label: 'cloud infrastructure',
+        evidence: /\b(aws|azure|gcp|cloud|infrastructure|deployment|environment|configuration|terraform|iac)\b/,
+        target: /\b(aws|azure|gcp|cloud|infrastructure|terraform|iac|gke|cloud run|platform)\b/,
+      },
+      {
+        label: 'platform reliability',
+        evidence: /\b(reliability|stability|production|incident|sla|on-call|root cause|rca|remediation|systemic|availability)\b/,
+        target: /\b(reliability|stability|production|incident|monitor|scale|platform|sre|availability)\b/,
+      },
+      {
+        label: 'automation',
+        evidence: /\b(automation|automate|python|script|scripting|tooling|workflow|manual effort)\b/,
+        target: /\b(automation|python|script|scripting|workflow|tooling|enable)\b/,
+      },
+      {
+        label: 'production diagnostics',
+        evidence: /\b(diagnostic|troubleshoot|investigation|debug|log analysis|reproduction|performance|issue resolution)\b/,
+        target: /\b(diagnostic|troubleshoot|monitor|performance|reliability|production|quality)\b/,
+      },
+      {
+        label: 'CI/CD and release engineering',
+        evidence: /\b(ci\/cd|pipeline|github actions|gitlab|jenkins|circleci|buildkite|release|deployment)\b/,
+        target: /\b(ci\/cd|pipeline|gitlab|github actions|release|deployment|ship)\b/,
+      },
+      {
+        label: 'containerization and orchestration',
+        evidence: /\b(kubernetes|docker|container|gke|helm)\b/,
+        target: /\b(kubernetes|docker|container|gke|helm|orchestration)\b/,
+      },
+      {
+        label: 'observability and monitoring',
+        evidence: /\b(monitoring|observability|grafana|prometheus|datadog|new relic|logs?|metrics|alert)\b/,
+        target: /\b(monitoring|observability|grafana|prometheus|datadog|new relic|logs?|metrics|alert)\b/,
+      },
+      {
+        label: 'data pipelines and quality',
+        evidence: /\b(data pipeline|etl|airflow|bigquery|dataflow|sql|data quality|database)\b/,
+        target: /\b(data pipeline|etl|airflow|bigquery|dataflow|sql|data quality|data platform)\b/,
+      },
+      {
+        label: 'security platform engineering',
+        evidence: /\b(security|semgrep|scan|false positive|vulnerabilit|sast|pipeline instability)\b/,
+        target: /\b(security|scan|compliance|vulnerabilit|sast|secure)\b/,
+      },
+      {
+        label: 'engineering enablement',
+        evidence: /\b(mentor|guidance|documentation|runbook|knowledge base|framework|enable|training|standard|process)\b/,
+        target: /\b(enable|guidance|mentor|documentation|framework|team|collaborat|knowledge)\b/,
+      },
+    ];
+
+    const matches = categories
+      .map((category, index) => {
+        const hasEvidence = category.evidence.test(roleText);
+        if (!hasEvidence) return null;
+        const targetScore = category.target.test(combinedTarget) ? 2 : 0;
+        const evidenceScore = category.evidence.test(supportedText) ? 1 : 0;
+        return { ...category, index, score: targetScore + evidenceScore };
+      })
+      .filter(Boolean)
+      .filter(item => item.score > 0);
+
+    const selected = matches
+      .sort((a, b) => b.score - a.score || a.index - b.index)
+      .slice(0, 5)
+      .map(item => item.label);
+
+    if (selected.length < 2) return '';
+    return this._formatList(selected);
+  }
+
+  _formatList(items = []) {
+    const unique = this._uniqueDisplaySkills(items);
+    if (unique.length <= 2) return unique.join(' and ');
+    return `${unique.slice(0, -1).join(', ')}, and ${unique[unique.length - 1]}`;
+  }
+
+  _findTitleLineIndex(lines, title, start = 0) {
+    const titleKey = this._normaliseText(title);
+    if (!titleKey) return -1;
+    for (let i = Math.max(0, start); i < lines.length; i++) {
+      const line = this._normaliseText(lines[i]);
+      if (!line) continue;
+      if (line === titleKey) return i;
+      if (line === this._normaliseText(`Position: ${title}`)) return i;
+      if (/^position\s+/.test(line) && line.includes(titleKey)) return i;
+      if (line.startsWith(titleKey) && line.length <= titleKey.length + 80) return i;
+      if (line.includes(titleKey) && line.length <= titleKey.length + 20) return i;
+    }
+    return -1;
+  }
+
+  _nextMeaningfulLineIndex(lines, start = 0) {
+    for (let i = Math.max(0, start); i < lines.length; i++) {
+      if (String(lines[i] || '').trim()) return i;
+    }
+    return -1;
+  }
+
+  _extractAtomicSkillCandidates(requirement) {
+    const cleaned = this._cleanSkillItem(requirement);
+    if (!this._isUsefulSkillItem(cleaned)) return [];
+    if (this._isJdRequirementProse(cleaned)) return [];
+    const tokens = this._getCoreTokens(cleaned);
+    if (tokens.length > 4) return [];
+    return [cleaned];
   }
 
   _getCoreTokens(requirement) {

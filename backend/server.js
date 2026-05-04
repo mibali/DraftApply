@@ -358,22 +358,20 @@ app.post('/api/cv/tailor', async (req, res) => {
       max_tokens: 4000
     });
 
-    const tailoredCvText = tailor.cleanSkillsSection(
-      tailor.ensureConfirmedSkillsIncluded(
-        tailor.removeTailoringMetaPhrases(
-          tailor.enforceTargetHeadline(result.answer, jdData.jobTitle),
-          jdData.company
-        ),
-        confirmedSkills
-      ),
+    const tailoredCvText = tailor.finalizeTailoredCV(result.answer, {
+      cvData,
+      jdData,
       matchMap,
-      confirmedSkills
-    );
+      confirmedSkills,
+    });
     if (!tailoredCvText?.trim()) {
       return res.status(502).json({ error: 'No output from provider' });
     }
 
-    const warnings        = tailor.validateTailoredCV(cvData, tailoredCvText);
+    const warnings        = [
+      ...tailor.validateTailoredCV(cvData, tailoredCvText),
+      ...tailor.validateTailoringQuality(cvData, jdData, matchMap, tailoredCvText, confirmedSkills),
+    ];
     const changedSections = tailor.detectChangedSections(cvText, tailoredCvText);
     const matchReport     = tailor.buildMatchSummary(matchMap);
 
