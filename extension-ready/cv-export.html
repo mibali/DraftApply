@@ -193,6 +193,11 @@
     }
 
     /* ── Print ── */
+
+    /* Suppress browser-injected date / title / URL headers and footers.
+       Chrome only adds those when no @page margin is set via CSS. */
+    @page { margin: 0; }
+
     @media print {
       body { background: white; }
       #toolbar { display: none !important; }

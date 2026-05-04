@@ -23,6 +23,10 @@
 
   await chrome.storage.local.remove('tailoredCvExport');
 
+  // Set page title (and therefore PDF filename) to "Full Name CV"
+  const candidateName = tailoredCvExport.split('\n').map(l => l.trim()).find(l => l.length > 0);
+  if (candidateName) document.title = `${candidateName} CV`;
+
   content.innerHTML = formatCvToHtml(tailoredCvExport);
   loading.hidden = true;
   content.hidden = false;
