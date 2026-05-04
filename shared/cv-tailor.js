@@ -6,11 +6,15 @@ export class CVTailor {
   buildMatchMap(cvData, jdData, confirmedSkills = []) {
     const cvText = cvData.rawText || '';
     const cvLower = cvText.toLowerCase();
-    const confirmedSet = new Set(
-      (Array.isArray(confirmedSkills) ? confirmedSkills : [])
-        .map(skill => this._normaliseText(skill))
-        .filter(Boolean)
-    );
+    const confirmedEntries = (Array.isArray(confirmedSkills) ? confirmedSkills : [])
+      .map(skill => String(skill || '').trim())
+      .filter(Boolean);
+    const confirmedByKey = new Map();
+    for (const skill of confirmedEntries) {
+      const key = this._normaliseText(skill);
+      if (key && !confirmedByKey.has(key)) confirmedByKey.set(key, skill);
+    }
+    const confirmedSet = new Set(confirmedByKey.keys());
 
     // Flatten all CV text sources for searching
     const cvSources = [
@@ -40,6 +44,13 @@ export class CVTailor {
       if (reqTexts.indexOf(key) < i) return false; // exact duplicate, already seen
       return true;
     });
+
+    for (const skill of confirmedByKey.values()) {
+      const key = this._normaliseText(skill);
+      if (!deduped.some(({ req }) => this._normaliseText(req) === key)) {
+        deduped.push({ req: skill, type: 'user_confirmed' });
+      }
+    }
 
     return deduped.map(({ req, type }) => {
       const confirmedByUser = confirmedSet.has(this._normaliseText(req));
@@ -124,7 +135,7 @@ STRICT RULES:
 3. Preserve every locked field exactly as written — same spelling, capitalisation, and format.
 4. Do not add new employment entries, new education entries, or new certifications.
 5. Do not remove any role or educational entry.
-6. Exact product/tool names from the JD may be added to skills, summaries, or bullets only when supported by the original CV or match report.
+6. Exact product/tool names from the JD or user-confirmed review may be added to skills, summaries, or bullets only when supported by the original CV or match report.
 7. If the JD mentions an unsupported tool, you may emphasize adjacent supported experience instead, but do not name the unsupported tool as a candidate skill.
 8. Do not write meta phrases such as "Tailored for", "customized for", "aligned to this job", or "for this application".
 9. Do not mention the target company name in the CV body unless it already appears in the original CV as part of the candidate's history.
@@ -138,6 +149,7 @@ WHAT YOU MAY DO:
 • Rephrase existing responsibility bullets using vocabulary from the job description, as long as the underlying meaning is unchanged.
 • Reorder bullets within a role to put the most relevant ones first.
 • Expand or compress bullet points within the bounds of what the original bullet states.
+• Include every user-confirmed addition in the skills/core competencies section.
 • Add truthful role-positioning lines in the form "Focus: ..." under existing role titles when supported by that role's original responsibilities.`;
 
     const supported = matchMap.filter(m => m.allowedToMention).map(m => m.requirement);
@@ -182,7 +194,7 @@ INSTRUCTION
 3. Reorder and rename skills/competencies so supported JD-relevant items appear first, especially supported technologies, methods, domain terms, and operational practices from the JD.
 4. For each relevant role: preserve the official job title exactly, then add one short "Focus:" line below it when the original responsibilities support the target role. Example: "Focus: MLOps, platform reliability, cloud infrastructure, automation, and production diagnostics".
 5. For each role: rewrite relevant bullets with JD vocabulary (same meaning, aligned language), reorder bullets so the strongest target-role evidence comes first, and make Infra/MLOps/platform evidence obvious when supported.
-6. You may include user-confirmed additions as skills/tools, but do not attach them to a specific employer, project, metric, certification, or achievement unless that context exists in the original CV.
+6. Include every user-confirmed addition in the skills/core competencies section. You may also use them in the summary when natural, but do not attach them to a specific employer, project, metric, certification, or achievement unless that context exists in the original CV.
 7. Preserve all locked fields exactly — same spelling, capitalisation, and punctuation.
 8. The final CV must read like a polished CV for "${jdData.jobTitle || 'the target role'}", not like a generic CV and not like generated marketing copy.
 
@@ -238,6 +250,42 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
         .replace(/\bAligned\s+to\s+(?:this\s+)?(?:role|position|job|application)\s*[:\-–—]?\s*/gi, '')
       )
       .join('\n');
+  }
+
+  ensureConfirmedSkillsIncluded(tailoredText, confirmedSkills = []) {
+    if (!tailoredText) return tailoredText;
+
+    const skills = this._uniqueDisplaySkills(confirmedSkills);
+    if (skills.length === 0) return tailoredText;
+
+    const existingText = this._normaliseText(tailoredText);
+    const missing = skills.filter(skill => !existingText.includes(this._normaliseText(skill)));
+    if (missing.length === 0) return tailoredText;
+
+    const lines = String(tailoredText).split('\n');
+    const headingIdx = lines.findIndex(line =>
+      /^(core\s+competenc(?:y|ies)|technical\s+skills?|skills|technologies|tools|expertise)\s*[:\-]?$/i
+        .test(line.trim())
+    );
+
+    if (headingIdx === -1) {
+      return `${tailoredText.trim()}\n\nTechnical Skills\n${missing.join(', ')}`;
+    }
+
+    let insertIdx = headingIdx + 1;
+    while (insertIdx < lines.length && !lines[insertIdx].trim()) insertIdx++;
+
+    if (insertIdx >= lines.length || this._isLikelySectionHeader(lines[insertIdx])) {
+      lines.splice(headingIdx + 1, 0, missing.join(', '));
+      return lines.join('\n');
+    }
+
+    const current = lines[insertIdx].trim();
+    const prefix = /^[-•]\s+/.test(current) ? current.match(/^[-•]\s+/)[0] : '';
+    const body = prefix ? current.replace(/^[-•]\s+/, '') : current;
+    const separator = body && !/[,:;]\s*$/.test(body) ? ', ' : ' ';
+    lines[insertIdx] = `${prefix}${body}${separator}${missing.join(', ')}`.trimEnd();
+    return lines.join('\n');
   }
 
   /**
@@ -337,6 +385,19 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
     return fields
       .filter(([, value]) => typeof value === 'string' && value.trim())
       .map(([label, value]) => `${label}: "${value.trim()}"`);
+  }
+
+  _uniqueDisplaySkills(skills = []) {
+    const seen = new Set();
+    const result = [];
+    for (const skill of Array.isArray(skills) ? skills : []) {
+      const clean = String(skill || '').trim().replace(/\s+/g, ' ');
+      const key = this._normaliseText(clean);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      result.push(clean);
+    }
+    return result;
   }
 
   _getCoreTokens(requirement) {

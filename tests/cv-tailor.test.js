@@ -140,6 +140,24 @@ describe('buildMatchMap', () => {
     expect(graphql.confirmedByUser).toBe(true);
   });
 
+  it('adds user-confirmed domain suggestions even when they are not in the JD', () => {
+    const map = tailor.buildMatchMap(CV, JD, ['Prometheus', 'Grafana']);
+    const prometheus = map.find(m => m.requirement === 'Prometheus');
+    const grafana = map.find(m => m.requirement === 'Grafana');
+    expect(prometheus).toMatchObject({
+      type: 'user_confirmed',
+      status: 'user_confirmed',
+      allowedToMention: true,
+      confirmedByUser: true,
+    });
+    expect(grafana).toMatchObject({
+      type: 'user_confirmed',
+      status: 'user_confirmed',
+      allowedToMention: true,
+      confirmedByUser: true,
+    });
+  });
+
   it('user_confirmed evidence mentions user confirmation', () => {
     const map = tailor.buildMatchMap(CV, JD, ['GraphQL']);
     const graphql = map.find(m => m.requirement === 'GraphQL');
@@ -185,6 +203,12 @@ describe('buildMatchSummary', () => {
     const map = tailor.buildMatchMap(CV, JD, ['GraphQL']);
     const summary = tailor.buildMatchSummary(map);
     expect(summary.confirmedAdditions).toContain('GraphQL');
+  });
+
+  it('surfaces confirmed domain suggestions in the summary', () => {
+    const map = tailor.buildMatchMap(CV, JD, ['Prometheus']);
+    const summary = tailor.buildMatchSummary(map);
+    expect(summary.confirmedAdditions).toContain('Prometheus');
   });
 
   it('surfaces unsupported requirements in the summary', () => {
@@ -397,6 +421,40 @@ describe('detectChangedSections', () => {
   });
 });
 
+// ── ensureConfirmedSkillsIncluded ────────────────────────────────────────────
+
+describe('ensureConfirmedSkillsIncluded', () => {
+  it('adds omitted confirmed skills to an existing skills section', () => {
+    const tailored = `John Doe
+
+Senior Software Engineer
+
+SKILLS
+React, TypeScript, Docker
+
+EXPERIENCE
+TechCorp`;
+
+    const result = tailor.ensureConfirmedSkillsIncluded(tailored, ['Prometheus', 'Grafana']);
+    expect(result).toContain('React, TypeScript, Docker, Prometheus, Grafana');
+  });
+
+  it('does not duplicate confirmed skills already present', () => {
+    const tailored = `John Doe
+
+SKILLS
+React, Grafana`;
+
+    const result = tailor.ensureConfirmedSkillsIncluded(tailored, ['Grafana', 'Prometheus']);
+    expect(result).toContain('React, Grafana, Prometheus');
+    expect(result.match(/Grafana/g)).toHaveLength(1);
+  });
+
+  it('creates a skills section when the tailored CV has none', () => {
+    const result = tailor.ensureConfirmedSkillsIncluded('John Doe\n\nEXPERIENCE\nTechCorp', ['Prometheus']);
+    expect(result).toContain('Technical Skills\nPrometheus');
+  });
+});
 
 // ── buildTailoringPrompt ──────────────────────────────────────────────────────
 
@@ -448,6 +506,15 @@ describe('buildTailoringPrompt', () => {
     const map = tailor.buildMatchMap(CV, JD);
     const { userPrompt } = tailor.buildTailoringPrompt(CV, JD, map);
     expect(userPrompt).toContain('strongest target-role evidence comes first');
+  });
+
+  it('requires every user-confirmed addition to be included in skills', () => {
+    const map = tailor.buildMatchMap(CV, JD, ['Prometheus', 'Grafana']);
+    const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(CV, JD, map);
+    expect(systemPrompt).toContain('Include every user-confirmed addition in the skills/core competencies section');
+    expect(userPrompt).toContain('Include every user-confirmed addition in the skills/core competencies section');
+    expect(userPrompt).toContain('+ Prometheus');
+    expect(userPrompt).toContain('+ Grafana');
   });
 
   it('includes the original CV text in the user prompt', () => {
