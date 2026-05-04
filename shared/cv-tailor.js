@@ -128,6 +128,8 @@ STRICT RULES:
 7. If the JD mentions an unsupported tool, you may emphasize adjacent supported experience instead, but do not name the unsupported tool as a candidate skill.
 8. Do not write meta phrases such as "Tailored for", "customized for", "aligned to this job", or "for this application".
 9. Do not mention the target company name in the CV body unless it already appears in the original CV as part of the candidate's history.
+10. Never rename historical job titles to the target role title. Keep every previous job title exactly as shown in LOCKED FIELDS.
+11. You may add a short "Focus:" line below a preserved job title when that role's original bullets support the target-role positioning.
 
 WHAT YOU MAY DO:
 • Update the professional headline / title line (the short descriptor directly below the candidate's name, e.g. "Senior Frontend Engineer") to match the target role title exactly.
@@ -135,7 +137,8 @@ WHAT YOU MAY DO:
 • Reorder the skills list to surface the most relevant supported skills first, and de-emphasize less relevant skills by moving them lower or shortening them.
 • Rephrase existing responsibility bullets using vocabulary from the job description, as long as the underlying meaning is unchanged.
 • Reorder bullets within a role to put the most relevant ones first.
-• Expand or compress bullet points within the bounds of what the original bullet states.`;
+• Expand or compress bullet points within the bounds of what the original bullet states.
+• Add truthful role-positioning lines in the form "Focus: ..." under existing role titles when supported by that role's original responsibilities.`;
 
     const supported = matchMap.filter(m => m.allowedToMention).map(m => m.requirement);
     const unsupported = matchMap.filter(m => !m.allowedToMention).map(m => m.requirement);
@@ -177,10 +180,11 @@ INSTRUCTION
 1. The professional headline/title line near the top of the CV MUST be exactly: "${jdData.jobTitle || 'the target role'}".
 2. Rewrite the professional summary so it clearly positions the candidate for this exact role and domain without saying it was tailored for a company or application. It must mention only supported evidence from the CV.
 3. Reorder and rename skills/competencies so supported JD-relevant items appear first, especially supported technologies, methods, domain terms, and operational practices from the JD.
-4. For each role: rewrite relevant bullets with JD vocabulary (same meaning, aligned language), reorder bullets so the most relevant role-specific evidence comes first.
-5. You may include user-confirmed additions as skills/tools, but do not attach them to a specific employer, project, metric, certification, or achievement unless that context exists in the original CV.
-6. Preserve all locked fields exactly — same spelling, capitalisation, and punctuation.
-7. The final CV must read like a polished CV for "${jdData.jobTitle || 'the target role'}", not like a generic CV and not like generated marketing copy.
+4. For each relevant role: preserve the official job title exactly, then add one short "Focus:" line below it when the original responsibilities support the target role. Example: "Focus: MLOps, platform reliability, cloud infrastructure, automation, and production diagnostics".
+5. For each role: rewrite relevant bullets with JD vocabulary (same meaning, aligned language), reorder bullets so the strongest target-role evidence comes first, and make Infra/MLOps/platform evidence obvious when supported.
+6. You may include user-confirmed additions as skills/tools, but do not attach them to a specific employer, project, metric, certification, or achievement unless that context exists in the original CV.
+7. Preserve all locked fields exactly — same spelling, capitalisation, and punctuation.
+8. The final CV must read like a polished CV for "${jdData.jobTitle || 'the target role'}", not like a generic CV and not like generated marketing copy.
 
 Output the complete tailored CV text with no preamble, no commentary, and no markdown code fences. Begin directly with the candidate's name.`;
 

@@ -416,6 +416,20 @@ describe('buildTailoringPrompt', () => {
     expect(systemPrompt).toContain('+44 7700 900000');
   });
 
+  it('locks historical job titles and forbids renaming them to the target role', () => {
+    const map = tailor.buildMatchMap(CV, JD);
+    const { systemPrompt } = tailor.buildTailoringPrompt(CV, JD, map);
+    expect(systemPrompt).toContain('Job title: "Senior Frontend Engineer"');
+    expect(systemPrompt).toContain('Never rename historical job titles');
+  });
+
+  it('instructs the model to add truthful Focus lines under role titles', () => {
+    const map = tailor.buildMatchMap(CV, JD);
+    const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(CV, JD, map);
+    expect(systemPrompt).toContain('Focus:');
+    expect(userPrompt).toContain('add one short "Focus:" line');
+  });
+
   it('lists unsupported requirements in the user prompt', () => {
     const map = tailor.buildMatchMap(CV, JD);
     const { userPrompt } = tailor.buildTailoringPrompt(CV, JD, map);
@@ -428,6 +442,12 @@ describe('buildTailoringPrompt', () => {
     const map = tailor.buildMatchMap(CV, JD);
     const { userPrompt } = tailor.buildTailoringPrompt(CV, JD, map);
     expect(userPrompt).toMatch(/✓.*React|✓.*TypeScript|✓.*Node/);
+  });
+
+  it('instructs the model to put strongest target-role evidence first', () => {
+    const map = tailor.buildMatchMap(CV, JD);
+    const { userPrompt } = tailor.buildTailoringPrompt(CV, JD, map);
+    expect(userPrompt).toContain('strongest target-role evidence comes first');
   });
 
   it('includes the original CV text in the user prompt', () => {

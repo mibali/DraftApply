@@ -238,6 +238,11 @@ function formatCvToHtml(rawText) {
       }
       afterEntryRow = false;
 
+      if (/^focus\s*:/i.test(line)) {
+        html += `<p class="cv-role-focus">${esc(line)}</p>`;
+        continue;
+      }
+
       // Pending company + next short non-date line → flush company (no dates), emit as job title
       if (pendingCompany !== null && line.length < 70 && !isContactLine(line) && !isDateLine(line)) {
         flushPendingCompany(null);
