@@ -38,7 +38,9 @@ if (!GROQ_API_KEY || !TOKEN_SECRET) {
 const app = express();
 app.disable('x-powered-by');
 app.use(helmet());
-app.use(cors());
+app.use(cors({
+  exposedHeaders: ['RateLimit-Limit', 'RateLimit-Remaining', 'RateLimit-Reset', 'RateLimit-Policy']
+}));
 app.use(express.json({ limit: '1mb' }));
 
 function base64url(buf) {
