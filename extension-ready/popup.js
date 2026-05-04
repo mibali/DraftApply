@@ -48,6 +48,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     matchAllClear:         document.getElementById('match-all-clear'),
     matchMissing:          document.getElementById('match-missing'),
     matchMissingChips:     document.getElementById('match-missing-chips'),
+    matchDomain:           document.getElementById('match-domain'),
+    matchDomainChips:      document.getElementById('match-domain-chips'),
     tailorWarningsBox:     document.getElementById('tailor-warnings-box'),
     tailorOutputWrap:      document.getElementById('tailor-output-wrap'),
     tailorOutput:          document.getElementById('tailor-output'),
@@ -436,7 +438,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         return;
       }
 
-      displayMatchReport(result.matchReport, { reviewMode: true });
+      displayMatchReport(result.matchReport, { reviewMode: true, domainSuggestions: result.domainSuggestions || [] });
       await saveTailorDraft();
       elements.tailorAnalyzeBtn.hidden = true;
       elements.tailorReanalyzeBtn.style.display = 'block';
@@ -504,7 +506,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   function displayTailorResults(result) {
     const { tailoredCvText, matchReport, warnings } = result;
-    displayMatchReport(matchReport, { reviewMode: false });
+    displayMatchReport(matchReport, { reviewMode: false, domainSuggestions: [] });
 
     if (warnings?.length > 0) {
       elements.tailorWarningsBox.textContent = warnings.map(w => `⚠ ${w}`).join('\n');
@@ -523,7 +525,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     setStep('export');
   }
 
-  function displayMatchReport(matchReport, { reviewMode } = {}) {
+  function displayMatchReport(matchReport, { reviewMode, domainSuggestions = [] } = {}) {
     const score = matchReport?.score ?? null;
     elements.matchScore.textContent = score != null ? `${score}%` : '–';
     elements.matchScore.className = 'match-score-badge' +
@@ -565,6 +567,29 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Show "all clear" only in review mode (before generation)
       elements.matchAllClear.hidden = !reviewMode;
     }
+
+    // Domain suggestions — only shown in review mode with checkboxes
+    if (reviewMode && domainSuggestions.length > 0) {
+      elements.matchDomainChips.textContent = '';
+      for (const tool of domainSuggestions) {
+        const label = document.createElement('label');
+        label.className = 'missing-skill-check';
+
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.value = tool;
+        checkbox.dataset.domainSkill = 'true';
+
+        const text = document.createElement('span');
+        text.textContent = tool;
+
+        label.append(checkbox, text);
+        elements.matchDomainChips.append(label);
+      }
+      elements.matchDomain.hidden = false;
+    } else {
+      elements.matchDomain.hidden = true;
+    }
   }
 
   function renderMissingSkillChecks(missing) {
@@ -587,9 +612,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function getConfirmedMissingSkills() {
-    return Array.from(
+    const fromMissing = Array.from(
       elements.matchMissingChips.querySelectorAll('input[data-missing-skill="true"]:checked')
-    ).map(input => input.value).filter(Boolean);
+    );
+    const fromDomain = Array.from(
+      elements.matchDomainChips.querySelectorAll('input[data-domain-skill="true"]:checked')
+    );
+    return [...fromMissing, ...fromDomain].map(input => input.value).filter(Boolean);
   }
 
   // ── Step indicator ────────────────────────────────────────────────────────

@@ -443,6 +443,69 @@ app.post('/api/cv/upload', authRequired, generateLimiter, upload.single('cv'), a
   }
 });
 
+/**
+ * Ask the LLM to suggest tools commonly used in a given role that are not
+ * already present in the JD. Designed to be fired as a non-blocking Promise
+ * that runs in parallel with the sync match analysis.
+ *
+ * Returns an array of tool name strings, or null on any failure.
+ */
+async function fetchLLMDomainSuggestions(jobTitle, jdTools) {
+  if (!jobTitle || !GROQ_API_KEY) return null;
+
+  const toolList = (jdTools || []).slice(0, 25).join(', ') || 'none specified';
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+
+  try {
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${GROQ_API_KEY}`,
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        temperature: 0.2,
+        max_tokens: 200,
+        messages: [
+          {
+            role: 'system',
+            content: 'You are a technical hiring expert. Respond only with valid JSON — no markdown, no explanation.',
+          },
+          {
+            role: 'user',
+            content: `Job title: ${jobTitle}\nTechnologies already in the job description: ${toolList}\n\nList up to 10 additional tools, frameworks, or technologies that are commonly expected or genuinely valued for this exact role type but are NOT in the list above. Focus on what a hiring manager for this role would realistically look for.\n\nOutput a JSON array of strings only, e.g.: ["Tool1", "Tool2"]`,
+          },
+        ],
+      }),
+    });
+
+    if (!response.ok) return null;
+
+    const data = await response.json();
+    const text = (data?.choices?.[0]?.message?.content || '').trim();
+    if (!text) return null;
+
+    // Extract JSON array even if the model wraps it in backticks
+    const match = text.match(/\[[\s\S]*?\]/);
+    if (!match) return null;
+
+    const parsed = JSON.parse(match[0]);
+    if (!Array.isArray(parsed)) return null;
+
+    return parsed
+      .filter(t => typeof t === 'string' && t.trim().length > 0)
+      .map(t => t.trim())
+      .slice(0, 10);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 app.post('/api/cv/analyze', authRequired, generateLimiter, async (req, res) => {
   const { cvText, jobTitle = '', company = '', jobDescription, confirmedSkills = [] } = req.body || {};
 
@@ -456,13 +519,46 @@ app.post('/api/cv/analyze', authRequired, generateLimiter, async (req, res) => {
   try {
     const cvData = new CVParser().parse(cvText);
     const jdData = new JDParser().parse(jobDescription, jobTitle, company);
-    const tailor = new CVTailor();
-    const matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
+    const tailor  = new CVTailor();
+
+    // Fire LLM domain call immediately so it runs in parallel with sync work below
+    const llmSuggestionsPromise = fetchLLMDomainSuggestions(jdData.jobTitle, jdData.tools);
+
+    // Sync work (fast — no LLM involved)
+    const matchMap        = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
+    const staticFallback  = tailor.suggestDomainSkills(jdData, cvData);
+
+    // Await the LLM domain call (already running in parallel)
+    const llmRaw = await llmSuggestionsPromise.catch(() => null);
+
+    // Filter LLM suggestions against what's already in the JD or CV
+    let domainSuggestions = staticFallback;
+    if (llmRaw?.length > 0) {
+      const inJd = new Set([
+        ...(jdData.tools          || []).map(t => t.toLowerCase()),
+        ...(jdData.requiredSkills  || []).map(s => s.toLowerCase()),
+        ...(jdData.preferredSkills || []).map(s => s.toLowerCase()),
+      ]);
+      const cvLower = cvText.toLowerCase();
+
+      const filtered = llmRaw.filter(tool => {
+        const low = tool.toLowerCase();
+        // Skip if tool (or any 4+ char word of it) already appears in the JD
+        if (inJd.has(low)) return false;
+        if (low.split(/\s+/).some(w => w.length >= 4 && inJd.has(w))) return false;
+        // Skip if already in the candidate's CV
+        if (cvLower.includes(low)) return false;
+        return true;
+      });
+
+      if (filtered.length > 0) domainSuggestions = filtered;
+    }
 
     return res.json({
       matchReport: tailor.buildMatchSummary(matchMap),
       jobTitle: jdData.jobTitle,
-      company: jdData.company,
+      company:  jdData.company,
+      domainSuggestions,
     });
   } catch (e) {
     console.error('[DraftApply] Analyze error:', e.message);

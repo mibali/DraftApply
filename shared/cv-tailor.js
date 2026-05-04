@@ -422,6 +422,113 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
     return [...new Set(evidence)].slice(0, 5);
   }
 
+  /**
+   * Suggest domain-common tools not already present in the JD or CV.
+   * @returns {string[]} up to 12 tool names
+   */
+  suggestDomainSkills(jdData, cvData) {
+    const domain = this._detectDomain(jdData);
+    if (!domain) return [];
+
+    const domainTools = this._getDomainTools(domain);
+
+    // Build a set of everything already mentioned in the JD (case-insensitive)
+    const inJd = new Set([
+      ...(jdData.tools          || []).map(t => t.toLowerCase()),
+      ...(jdData.requiredSkills  || []).map(s => s.toLowerCase()),
+      ...(jdData.preferredSkills || []).map(s => s.toLowerCase()),
+    ]);
+
+    const cvLower = (cvData?.rawText || '').toLowerCase();
+
+    return domainTools.filter(tool => {
+      const low = tool.toLowerCase();
+      if (inJd.has(low)) return false;
+      // Partial match: if any word of the tool name appears in the JD set, skip
+      if (low.split(/\s+/).some(w => w.length >= 4 && inJd.has(w))) return false;
+      if (cvLower.includes(low)) return false;
+      return true;
+    }).slice(0, 12);
+  }
+
+  _detectDomain(jdData) {
+    const title   = (jdData.jobTitle || '').toLowerCase();
+    const tools   = (jdData.tools || []).map(t => t.toLowerCase()).join(' ');
+    const req     = (jdData.requiredSkills || []).map(s => s.toLowerCase()).join(' ');
+    const combined = `${title} ${tools} ${req}`;
+
+    if (/\b(mlops|ml\s+platform|ml\s+engineer|machine\s+learning\s+engineer|ml\s+infrastructure|ai\s+platform)\b/.test(combined) ||
+        /\b(kubeflow|kfp|mlflow|seldon|bentoml|triton|skypi|dcgm|zenml|metaflow|clearml)\b/.test(combined))
+      return 'mlops';
+
+    if (/\b(data\s+engineer|data\s+platform|etl|elt|data\s+pipeline|analytics\s+engineer)\b/.test(combined) ||
+        /\b(dbt|airflow|dagster|prefect|flink|iceberg|delta\s+lake)\b/.test(combined))
+      return 'data_engineering';
+
+    if (/\b(devops|platform\s+engineer|sre|site\s+reliability|infrastructure\s+engineer|cloud\s+engineer)\b/.test(combined) ||
+        /\b(terraform|ansible|argocd|crossplane|pulumi|karpenter|keda|fluxcd)\b/.test(combined))
+      return 'devops';
+
+    if (/\b(data\s+scientist|machine\s+learning|deep\s+learning|ml\s+researcher|ai\s+scientist|research\s+engineer)\b/.test(combined) ||
+        /\b(pytorch|tensorflow|wandb|optuna|hugging\s*face|transformers)\b/.test(combined))
+      return 'ml_scientist';
+
+    if (/\b(frontend|front-end|ui\s+engineer|web\s+developer)\b/.test(combined) ||
+        /\b(react|nextjs|vue|angular|svelte)\b/.test(combined))
+      return 'frontend';
+
+    if (/\b(backend|back-end|api\s+engineer|server[- ]?side|microservices)\b/.test(combined))
+      return 'backend';
+
+    if (/\b(cloud\s+architect|solutions\s+architect|aws\s+architect|gcp\s+architect)\b/.test(combined))
+      return 'cloud';
+
+    return null;
+  }
+
+  _getDomainTools(domain) {
+    const MAP = {
+      mlops: [
+        'MLflow', 'DVC', 'Kubeflow', 'KFP', 'Seldon', 'BentoML', 'Triton',
+        'Ray', 'SkyPilot', 'DCGM', 'Feast', 'ZenML', 'Metaflow', 'ClearML',
+        'Argo Workflows', 'ArgoCD', 'WandB', 'Evidently', 'Prefect', 'Dagster',
+        'AWS CDK', 'Vertex AI', 'SageMaker', 'Azure ML', 'ONNX', 'vLLM', 'Karpenter',
+      ],
+      data_engineering: [
+        'Apache Spark', 'Apache Kafka', 'Apache Flink', 'dbt', 'Airflow', 'Prefect',
+        'Dagster', 'Delta Lake', 'Apache Iceberg', 'Great Expectations', 'dlt',
+        'Fivetran', 'Airbyte', 'Snowflake', 'BigQuery', 'Redshift', 'DuckDB',
+        'Polars', 'OpenLineage', 'Trino',
+      ],
+      devops: [
+        'Terraform', 'Ansible', 'Helm', 'ArgoCD', 'FluxCD', 'Crossplane',
+        'AWS CDK', 'Pulumi', 'Datadog', 'Prometheus', 'Grafana', 'OpenTelemetry',
+        'GitHub Actions', 'Vault', 'Consul', 'Istio', 'Linkerd', 'Karpenter', 'KEDA',
+      ],
+      ml_scientist: [
+        'MLflow', 'WandB', 'DVC', 'ONNX', 'TensorFlow', 'PyTorch', 'Hugging Face',
+        'scikit-learn', 'Optuna', 'Ray Tune', 'Dask', 'Polars', 'LangChain', 'LlamaIndex',
+        'Feast', 'Evidently', 'BentoML', 'Triton', 'vLLM',
+      ],
+      frontend: [
+        'TypeScript', 'React', 'Next.js', 'Tailwind CSS', 'Vite', 'Storybook',
+        'Cypress', 'Playwright', 'Redux', 'Zustand', 'React Query', 'GraphQL',
+        'Turborepo', 'Nx', 'Radix UI', 'shadcn/ui',
+      ],
+      backend: [
+        'Node.js', 'NestJS', 'PostgreSQL', 'Redis', 'Docker', 'Kubernetes',
+        'GraphQL', 'gRPC', 'Kafka', 'RabbitMQ', 'Elasticsearch', 'OpenTelemetry',
+        'Terraform', 'Helm', 'GitHub Actions',
+      ],
+      cloud: [
+        'AWS CDK', 'Terraform', 'Pulumi', 'CloudFormation', 'Ansible',
+        'Datadog', 'Prometheus', 'Grafana', 'OpenTelemetry', 'Istio',
+        'ArgoCD', 'Helm', 'Karpenter', 'KEDA', 'Vault', 'Crossplane',
+      ],
+    };
+    return MAP[domain] || [];
+  }
+
   /** Detect adjacent/related tech as a signal for partial_match. */
   _hasAdjacentTech(requirement, cvLower) {
     const adjacency = {
