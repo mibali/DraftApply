@@ -6,6 +6,7 @@
     cvExports: 'CV Export',
     cvsTailored: 'Tailor CV',
   };
+  let writeQueue = Promise.resolve();
 
   function getStorage(storage) {
     if (storage) return storage;
@@ -137,27 +138,37 @@
   }
 
   async function track(action, options = {}) {
-    if (!ACTIONS.includes(action)) return read(options);
-    const storage = getStorage(options.storage);
-    if (!storage) return emptyStats();
+    return enqueueWrite(async () => {
+      if (!ACTIONS.includes(action)) return read(options);
+      const storage = getStorage(options.storage);
+      if (!storage) return emptyStats();
 
-    const amount = Math.max(1, Math.floor(Number(options.amount || 1)));
-    const stats = await read({ storage });
-    const day = localDayKey(options.date || new Date());
+      const amount = Math.max(1, Math.floor(Number(options.amount || 1)));
+      const stats = await read({ storage });
+      const day = localDayKey(options.date || new Date());
 
-    stats.totals[action] += amount;
-    stats.days[day] = stats.days[day] || {};
-    for (const key of ACTIONS) stats.days[day][key] = Number(stats.days[day][key] || 0);
-    stats.days[day][action] += amount;
+      stats.totals[action] += amount;
+      stats.days[day] = stats.days[day] || {};
+      for (const key of ACTIONS) stats.days[day][key] = Number(stats.days[day][key] || 0);
+      stats.days[day][action] += amount;
 
-    await storage.set({ [STATS_KEY]: stats });
-    return stats;
+      await storage.set({ [STATS_KEY]: stats });
+      return stats;
+    });
   }
 
   async function reset(options = {}) {
-    const storage = getStorage(options.storage);
-    if (!storage) return;
-    await storage.remove(STATS_KEY);
+    return enqueueWrite(async () => {
+      const storage = getStorage(options.storage);
+      if (!storage) return;
+      await storage.remove(STATS_KEY);
+    });
+  }
+
+  function enqueueWrite(task) {
+    const next = writeQueue.catch(() => {}).then(task);
+    writeQueue = next.catch(() => {});
+    return next;
   }
 
   globalThis.DraftApplyStats = {
