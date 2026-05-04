@@ -488,6 +488,9 @@
     .match-chip-strong  { background: #dcfce7; color: #166534; }
     .match-chip-confirmed { background: #dbeafe; color: #1e40af; }
     .match-chip-missing { background: #f1f5f9; color: #64748b; }
+    .match-chip-domain  { background: #f5f3ff; color: #6d28d9; }
+
+    .match-label-purple { color: #7c3aed; }
 
     .missing-skill-check {
       display: inline-flex;
@@ -863,6 +866,11 @@
             <div class="match-group-label match-label-gray">Not found in your CV</div>
             <div class="missing-skill-help">Tick any skills you genuinely have — they'll be included in the tailored CV.</div>
             <div class="match-chips" id="match-missing-chips"></div>
+          </div>
+          <div class="match-group" id="match-domain" hidden>
+            <div class="match-group-label match-label-purple">Also common in this domain</div>
+            <div class="missing-skill-help">Tools widely used in this type of role that aren't in your CV or the JD. Tick any you genuinely have.</div>
+            <div class="match-chips" id="match-domain-chips"></div>
           </div>
         </div>
 

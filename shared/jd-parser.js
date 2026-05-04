@@ -94,7 +94,7 @@ export class JDParser {
     }
 
     // Also scan the full text for common tech keywords
-    const techRe = /\b(React(?:\.js)?|Vue(?:\.js)?|Angular|Next\.js|Nuxt(?:\.js)?|Svelte(?:Kit)?|Remix|Astro|Node(?:\.js)?|Express(?:\.js)?|NestJS|Fastify|Django|Flask|FastAPI|Spring(?:\s*Boot)?|Laravel|Rails|Ruby\s+on\s+Rails|Python|TypeScript|JavaScript|Go(?:lang)?|Rust|Java|C#|\.NET|PHP|Swift|Kotlin|Scala|Elixir|GraphQL|REST(?:ful)?|gRPC|tRPC|SQL|PostgreSQL|MySQL|MongoDB|Redis|Elasticsearch|Kafka|RabbitMQ|AWS|GCP|Azure|Docker|Kubernetes|Terraform|CI\/CD|Git(?:Hub|Lab)?|Jira|Linux|Bash|Shell)\b/gi;
+    const techRe = /\b(React(?:\.js)?|Vue(?:\.js)?|Angular|Next\.js|Nuxt(?:\.js)?|Svelte(?:Kit)?|Remix|Astro|Node(?:\.js)?|Express(?:\.js)?|NestJS|Fastify|Django|Flask|FastAPI|Spring(?:\s*Boot)?|Laravel|Rails|Ruby\s+on\s+Rails|Python|TypeScript|JavaScript|Go(?:lang)?|Rust|Java|C#|\.NET|PHP|Swift|Kotlin|Scala|Elixir|GraphQL|REST(?:ful)?|gRPC|tRPC|SQL|PostgreSQL|MySQL|MongoDB|Redis|Elasticsearch|Kafka|RabbitMQ|AWS|GCP|Azure|Docker|Kubernetes|Terraform|CI\/CD|Git(?:Hub|Lab)?|Jira|Linux|Bash|Shell|Kubeflow|KFP|KubeRay|Ray(?:\.io|\.Serve|\.Train)?|SkyPilot|DCGM|MLflow|DVC|Seldon|BentoML|Triton(?:\s+Inference\s+Server)?|Feast|WandB|Weights\s*&\s*Biases|ZenML|Metaflow|ClearML|Argo\s*(?:Workflows?|CD|Rollouts?)?|ArgoCD|Vertex\s*AI|SageMaker|Azure\s*ML|ONNX|Dask|Polars|Evidently(?:\s*AI)?|Neptune|vLLM|Prefect|Dagster|Delta\s*Lake|Apache\s*(?:Spark|Kafka|Flink|Airflow|Iceberg)|Great\s*Expectations|AWS\s*CDK|Pulumi|Crossplane|OpenTelemetry|Prometheus|Grafana|Datadog|Istio|Helm|Vault|Consul|Flux(?:CD)?|Karpenter|KEDA|Kuberay|LangChain|LangGraph|LlamaIndex|Pinecone|Weaviate|Qdrant|ChromaDB|OpenAI|Anthropic|Bedrock|Vertex)\b/gi;
     let m;
     while ((m = techRe.exec(text)) !== null) {
       skills.add(m[0]);
@@ -123,7 +123,7 @@ export class JDParser {
   }
 
   extractTools(text) {
-    const toolRe = /\b(React(?:\.js)?|Vue(?:\.js)?|Angular|Next\.js|Nuxt(?:\.js)?|Svelte(?:Kit)?|Remix|Astro|Node(?:\.js)?|Express(?:\.js)?|NestJS|Fastify|Django|Flask|FastAPI|Spring(?:\s*Boot)?|Laravel|Rails|Python|TypeScript|JavaScript|Go(?:lang)?|Rust|Java|C#|\.NET|PHP|Swift|Kotlin|Scala|Elixir|GraphQL|gRPC|tRPC|PostgreSQL|MySQL|MariaDB|MongoDB|Redis|DynamoDB|Cassandra|Elasticsearch|Kafka|RabbitMQ|SQS|SNS|AWS|GCP|Azure|Docker|Kubernetes|Helm|Terraform|Ansible|Jenkins|GitHub\s*Actions|GitLab\s*CI|CircleCI|Travis\s*CI|Datadog|Prometheus|Grafana|Splunk|Sentry|Figma|Jira|Confluence|Slack|Linear|Notion|dbt|Airflow|Spark|Hadoop|Snowflake|BigQuery|Redshift|Tableau|Power\s*BI|Looker|pandas|NumPy|scikit[- ]learn|TensorFlow|PyTorch|Keras|OpenAI|LangChain|Pinecone|Weaviate|Qdrant|ChromaDB|Celery|Prisma|Drizzle|Stripe|Twilio|SendGrid|Firebase|Supabase|PlanetScale|Neon|Vercel|Netlify|Fly\.io|Cloudflare|Heroku|Turborepo|Nx|Vite|Webpack|Rollup|Pydantic|Linux|Bash|Shell|Git)\b/gi;
+    const toolRe = /\b(React(?:\.js)?|Vue(?:\.js)?|Angular|Next\.js|Nuxt(?:\.js)?|Svelte(?:Kit)?|Remix|Astro|Node(?:\.js)?|Express(?:\.js)?|NestJS|Fastify|Django|Flask|FastAPI|Spring(?:\s*Boot)?|Laravel|Rails|Python|TypeScript|JavaScript|Go(?:lang)?|Rust|Java|C#|\.NET|PHP|Swift|Kotlin|Scala|Elixir|GraphQL|gRPC|tRPC|PostgreSQL|MySQL|MariaDB|MongoDB|Redis|DynamoDB|Cassandra|Elasticsearch|Kafka|RabbitMQ|SQS|SNS|AWS|GCP|Azure|Docker|Kubernetes|Helm|Terraform|Ansible|Jenkins|GitHub\s*Actions|GitLab\s*CI|CircleCI|Travis\s*CI|Datadog|Prometheus|Grafana|Splunk|Sentry|Figma|Jira|Confluence|Slack|Linear|Notion|dbt|Airflow|Spark|Hadoop|Snowflake|BigQuery|Redshift|Tableau|Power\s*BI|Looker|pandas|NumPy|scikit[- ]learn|TensorFlow|PyTorch|Keras|OpenAI|LangChain|LangGraph|LlamaIndex|Pinecone|Weaviate|Qdrant|ChromaDB|Celery|Prisma|Drizzle|Stripe|Twilio|SendGrid|Firebase|Supabase|PlanetScale|Neon|Vercel|Netlify|Fly\.io|Cloudflare|Heroku|Turborepo|Nx|Vite|Webpack|Rollup|Pydantic|Linux|Bash|Shell|Git|Kubeflow|KFP|KubeRay|Ray(?:\.io|\.Serve|\.Train)?|SkyPilot|DCGM|MLflow|DVC|Seldon|BentoML|Triton(?:\s+Inference\s+Server)?|Feast|WandB|Weights\s*&\s*Biases|ZenML|Metaflow|ClearML|Argo\s*(?:Workflows?|CD|Rollouts?)?|ArgoCD|Vertex\s*AI|SageMaker|Azure\s*ML|ONNX|Dask|Polars|Evidently(?:\s*AI)?|Neptune|vLLM|Prefect|Dagster|Delta\s*Lake|Apache\s*(?:Flink|Iceberg)|Great\s*Expectations|AWS\s*CDK|Pulumi|Crossplane|OpenTelemetry|Istio|Vault|Consul|Flux(?:CD)?|Karpenter|KEDA|Anthropic|Bedrock)\b/gi;
     const found = new Set();
     let m;
     while ((m = toolRe.exec(text)) !== null) {
@@ -236,17 +236,39 @@ export class JDParser {
   _extractBulletsAndSentences(block) {
     const items = [];
 
-    // Bulleted / numbered lines
-    for (const line of block.split('\n')) {
-      const t = line.trim();
+    for (const rawLine of block.split('\n')) {
+      const t = rawLine.trim();
       if (!t) continue;
+
+      // Bulleted / numbered lines
       if (/^[\-•*●\d.]/.test(t)) {
         const cleaned = t.replace(/^[\-•*●\d.]+\s*/, '').trim();
-        if (cleaned.length > 2 && cleaned.length < 200) items.push(cleaned);
+        // Some bullets use "/" as sub-item separator: split and add each
+        if (cleaned.length > 2 && cleaned.length < 200) {
+          for (const part of cleaned.split(/\s*\/\s*/)) {
+            const p = part.trim();
+            if (p.length > 2 && p.length < 200) items.push(p);
+          }
+        }
+        continue;
+      }
+
+      // Plain-text lines that look like requirements (not section headers)
+      // Accept lines that start with a capital letter or common requirement verb
+      if (
+        t.length > 10 && t.length < 250 &&
+        /^[A-Z]/.test(t) &&
+        !/^(requirements?|preferred|qualifications?|responsibilities?|benefits?|about\s|what\s+you|who\s+you|we\s+(are|offer))/i.test(t)
+      ) {
+        // Also split on "/" in plain-text lines (e.g. "Experience of X / Y / Z")
+        for (const part of t.split(/\s*\/\s*/)) {
+          const p = part.trim();
+          if (p.length > 10 && p.length < 200) items.push(p);
+        }
       }
     }
 
-    // Plain-sentence fallback when bullets yielded nothing
+    // Plain-sentence fallback when nothing was collected at all
     if (items.length === 0) {
       block.split(/[.;]\s+/).forEach(sent => {
         const s = sent.trim();
