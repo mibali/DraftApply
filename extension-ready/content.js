@@ -596,7 +596,6 @@ class DraftApplyExtension {
     return 'textarea,' +
       'input:not([type]),' +
       'input[type="text"],input[type="email"],input[type="tel"],input[type="search"],input[type="url"],' +
-      'input[type="number"],' +
       '[contenteditable="true"],[role="textbox"]';
   }
 
@@ -1204,7 +1203,12 @@ class DraftApplyExtension {
 
     if (el instanceof HTMLInputElement) {
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-      setter?.call(el, value);
+      try {
+        setter?.call(el, value);
+      } catch {
+        // number/date/range inputs throw when value doesn't conform to their type
+        el.value = value;
+      }
       return;
     }
   }
