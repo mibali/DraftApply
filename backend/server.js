@@ -358,11 +358,15 @@ app.post('/api/cv/tailor', async (req, res) => {
       max_tokens: 4000
     });
 
-    const tailoredCvText = tailor.ensureConfirmedSkillsIncluded(
-      tailor.removeTailoringMetaPhrases(
-        tailor.enforceTargetHeadline(result.answer, jdData.jobTitle),
-        jdData.company
+    const tailoredCvText = tailor.cleanSkillsSection(
+      tailor.ensureConfirmedSkillsIncluded(
+        tailor.removeTailoringMetaPhrases(
+          tailor.enforceTargetHeadline(result.answer, jdData.jobTitle),
+          jdData.company
+        ),
+        confirmedSkills
       ),
+      matchMap,
       confirmedSkills
     );
     if (!tailoredCvText?.trim()) {

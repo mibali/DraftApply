@@ -456,6 +456,45 @@ React, Grafana`;
   });
 });
 
+// ── cleanSkillsSection ───────────────────────────────────────────────────────
+
+describe('cleanSkillsSection', () => {
+  it('removes pasted JD requirement prose from skills sections', () => {
+    const tailored = `John Doe
+
+Machine Learning Operations Engineer (MLOps)
+
+Core Competencies
+- MLOps, Cloud Infrastructure, and DevOps, Experience: 4+ years of experience in MLOps, DevOps, or a related field, with at least 1 year focused on deploying and managing AI, ML models in production. Experience with agentic or autonomous AI systems is highly preferred., Technical Stack: (1 year or less)Strong knowledge of MLOps tools and frameworks(Pytorch, Langraph, CrewAI, N8N). Proficiency in containerization with Docker and orchestration with Kubernetes., Programming & Scripting: Expertise in Python and familiarity with scripting for automation (e.g., Bash, Terraform). Strong experience with version control systems, particularly Git., Security Mindset: A strong understanding of security principles related to cloud and MLOps, including Identity and Access Management (IAM), data encryption, and secure pipeline design., Ethical AI Knowledge: Understanding of ethical AI principles, including bias detection, explainability, and compliance with regulations like GDPR or other relevant standards., Education: Bachelor’s degree in Computer Science, Engineering, Data Science, or a related field.
+- Containerization and Orchestration: Docker, Kubernetes
+
+Professional Experience
+TechCorp`;
+
+    const matchMap = [
+      { requirement: 'MLOps', allowedToMention: true },
+      { requirement: 'Cloud Infrastructure', allowedToMention: true },
+      { requirement: 'DevOps', allowedToMention: true },
+      { requirement: 'Docker', allowedToMention: true },
+      { requirement: 'Kubernetes', allowedToMention: true },
+      { requirement: 'Python', allowedToMention: true },
+      { requirement: 'Bash', allowedToMention: true },
+      { requirement: 'Terraform', allowedToMention: true },
+      { requirement: 'Git', allowedToMention: true },
+    ];
+
+    const result = tailor.cleanSkillsSection(tailored, matchMap);
+
+    expect(result).toContain('- MLOps');
+    expect(result).toContain('- Docker');
+    expect(result).toContain('- Kubernetes');
+    expect(result).toContain('- Python');
+    expect(result).not.toMatch(/4\+ years of experience/i);
+    expect(result).not.toMatch(/Bachelor.*related field/i);
+    expect(result).not.toMatch(/highly preferred/i);
+  });
+});
+
 // ── buildTailoringPrompt ──────────────────────────────────────────────────────
 
 describe('buildTailoringPrompt', () => {

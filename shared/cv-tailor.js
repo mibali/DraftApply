@@ -141,6 +141,7 @@ STRICT RULES:
 9. Do not mention the target company name in the CV body unless it already appears in the original CV as part of the candidate's history.
 10. Never rename historical job titles to the target role title. Keep every previous job title exactly as shown in LOCKED FIELDS.
 11. You may add a short "Focus:" line below a preserved job title when that role's original bullets support the target-role positioning.
+12. Skills/core competencies must be concise CV skill phrases only. Never paste full JD requirements, education requirements, years-of-experience requirements, or sentences such as "X years of experience in..." into the skills section.
 
 WHAT YOU MAY DO:
 • Update the professional headline / title line (the short descriptor directly below the candidate's name, e.g. "Senior Frontend Engineer") to match the target role title exactly.
@@ -149,7 +150,7 @@ WHAT YOU MAY DO:
 • Rephrase existing responsibility bullets using vocabulary from the job description, as long as the underlying meaning is unchanged.
 • Reorder bullets within a role to put the most relevant ones first.
 • Expand or compress bullet points within the bounds of what the original bullet states.
-• Include every user-confirmed addition in the skills/core competencies section.
+• Include every user-confirmed addition in the skills/core competencies section as short phrases only.
 • Add truthful role-positioning lines in the form "Focus: ..." under existing role titles when supported by that role's original responsibilities.`;
 
     const supported = matchMap.filter(m => m.allowedToMention).map(m => m.requirement);
@@ -191,10 +192,10 @@ ${cvData.rawText}
 INSTRUCTION
 1. The professional headline/title line near the top of the CV MUST be exactly: "${jdData.jobTitle || 'the target role'}".
 2. Rewrite the professional summary so it clearly positions the candidate for this exact role and domain without saying it was tailored for a company or application. It must mention only supported evidence from the CV.
-3. Reorder and rename skills/competencies so supported JD-relevant items appear first, especially supported technologies, methods, domain terms, and operational practices from the JD.
+3. Reorder and rename skills/competencies so supported JD-relevant items appear first, especially supported technologies, methods, domain terms, and operational practices from the JD. The skills/core competencies section must contain short phrases only, never full JD requirement sentences, degree requirements, or years-of-experience requirements.
 4. For each relevant role: preserve the official job title exactly, then add one short "Focus:" line below it when the original responsibilities support the target role. Example: "Focus: MLOps, platform reliability, cloud infrastructure, automation, and production diagnostics".
 5. For each role: rewrite relevant bullets with JD vocabulary (same meaning, aligned language), reorder bullets so the strongest target-role evidence comes first, and make Infra/MLOps/platform evidence obvious when supported.
-6. Include every user-confirmed addition in the skills/core competencies section. You may also use them in the summary when natural, but do not attach them to a specific employer, project, metric, certification, or achievement unless that context exists in the original CV.
+6. Include every user-confirmed addition in the skills/core competencies section as concise skill names. You may also use them in the summary when natural, but do not attach them to a specific employer, project, metric, certification, or achievement unless that context exists in the original CV.
 7. Preserve all locked fields exactly — same spelling, capitalisation, and punctuation.
 8. The final CV must read like a polished CV for "${jdData.jobTitle || 'the target role'}", not like a generic CV and not like generated marketing copy.
 
@@ -286,6 +287,36 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
     const separator = body && !/[,:;]\s*$/.test(body) ? ', ' : ' ';
     lines[insertIdx] = `${prefix}${body}${separator}${missing.join(', ')}`.trimEnd();
     return lines.join('\n');
+  }
+
+  cleanSkillsSection(tailoredText, matchMap = [], confirmedSkills = []) {
+    if (!tailoredText) return tailoredText;
+
+    const lines = String(tailoredText).split('\n');
+    const cleaned = [];
+    let i = 0;
+
+    while (i < lines.length) {
+      cleaned.push(lines[i]);
+
+      if (!this._isSkillsSectionHeader(lines[i])) {
+        i++;
+        continue;
+      }
+
+      i++;
+      const sectionLines = [];
+      while (i < lines.length && !this._isLikelySectionHeader(lines[i])) {
+        sectionLines.push(lines[i]);
+        i++;
+      }
+
+      const skillLines = this._normaliseSkillSectionLines(sectionLines, matchMap, confirmedSkills);
+      cleaned.push(...skillLines);
+      continue;
+    }
+
+    return cleaned.join('\n');
   }
 
   /**
@@ -447,6 +478,103 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
   _isLikelySectionHeader(line) {
     return /^(professional\s+summary|core\s+competenc(?:y|ies)|professional\s+experience|technical\s+skills?|education|certifications?\s*(?:&|and)\s*awards?|technical\s+leadership|achievements?|projects?)\s*[:\-]?$/i
       .test(String(line || '').trim());
+  }
+
+  _isSkillsSectionHeader(line) {
+    return /^(core\s+competenc(?:y|ies)|technical\s+skills?|skills|technologies|tools|expertise)\s*[:\-]?$/i
+      .test(String(line || '').trim());
+  }
+
+  _normaliseSkillSectionLines(sectionLines, matchMap = [], confirmedSkills = []) {
+    const rawItems = [];
+    for (const line of sectionLines) {
+      const trimmed = String(line || '').trim();
+      if (!trimmed) continue;
+      const body = trimmed.replace(/^[-•*●▪◦–—]\s*/, '').trim();
+      if (!body) continue;
+      rawItems.push(...this._splitSkillLine(body));
+    }
+
+    const allowedSeed = [
+      ...((matchMap || []).filter(m => m.allowedToMention).map(m => m.requirement)),
+      ...(confirmedSkills || []),
+    ];
+    const allowedPhrases = this._uniqueDisplaySkills(
+      allowedSeed.flatMap(item => this._splitSkillLine(String(item || '')))
+    );
+
+    const compactItems = [];
+    for (const item of rawItems) {
+      const cleaned = this._cleanSkillItem(item);
+      if (this._isUsefulSkillItem(cleaned)) compactItems.push(cleaned);
+    }
+
+    for (const item of allowedPhrases) {
+      const cleaned = this._cleanSkillItem(item);
+      if (this._isUsefulSkillItem(cleaned)) compactItems.push(cleaned);
+    }
+
+    const unique = this._uniqueDisplaySkills(compactItems)
+      .filter(item => !this._isJdRequirementProse(item))
+      .slice(0, 18);
+
+    if (unique.length === 0) return [];
+    return unique.map(item => `- ${item}`);
+  }
+
+  _splitSkillLine(line) {
+    let text = String(line || '')
+      .replace(/\)\s*(?=[A-Z][A-Za-z ]{2,30}:)/g, ') ')
+      .replace(/([a-z)])(?=[A-Z][A-Za-z ]{2,30}:)/g, '$1, ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!text) return [];
+
+    const labelled = [...text.matchAll(/(?:^|[.;,]\s*)([A-Z][A-Za-z/& ]{2,40}):\s*([\s\S]*?)(?=(?:[.;,]\s*[A-Z][A-Za-z/& ]{2,40}:)|$)/g)];
+    if (labelled.length >= 2) {
+      return labelled.map(([, label, value]) => `${label.trim()}: ${value.trim()}`);
+    }
+
+    return text
+      .split(/\s*(?:;|\n|•)\s*/)
+      .flatMap(part => part.split(/\s*,\s+(?=[A-Z][A-Za-z/& ]{2,40}:)/))
+      .map(part => part.trim())
+      .filter(Boolean);
+  }
+
+  _cleanSkillItem(item) {
+    return String(item || '')
+      .replace(/^[-•*●▪◦–—]\s*/, '')
+      .replace(/\.\s*Strong experience with version control systems,\s*particularly\s+Git/gi, ', Git')
+      .replace(/\b(?:strong|solid|excellent|deep)\s+(?:knowledge|understanding|experience)\s+of\s+/gi, '')
+      .replace(/\bproficiency\s+in\s+/gi, '')
+      .replace(/\bexpertise\s+in\s+/gi, '')
+      .replace(/\bfamiliarity\s+with\s+/gi, '')
+      .replace(/\bexperience\s+with\s+/gi, '')
+      .replace(/\s+/g, ' ')
+      .replace(/\s+([),.;:])/g, '$1')
+      .replace(/[.,;]\s*$/, '')
+      .trim();
+  }
+
+  _isUsefulSkillItem(item) {
+    const text = String(item || '').trim();
+    if (!text || text.length < 2 || text.length > 140) return false;
+    if (this._isJdRequirementProse(text)) return false;
+    if (/^\(?\d+\s*(?:year|yr|month)/i.test(text)) return false;
+    if (/:\s*\(?\d+\s*(?:year|yr|month)/i.test(text)) return false;
+    if (/\b(?:bachelor|master|degree|related field|advanced degree|certification[s]?\s+in)\b/i.test(text)) return false;
+    return /[A-Za-z]/.test(text);
+  }
+
+  _isJdRequirementProse(item) {
+    const text = String(item || '').trim();
+    return text.length > 160
+      || /\b\d+\+?\s+years?\s+of\s+experience\b/i.test(text)
+      || /\bat least\s+\d+\s+years?\b/i.test(text)
+      || /\b(highly preferred|required|minimum qualifications?|related field)\b/i.test(text)
+      || /\bdeploying and managing\b/i.test(text)
+      || /\bor other relevant standards\b/i.test(text);
   }
 
   /** Find CV source snippets that mention the requirement. */

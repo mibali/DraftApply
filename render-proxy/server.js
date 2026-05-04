@@ -616,11 +616,15 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
     }
 
     const data = await response.json();
-    const tailoredCvText = tailor.ensureConfirmedSkillsIncluded(
-      tailor.removeTailoringMetaPhrases(
-        tailor.enforceTargetHeadline(data?.choices?.[0]?.message?.content, jdData.jobTitle),
-        jdData.company
+    const tailoredCvText = tailor.cleanSkillsSection(
+      tailor.ensureConfirmedSkillsIncluded(
+        tailor.removeTailoringMetaPhrases(
+          tailor.enforceTargetHeadline(data?.choices?.[0]?.message?.content, jdData.jobTitle),
+          jdData.company
+        ),
+        confirmedSkills
       ),
+      matchMap,
       confirmedSkills
     );
     if (!tailoredCvText?.trim()) {
