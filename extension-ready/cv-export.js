@@ -1,5 +1,11 @@
 (async () => {
   document.getElementById('print-btn')?.addEventListener('click', () => window.print());
+  document.getElementById('word-btn')?.addEventListener('click', () => {
+    const content = document.getElementById('cv-content');
+    const title = document.title || 'Tailored CV';
+    if (!content?.innerHTML?.trim()) return;
+    downloadWordDocument(content.innerHTML, title);
+  });
   document.getElementById('close-btn')?.addEventListener('click', async () => {
     try {
       const tab = await chrome.tabs.getCurrent();
@@ -131,6 +137,148 @@ function socialLabelUrl(line, socialUrls) {
 
 function contactLink(label, url) {
   return `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(label)}</a>`;
+}
+
+function safeDownloadName(title) {
+  const clean = String(title || 'Tailored CV')
+    .replace(/\s+CV\s*$/i, ' CV')
+    .replace(/[\\/:*?"<>|]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return `${clean || 'Tailored CV'}.doc`;
+}
+
+function buildWordDocument(cvHtml, title = 'Tailored CV') {
+  const cleanTitle = esc(String(title || 'Tailored CV'));
+  return `<!DOCTYPE html>
+<html xmlns:o="urn:schemas-microsoft-com:office:office"
+      xmlns:w="urn:schemas-microsoft-com:office:word"
+      xmlns="http://www.w3.org/TR/REC-html40">
+<head>
+  <meta charset="utf-8">
+  <title>${cleanTitle}</title>
+  <!--[if gte mso 9]>
+  <xml>
+    <w:WordDocument>
+      <w:View>Print</w:View>
+      <w:Zoom>100</w:Zoom>
+      <w:DoNotOptimizeForBrowser/>
+    </w:WordDocument>
+  </xml>
+  <![endif]-->
+  <style>
+    @page { margin: 0.7in; }
+    body {
+      font-family: Calibri, Georgia, serif;
+      font-size: 11pt;
+      line-height: 1.45;
+      color: #111;
+    }
+    .cv-name {
+      font-size: 18pt;
+      font-weight: 700;
+      text-align: center;
+      text-transform: uppercase;
+      letter-spacing: 3px;
+      margin-bottom: 5px;
+    }
+    .cv-headline {
+      font-size: 11pt;
+      font-style: italic;
+      text-align: center;
+      color: #444;
+      margin-bottom: 3px;
+    }
+    .cv-contact {
+      font-size: 9.5pt;
+      text-align: center;
+      color: #555;
+      line-height: 1.5;
+      margin: 0;
+    }
+    .cv-contact a, .cv-body a, .cv-bullets li a {
+      color: #111;
+      text-decoration: underline;
+    }
+    .cv-header-rule {
+      border: none;
+      border-top: 1.5pt solid #0a0a0a;
+      margin: 10pt 0 0;
+    }
+    .cv-section-header {
+      font-size: 10pt;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      border-bottom: 1.5pt solid #0a0a0a;
+      padding-bottom: 2pt;
+      margin-top: 16pt;
+      margin-bottom: 7pt;
+    }
+    .cv-entry-row {
+      margin-top: 9pt;
+      width: 100%;
+      clear: both;
+    }
+    .cv-company {
+      font-size: 11.6pt;
+      font-weight: 800;
+    }
+    .cv-entry-dates {
+      font-size: 9.5pt;
+      color: #444;
+      float: right;
+      margin-left: 12pt;
+    }
+    .cv-job-title {
+      font-size: 10.5pt;
+      font-style: italic;
+      font-weight: 600;
+      color: #333;
+      margin: 0 0 3pt;
+    }
+    .cv-role-focus {
+      font-size: 10pt;
+      font-style: italic;
+      color: #4b5563;
+      margin: 0 0 5pt;
+    }
+    .cv-bullets {
+      padding-left: 18pt;
+      margin: 4pt 0;
+    }
+    .cv-bullets li {
+      font-size: 10.5pt;
+      line-height: 1.45;
+      margin-bottom: 2pt;
+    }
+    .cv-body {
+      font-size: 10.5pt;
+      line-height: 1.5;
+      margin: 0 0 3pt;
+    }
+    .cv-date-line {
+      font-size: 9.5pt;
+      color: #555;
+      margin-bottom: 2pt;
+    }
+    .cv-spacer { height: 4pt; }
+  </style>
+</head>
+<body>${cvHtml}</body>
+</html>`;
+}
+
+function downloadWordDocument(cvHtml, title = 'Tailored CV') {
+  const blob = new Blob(['\ufeff', buildWordDocument(cvHtml, title)], { type: 'application/msword' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = safeDownloadName(title);
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function splitSkillLine(line) {

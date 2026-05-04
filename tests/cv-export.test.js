@@ -24,6 +24,40 @@ function loadFormatter() {
   return sandbox.__formatCvToHtml;
 }
 
+function loadExportHelpers() {
+  const code = fs.readFileSync(new URL('../extension-ready/cv-export.js', import.meta.url), 'utf8');
+  const fakeEl = {
+    hidden: false,
+    innerHTML: '',
+    textContent: '',
+    addEventListener() {},
+  };
+  const sandbox = {
+    chrome: {
+      storage: { local: { async get() { return {}; }, async remove() {} } },
+      tabs: { async getCurrent() { return null; }, async remove() {} },
+    },
+    document: {
+      title: 'Tailored CV',
+      body: { appendChild() {} },
+      createElement() { return { click() {}, remove() {} }; },
+      getElementById() { return fakeEl; },
+    },
+    window: { print() {}, close() {} },
+    Blob,
+    URL,
+    console,
+  };
+
+  vm.runInNewContext(`${code}
+globalThis.__buildWordDocument = buildWordDocument;
+globalThis.__safeDownloadName = safeDownloadName;`, sandbox);
+  return {
+    buildWordDocument: sandbox.__buildWordDocument,
+    safeDownloadName: sandbox.__safeDownloadName,
+  };
+}
+
 describe('cv-export formatter', () => {
   it('turns a LinkedIn label into a link and suppresses the duplicate raw URL', () => {
     const formatCvToHtml = loadFormatter();
@@ -153,5 +187,17 @@ TechCorp`);
     expect(html).not.toMatch(/4\+ years of experience/i);
     expect(html).not.toMatch(/Bachelor.*related field/i);
     expect(html).not.toMatch(/highly preferred/i);
+  });
+
+  it('builds an editable Word-compatible document from the rendered CV HTML', () => {
+    const { buildWordDocument, safeDownloadName } = loadExportHelpers();
+    const doc = buildWordDocument('<h1 class="cv-name">Jane Doe</h1><p class="cv-body">Cloud engineer</p>', 'Jane Doe CV');
+
+    expect(doc).toMatch(/xmlns:w="urn:schemas-microsoft-com:office:word"/);
+    expect(doc).toContain('<w:WordDocument>');
+    expect(doc).toContain('.cv-name');
+    expect(doc).toContain('Jane Doe');
+    expect(doc).toContain('Cloud engineer');
+    expect(safeDownloadName('Jane / Doe: CV')).toBe('Jane Doe CV.doc');
   });
 });
