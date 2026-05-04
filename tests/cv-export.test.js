@@ -114,7 +114,7 @@ Position: Senior Technical Support Engineer IC4`);
 
     expect(html).toContain('class="cv-company">Sourcegraph, UK</span>');
     expect(html).toContain('class="cv-entry-dates">February 2026 - Present</span>');
-    expect(html).toContain('class="cv-job-title">Position: Senior Technical Support Engineer IC4</p>');
+    expect(html).toContain('class="cv-job-title">Senior Technical Support Engineer IC4</p>');
   });
 
   it('renders Focus lines distinctly without replacing the official job title', () => {
@@ -131,7 +131,7 @@ Focus: MLOps, platform reliability, cloud infrastructure, automation, and produc
 
 - Built Python automation tools`);
 
-    expect(html).toContain('class="cv-job-title">Position: Senior Technical Support Engineer IC4</p>');
+    expect(html).toContain('class="cv-job-title">Senior Technical Support Engineer IC4</p>');
     expect(html).toContain('class="cv-role-focus">Focus: MLOps, platform reliability, cloud infrastructure, automation, and production diagnostics</p>');
   });
 });

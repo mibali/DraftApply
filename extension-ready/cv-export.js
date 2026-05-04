@@ -38,6 +38,11 @@ const SECTION_RE = /^(professional\s+summary|core\s+competenc(?:y|ies)|professio
 
 const DATE_RE = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d{4}|present|current|to\s*date|now)\b/i;
 
+// Strip LLM-inserted label prefixes from job title lines, e.g. "Position: Senior Engineer"
+function stripJobTitleLabel(line) {
+  return line.replace(/^(position|title|role|job\s*title)\s*:\s*/i, '').trim();
+}
+
 function isSectionHeader(line) {
   if (SECTION_RE.test(line)) return true;
   // ALL CAPS line that reads as a heading
@@ -181,6 +186,10 @@ function formatCvToHtml(rawText) {
       continue;
     }
 
+    // Skip pure-decorator lines — LLMs often insert ────────, ————————, ----, ====
+    // as horizontal rules between sections. They contain no word characters.
+    if (line.length >= 3 && !/\w/.test(line)) continue;
+
     // Some generated CVs inherit a bad "website" from the parser when an
     // email domain is mistaken for a URL, e.g. mtbdesigns01@gmail.com → http://gmail.com.
     if (/^https?:\/\//i.test(line) && emailDomains.has(urlHost(line))) {
@@ -205,7 +214,8 @@ function formatCvToHtml(rawText) {
       inHeader = false;
       beforeFirstSection = false;
       inEntrySection = isEntrySectionHeader(line);
-      html += `<h2 class="cv-section-header">${esc(line.replace(/[:\-]\s*$/, ''))}</h2>`;
+      const sectionText = line.replace(/[:\-]\s*$/, '').trim();
+      if (sectionText) html += `<h2 class="cv-section-header">${esc(sectionText)}</h2>`;
       continue;
     }
 
@@ -269,7 +279,8 @@ function formatCvToHtml(rawText) {
 
       // Line immediately after an entry row → job title (italic)
       if (afterEntryRow && line.length < 70 && !isContactLine(line) && !isDateLine(line)) {
-        html += `<p class="cv-job-title">${esc(line)}</p>`;
+        const title = stripJobTitleLabel(line);
+        if (title) html += `<p class="cv-job-title">${esc(title)}</p>`;
         afterEntryRow = false;
         continue;
       }
@@ -284,7 +295,8 @@ function formatCvToHtml(rawText) {
       if (pendingCompany !== null && line.length < 70 && !isContactLine(line) && !isDateLine(line)) {
         flushPendingCompany(null);
         afterEntryRow = false;
-        html += `<p class="cv-job-title">${esc(line)}</p>`;
+        const title = stripJobTitleLabel(line);
+        if (title) html += `<p class="cv-job-title">${esc(title)}</p>`;
         continue;
       }
 
