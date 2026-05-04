@@ -55,6 +55,11 @@ function isEntrySectionHeader(line) {
     .test(line.replace(/[:\-]\s*$/, '').trim());
 }
 
+function isSkillsSectionHeader(line) {
+  return /^(core\s+competenc(?:y|ies)|technical\s+skills?|skills|technologies|competencies|expertise)\s*[:\-]?$/i
+    .test(line.replace(/[:\-]\s*$/, '').trim());
+}
+
 function isContactLine(line) {
   return /[\w.+-]+@[\w-]+\.\w+/.test(line)
     || /https?:\/\//i.test(line)
@@ -128,6 +133,51 @@ function contactLink(label, url) {
   return `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(label)}</a>`;
 }
 
+function splitSkillLine(line) {
+  const text = String(line || '')
+    .replace(/\)\s*(?=[A-Z][A-Za-z/& ]{2,36}:)/g, ') ')
+    .replace(/([a-z)])(?=[A-Z][A-Za-z/& ]{2,36}:)/g, '$1, ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const labelled = [...text.matchAll(/(?:^|[.;,]\s*)([A-Z][A-Za-z/& ]{2,40}):\s*([\s\S]*?)(?=(?:[.;,]\s*[A-Z][A-Za-z/& ]{2,40}:)|$)/g)];
+  if (labelled.length >= 2) {
+    return labelled.map(([, label, value]) => cleanSkillItem(`${label.trim()}: ${value.trim()}`)).filter(isUsefulSkillItem);
+  }
+
+  return text
+    .split(/\s*(?:;|\n|•)\s*/)
+    .flatMap(part => part.split(/\s*,\s+(?=[A-Z][A-Za-z/& ]{2,40}:)/))
+    .map(cleanSkillItem)
+    .filter(isUsefulSkillItem);
+}
+
+function cleanSkillItem(item) {
+  return String(item || '')
+    .replace(/^[-•*●▪◦–—]\s*/, '')
+    .replace(/\.\s*Strong experience with version control systems,\s*particularly\s+Git/gi, ', Git')
+    .replace(/\b(?:strong|solid|excellent|deep)\s+(?:knowledge|understanding|experience)\s+of\s+/gi, '')
+    .replace(/\bproficiency\s+in\s+/gi, '')
+    .replace(/\bexpertise\s+in\s+/gi, '')
+    .replace(/\bfamiliarity\s+with\s+/gi, '')
+    .replace(/\bexperience\s+with\s+/gi, '')
+    .replace(/\s+/g, ' ')
+    .replace(/\s+([),.;:])/g, '$1')
+    .replace(/[.,;]\s*$/, '')
+    .trim();
+}
+
+function isUsefulSkillItem(item) {
+  const text = String(item || '').trim();
+  if (!text || text.length < 2 || text.length > 140) return false;
+  if (/\b\d+\+?\s+years?\s+of\s+experience\b/i.test(text)) return false;
+  if (/\bat least\s+\d+\s+years?\b/i.test(text)) return false;
+  if (/:\s*\(?\d+\s*(?:year|yr|month)/i.test(text)) return false;
+  if (/\b(highly preferred|required|minimum qualifications?|related field)\b/i.test(text)) return false;
+  if (/\b(?:bachelor|master|degree|education:|advanced degrees?)\b/i.test(text)) return false;
+  return /[A-Za-z]/.test(text);
+}
+
 function formatCvToHtml(rawText) {
   // Strip trailing "Links:" section added by PDF/DOCX extractor — links are
   // already inline in the text; we don't want them duplicated at the bottom.
@@ -144,6 +194,7 @@ function formatCvToHtml(rawText) {
   let inHeader = true;
   let beforeFirstSection = true;
   let inEntrySection = false; // true inside Experience / Education sections
+  let inSkillsSection = false;
 
   // Buffer for a potential company name — flushed once we know what follows:
   //   dates → cv-entry-row with dates; short non-date → entry-row + cv-job-title; other → standalone
@@ -214,6 +265,7 @@ function formatCvToHtml(rawText) {
       inHeader = false;
       beforeFirstSection = false;
       inEntrySection = isEntrySectionHeader(line);
+      inSkillsSection = isSkillsSectionHeader(line);
       const sectionText = line.replace(/[:\-]\s*$/, '').trim();
       if (sectionText) html += `<h2 class="cv-section-header">${esc(sectionText)}</h2>`;
       continue;
@@ -248,11 +300,23 @@ function formatCvToHtml(rawText) {
       flushPendingCompany(null);
       afterEntryRow = false;
       if (!listOpen) { html += '<ul class="cv-bullets">'; listOpen = true; }
-      html += `<li>${linkify(esc(line.replace(/^[\-•*●▪◦–—]\s*/, '')))}</li>`;
+      const body = line.replace(/^[\-•*●▪◦–—]\s*/, '');
+      const items = inSkillsSection ? splitSkillLine(body) : [body];
+      for (const item of items) html += `<li>${linkify(esc(item))}</li>`;
       continue;
     }
 
     closeList();
+
+    if (inSkillsSection) {
+      const items = splitSkillLine(line);
+      if (items.length > 0) {
+        html += '<ul class="cv-bullets">';
+        for (const item of items) html += `<li>${linkify(esc(item))}</li>`;
+        html += '</ul>';
+        continue;
+      }
+    }
 
     // If a PDF/DOCX extractor put a raw social URL at the bottom, keep the
     // header link and omit the duplicated standalone URL from the body.

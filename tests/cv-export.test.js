@@ -134,4 +134,24 @@ Focus: MLOps, platform reliability, cloud infrastructure, automation, and produc
     expect(html).toContain('class="cv-job-title">Senior Technical Support Engineer IC4</p>');
     expect(html).toContain('class="cv-role-focus">Focus: MLOps, platform reliability, cloud infrastructure, automation, and production diagnostics</p>');
   });
+
+  it('cleans pasted JD prose from Core Competencies when rendering', () => {
+    const formatCvToHtml = loadFormatter();
+    const html = formatCvToHtml(`Jane Doe
+jane@example.com
+MLOps Engineer
+
+Core Competencies
+- MLOps, Cloud Infrastructure, and DevOps, Experience: 4+ years of experience in MLOps, DevOps, or a related field, with at least 1 year focused on deploying and managing AI, ML models in production. Experience with agentic or autonomous AI systems is highly preferred., Technical Stack: (1 year or less)Strong knowledge of MLOps tools and frameworks(Pytorch, Langraph, CrewAI, N8N). Proficiency in containerization with Docker and orchestration with Kubernetes., Programming & Scripting: Expertise in Python and familiarity with scripting for automation (e.g., Bash, Terraform). Strong experience with version control systems, particularly Git., Security Mindset: A strong understanding of security principles related to cloud and MLOps, including Identity and Access Management (IAM), data encryption, and secure pipeline design., Ethical AI Knowledge: Understanding of ethical AI principles, including bias detection, explainability, and compliance with regulations like GDPR or other relevant standards., Education: Bachelor’s degree in Computer Science, Engineering, Data Science, or a related field.
+- Containerization and Orchestration: Docker, Kubernetes
+
+Professional Experience
+TechCorp`);
+
+    expect(html).toContain('<li>Containerization and Orchestration: Docker, Kubernetes</li>');
+    expect(html).toContain('<li>Programming &amp; Scripting: Python and scripting for automation (e.g., Bash, Terraform), Git</li>');
+    expect(html).not.toMatch(/4\+ years of experience/i);
+    expect(html).not.toMatch(/Bachelor.*related field/i);
+    expect(html).not.toMatch(/highly preferred/i);
+  });
 });

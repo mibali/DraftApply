@@ -88,6 +88,22 @@ const JD_NO_MATCH = {
   dealBreakers: [],
 };
 
+const INFRA_MLOPS_JD = {
+  jobTitle: 'Senior MLOps Engineer',
+  company: 'Lighthouse',
+  seniority: 'senior',
+  requiredSkills: ['Python', 'cloud infrastructure', 'platform reliability', 'CI/CD', 'Kubernetes', 'Docker'],
+  preferredSkills: ['Terraform', 'monitoring', 'engineering enablement'],
+  tools: ['GCP', 'Docker', 'Kubernetes', 'Terraform', 'Prometheus', 'Grafana'],
+  responsibilities: [
+    'Design and maintain production infrastructure for machine learning systems',
+    'Improve model and platform reliability',
+    'Create foundational tooling that enables engineering teams',
+  ],
+  atsKeywords: ['mlops', 'platform', 'reliability', 'automation', 'infrastructure'],
+  dealBreakers: [],
+};
+
 // Builds a faithful tailored CV preserving all locked fields
 function faithfulTailoring() {
   return `John Doe
@@ -311,6 +327,24 @@ describe('validateTailoredCV', () => {
   });
 });
 
+// ── validateTailoringQuality ─────────────────────────────────────────────────
+
+describe('validateTailoringQuality', () => {
+  it('warns when an unsupported JD tool is claimed in the tailored output', () => {
+    const map = tailor.buildMatchMap(CV, JD);
+    const output = `${faithfulTailoring()}\n\nSKILLS\nReact, TypeScript, GraphQL`;
+    const warnings = tailor.validateTailoringQuality(CV, JD, map, output);
+    expect(warnings.some(w => /GraphQL/.test(w))).toBe(true);
+  });
+
+  it('does not warn when a user-confirmed skill appears in the tailored output', () => {
+    const map = tailor.buildMatchMap(CV, JD, ['GraphQL']);
+    const output = `${faithfulTailoring()}\n\nSKILLS\nReact, TypeScript, GraphQL`;
+    const warnings = tailor.validateTailoringQuality(CV, JD, map, output, ['GraphQL']);
+    expect(warnings.some(w => /GraphQL/.test(w))).toBe(false);
+  });
+});
+
 
 // ── removeTailoringMetaPhrases ────────────────────────────────────────────────
 
@@ -456,6 +490,84 @@ React, Grafana`;
   });
 });
 
+// ── ensureRoleFocusLines ─────────────────────────────────────────────────────
+
+describe('ensureRoleFocusLines', () => {
+  it('adds deterministic Focus lines when the LLM omits them', () => {
+    const map = tailor.buildMatchMap(CV, INFRA_MLOPS_JD, ['Kubernetes', 'Terraform']);
+    const tailored = `John Doe
+
+Senior MLOps Engineer
+
+EXPERIENCE
+Senior Frontend Engineer | TechCorp | Jan 2021 – Present
+- Deployed services on AWS using Docker containers
+- Built React and TypeScript dashboards
+
+Junior Developer | StartupXYZ | Jun 2019 – Dec 2020
+- Maintained Git workflows and CI pipelines
+
+SKILLS
+AWS, Docker, Git`;
+
+    const result = tailor.ensureRoleFocusLines(tailored, CV, INFRA_MLOPS_JD, map);
+    expect(result).toMatch(/Senior Frontend Engineer \| TechCorp[\s\S]*Focus:/);
+    expect(result).toMatch(/Focus: .*cloud infrastructure/i);
+  });
+
+  it('does not duplicate an existing Focus line', () => {
+    const map = tailor.buildMatchMap(CV, INFRA_MLOPS_JD, ['Kubernetes']);
+    const tailored = `John Doe
+
+EXPERIENCE
+Senior Frontend Engineer | TechCorp | Jan 2021 – Present
+Focus: cloud infrastructure and automation
+- Deployed services on AWS using Docker containers`;
+
+    const result = tailor.ensureRoleFocusLines(tailored, CV, INFRA_MLOPS_JD, map);
+    expect(result.match(/^Focus:/gm)).toHaveLength(1);
+  });
+});
+
+// ── cleanSkillsSection ───────────────────────────────────────────────────────
+
+describe('cleanSkillsSection', () => {
+  it('removes pasted JD requirement prose from skills sections', () => {
+    const tailored = `John Doe
+
+Machine Learning Operations Engineer (MLOps)
+
+Core Competencies
+- MLOps, Cloud Infrastructure, and DevOps, Experience: 4+ years of experience in MLOps, DevOps, or a related field, with at least 1 year focused on deploying and managing AI, ML models in production. Experience with agentic or autonomous AI systems is highly preferred., Technical Stack: (1 year or less)Strong knowledge of MLOps tools and frameworks(Pytorch, Langraph, CrewAI, N8N). Proficiency in containerization with Docker and orchestration with Kubernetes., Programming & Scripting: Expertise in Python and familiarity with scripting for automation (e.g., Bash, Terraform). Strong experience with version control systems, particularly Git., Security Mindset: A strong understanding of security principles related to cloud and MLOps, including Identity and Access Management (IAM), data encryption, and secure pipeline design., Ethical AI Knowledge: Understanding of ethical AI principles, including bias detection, explainability, and compliance with regulations like GDPR or other relevant standards., Education: Bachelor’s degree in Computer Science, Engineering, Data Science, or a related field.
+- Containerization and Orchestration: Docker, Kubernetes
+
+Professional Experience
+TechCorp`;
+
+    const matchMap = [
+      { requirement: 'MLOps', allowedToMention: true },
+      { requirement: 'Cloud Infrastructure', allowedToMention: true },
+      { requirement: 'DevOps', allowedToMention: true },
+      { requirement: 'Docker', allowedToMention: true },
+      { requirement: 'Kubernetes', allowedToMention: true },
+      { requirement: 'Python', allowedToMention: true },
+      { requirement: 'Bash', allowedToMention: true },
+      { requirement: 'Terraform', allowedToMention: true },
+      { requirement: 'Git', allowedToMention: true },
+    ];
+
+    const result = tailor.cleanSkillsSection(tailored, matchMap);
+
+    expect(result).toContain('- MLOps');
+    expect(result).toContain('- Docker');
+    expect(result).toContain('- Kubernetes');
+    expect(result).toContain('- Python');
+    expect(result).not.toMatch(/4\+ years of experience/i);
+    expect(result).not.toMatch(/Bachelor.*related field/i);
+    expect(result).not.toMatch(/highly preferred/i);
+  });
+});
+
 // ── buildTailoringPrompt ──────────────────────────────────────────────────────
 
 describe('buildTailoringPrompt', () => {
@@ -506,6 +618,15 @@ describe('buildTailoringPrompt', () => {
     const map = tailor.buildMatchMap(CV, JD);
     const { userPrompt } = tailor.buildTailoringPrompt(CV, JD, map);
     expect(userPrompt).toContain('strongest target-role evidence comes first');
+  });
+
+  it('includes a role-specific tailoring blueprint', () => {
+    const map = tailor.buildMatchMap(CV, INFRA_MLOPS_JD, ['Kubernetes', 'Terraform']);
+    const { userPrompt } = tailor.buildTailoringPrompt(CV, INFRA_MLOPS_JD, map);
+    expect(userPrompt).toContain('TAILORING BLUEPRINT');
+    expect(userPrompt).toContain('Target positioning:');
+    expect(userPrompt).toContain('Suggested role focus lines:');
+    expect(userPrompt).toContain('The CV must visibly prioritize the target role');
   });
 
   it('requires every user-confirmed addition to be included in skills', () => {

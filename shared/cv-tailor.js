@@ -141,6 +141,7 @@ STRICT RULES:
 9. Do not mention the target company name in the CV body unless it already appears in the original CV as part of the candidate's history.
 10. Never rename historical job titles to the target role title. Keep every previous job title exactly as shown in LOCKED FIELDS.
 11. You may add a short "Focus:" line below a preserved job title when that role's original bullets support the target-role positioning.
+12. Skills/core competencies must be concise CV skill phrases only. Never paste full JD requirements, education requirements, years-of-experience requirements, or sentences such as "X years of experience in..." into the skills section.
 
 WHAT YOU MAY DO:
 • Update the professional headline / title line (the short descriptor directly below the candidate's name, e.g. "Senior Frontend Engineer") to match the target role title exactly.
@@ -149,7 +150,7 @@ WHAT YOU MAY DO:
 • Rephrase existing responsibility bullets using vocabulary from the job description, as long as the underlying meaning is unchanged.
 • Reorder bullets within a role to put the most relevant ones first.
 • Expand or compress bullet points within the bounds of what the original bullet states.
-• Include every user-confirmed addition in the skills/core competencies section.
+• Include every user-confirmed addition in the skills/core competencies section as short phrases only.
 • Add truthful role-positioning lines in the form "Focus: ..." under existing role titles when supported by that role's original responsibilities.`;
 
     const supported = matchMap.filter(m => m.allowedToMention).map(m => m.requirement);
@@ -159,6 +160,7 @@ WHAT YOU MAY DO:
     const topRequired = (jdData.requiredSkills || []).slice(0, 15);
     const topTools = (jdData.tools || []).slice(0, 20);
     const topKeywords = (jdData.atsKeywords || []).slice(0, 20);
+    const tailoringPlan = this.buildTailoringPlan(cvData, jdData, matchMap);
 
     const userPrompt = `TARGET ROLE
   Job title:  ${jdData.jobTitle || 'Not specified'}
@@ -185,22 +187,80 @@ ${unsupported.length ? unsupported.map(s => `    ✗ ${s}`).join('\n') : '    (n
 KEY RESPONSIBILITIES TO HIGHLIGHT (up to 8)
 ${topResponsibilities.map(r => `  • ${r}`).join('\n') || '  (none listed)'}
 
+TAILORING BLUEPRINT
+  Target positioning: ${tailoringPlan.targetPositioning}
+  Highest-value supported keywords:
+${tailoringPlan.supportedKeywords.length ? tailoringPlan.supportedKeywords.map(s => `    • ${s}`).join('\n') : '    (none)'}
+  Suggested role focus lines:
+${tailoringPlan.roleFocusLines.length ? tailoringPlan.roleFocusLines.map(r => `    • ${r.company} / ${r.title}: ${r.focus}`).join('\n') : '    (none)'}
+  Quality bar:
+    • The CV must visibly prioritize the target role, not just lightly swap keywords.
+    • Summary, skills, focus lines, and the first bullets under each relevant role must all point toward the target role.
+    • Unsupported JD tools may appear only in the missing-skills/review context, never as claimed candidate experience.
+
 ORIGINAL CV
 ${cvData.rawText}
 
 INSTRUCTION
 1. The professional headline/title line near the top of the CV MUST be exactly: "${jdData.jobTitle || 'the target role'}".
 2. Rewrite the professional summary so it clearly positions the candidate for this exact role and domain without saying it was tailored for a company or application. It must mention only supported evidence from the CV.
-3. Reorder and rename skills/competencies so supported JD-relevant items appear first, especially supported technologies, methods, domain terms, and operational practices from the JD.
+3. Reorder and rename skills/competencies so supported JD-relevant items appear first, especially supported technologies, methods, domain terms, and operational practices from the JD. The skills/core competencies section must contain short phrases only, never full JD requirement sentences, degree requirements, or years-of-experience requirements.
 4. For each relevant role: preserve the official job title exactly, then add one short "Focus:" line below it when the original responsibilities support the target role. Example: "Focus: MLOps, platform reliability, cloud infrastructure, automation, and production diagnostics".
 5. For each role: rewrite relevant bullets with JD vocabulary (same meaning, aligned language), reorder bullets so the strongest target-role evidence comes first, and make Infra/MLOps/platform evidence obvious when supported.
-6. Include every user-confirmed addition in the skills/core competencies section. You may also use them in the summary when natural, but do not attach them to a specific employer, project, metric, certification, or achievement unless that context exists in the original CV.
+6. Include every user-confirmed addition in the skills/core competencies section as concise skill names. You may also use them in the summary when natural, but do not attach them to a specific employer, project, metric, certification, or achievement unless that context exists in the original CV.
 7. Preserve all locked fields exactly — same spelling, capitalisation, and punctuation.
 8. The final CV must read like a polished CV for "${jdData.jobTitle || 'the target role'}", not like a generic CV and not like generated marketing copy.
 
 Output the complete tailored CV text with no preamble, no commentary, and no markdown code fences. Begin directly with the candidate's name.`;
 
     return { systemPrompt, userPrompt, temperature: 0.3 };
+  }
+
+  buildTailoringPlan(cvData, jdData, matchMap = []) {
+    const domain = this._detectDomain(jdData);
+    const domainLabel = {
+      mlops: 'MLOps, AI/ML platform engineering, production reliability, and automation',
+      data_engineering: 'data engineering, data pipelines, platform reliability, and automation',
+      devops: 'DevOps, cloud infrastructure, platform reliability, and automation',
+      ml_scientist: 'machine learning, experimentation, model development, and AI tooling',
+      frontend: 'frontend engineering, product delivery, UI quality, and modern web tooling',
+      backend: 'backend engineering, APIs, distributed systems, and service reliability',
+      cloud: 'cloud architecture, infrastructure automation, security, and reliability',
+    }[domain] || `${jdData.jobTitle || 'the target role'} responsibilities, supported technologies, and relevant achievements`;
+
+    const supportedKeywords = this._rankSupportedKeywords(matchMap, jdData).slice(0, 18);
+    const roleFocusLines = (cvData.experience || [])
+      .map(exp => {
+        const focus = this._buildRoleFocus(exp, jdData, matchMap);
+        return focus ? { company: exp.company || '', title: exp.title || '', focus } : null;
+      })
+      .filter(Boolean);
+
+    return {
+      domain,
+      targetPositioning: domainLabel,
+      supportedKeywords,
+      roleFocusLines,
+    };
+  }
+
+  finalizeTailoredCV(rawText, { cvData, jdData, matchMap = [], confirmedSkills = [] } = {}) {
+    return this.cleanSkillsSection(
+      this.ensureRoleFocusLines(
+        this.ensureConfirmedSkillsIncluded(
+          this.removeTailoringMetaPhrases(
+            this.enforceTargetHeadline(rawText, jdData?.jobTitle),
+            jdData?.company
+          ),
+          confirmedSkills
+        ),
+        cvData,
+        jdData,
+        matchMap
+      ),
+      matchMap,
+      confirmedSkills
+    );
   }
 
   enforceTargetHeadline(tailoredText, jobTitle) {
@@ -288,6 +348,62 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
     return lines.join('\n');
   }
 
+  ensureRoleFocusLines(tailoredText, cvData = {}, jdData = {}, matchMap = []) {
+    if (!tailoredText) return tailoredText;
+
+    const lines = String(tailoredText).split('\n');
+    let searchFrom = 0;
+
+    for (const exp of (cvData.experience || [])) {
+      const focus = this._buildRoleFocus(exp, jdData, matchMap);
+      if (!focus || !exp.title) continue;
+
+      const titleIdx = this._findTitleLineIndex(lines, exp.title, searchFrom);
+      if (titleIdx === -1) continue;
+
+      const nextMeaningfulIdx = this._nextMeaningfulLineIndex(lines, titleIdx + 1);
+      if (nextMeaningfulIdx !== -1 && /^focus\s*:/i.test(lines[nextMeaningfulIdx].trim())) {
+        searchFrom = nextMeaningfulIdx + 1;
+        continue;
+      }
+
+      lines.splice(titleIdx + 1, 0, `Focus: ${focus}`);
+      searchFrom = titleIdx + 2;
+    }
+
+    return lines.join('\n');
+  }
+
+  cleanSkillsSection(tailoredText, matchMap = [], confirmedSkills = []) {
+    if (!tailoredText) return tailoredText;
+
+    const lines = String(tailoredText).split('\n');
+    const cleaned = [];
+    let i = 0;
+
+    while (i < lines.length) {
+      cleaned.push(lines[i]);
+
+      if (!this._isSkillsSectionHeader(lines[i])) {
+        i++;
+        continue;
+      }
+
+      i++;
+      const sectionLines = [];
+      while (i < lines.length && !this._isLikelySectionHeader(lines[i])) {
+        sectionLines.push(lines[i]);
+        i++;
+      }
+
+      const skillLines = this._normaliseSkillSectionLines(sectionLines, matchMap, confirmedSkills);
+      cleaned.push(...skillLines);
+      continue;
+    }
+
+    return cleaned.join('\n');
+  }
+
   /**
    * Rule-based validation that locked fields were not altered.
    * @returns {string[]} warnings
@@ -340,6 +456,48 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
     }
 
     return warnings;
+  }
+
+  validateTailoringQuality(originalCvData, jdData, matchMap, tailoredText, confirmedSkills = []) {
+    if (!tailoredText) return [];
+    const warnings = [];
+    const normalisedOutput = this._normaliseText(tailoredText);
+    const normalisedOriginal = this._normaliseText(originalCvData?.rawText || '');
+
+    const jobTitle = String(jdData?.jobTitle || '').trim();
+    if (jobTitle && !normalisedOutput.includes(this._normaliseText(jobTitle))) {
+      warnings.push(`Target job title may be missing from the tailored CV headline: "${jobTitle}"`);
+    }
+
+    for (const skill of this._uniqueDisplaySkills(confirmedSkills)) {
+      if (!normalisedOutput.includes(this._normaliseText(skill))) {
+        warnings.push(`User-confirmed skill was not included in the tailored CV: "${skill}"`);
+      }
+    }
+
+    for (const exp of (originalCvData?.experience || [])) {
+      const focus = this._buildRoleFocus(exp, jdData, matchMap);
+      if (!focus || !exp.title) continue;
+      const titleIdx = this._findTitleLineIndex(String(tailoredText).split('\n'), exp.title, 0);
+      if (titleIdx !== -1) {
+        const afterTitle = String(tailoredText).split('\n').slice(titleIdx + 1, titleIdx + 4).join('\n');
+        if (!/^focus\s*:/im.test(afterTitle)) {
+          warnings.push(`Role focus line may be missing under "${exp.title}"`);
+        }
+      }
+    }
+
+    for (const item of (matchMap || []).filter(m => !m.allowedToMention)) {
+      for (const candidate of this._extractAtomicSkillCandidates(item.requirement)) {
+        const key = this._normaliseText(candidate);
+        if (!key || normalisedOriginal.includes(key)) continue;
+        if (normalisedOutput.includes(key)) {
+          warnings.push(`Unsupported JD skill/tool may have been claimed without CV evidence or user confirmation: "${candidate}"`);
+        }
+      }
+    }
+
+    return [...new Set(warnings)];
   }
 
   /**
@@ -400,6 +558,171 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
     return result;
   }
 
+  _rankSupportedKeywords(matchMap = [], jdData = {}) {
+    const targetText = this._normaliseText([
+      jdData.jobTitle,
+      ...(jdData.requiredSkills || []),
+      ...(jdData.tools || []),
+      ...(jdData.responsibilities || []),
+      ...(jdData.atsKeywords || []),
+    ].join(' '));
+
+    return this._uniqueDisplaySkills(
+      (matchMap || [])
+        .filter(m => m.allowedToMention)
+        .map(m => m.requirement)
+        .flatMap(item => this._splitSkillLine(String(item || '')))
+        .map(item => this._cleanSkillItem(item))
+        .filter(item => this._isUsefulSkillItem(item))
+        .filter(item => !this._isJdRequirementProse(item))
+        .sort((a, b) => {
+          const aTarget = targetText.includes(this._normaliseText(a)) ? 1 : 0;
+          const bTarget = targetText.includes(this._normaliseText(b)) ? 1 : 0;
+          return bTarget - aTarget || a.length - b.length;
+        })
+    );
+  }
+
+  _buildRoleFocus(exp = {}, jdData = {}, matchMap = []) {
+    const roleText = this._normaliseText([
+      exp.title,
+      exp.company,
+      ...(exp.responsibilities || []),
+    ].join(' '));
+    if (!roleText) return '';
+
+    const targetText = this._normaliseText([
+      jdData.jobTitle,
+      ...(jdData.requiredSkills || []),
+      ...(jdData.preferredSkills || []),
+      ...(jdData.tools || []),
+      ...(jdData.responsibilities || []),
+      ...(jdData.atsKeywords || []),
+    ].join(' '));
+
+    const supportedText = this._normaliseText(
+      (matchMap || [])
+        .filter(m => m.allowedToMention)
+        .map(m => m.requirement)
+        .join(' ')
+    );
+    const combinedTarget = `${targetText} ${supportedText}`;
+
+    const categories = [
+      {
+        label: 'MLOps and AI platform enablement',
+        evidence: /\b(mlops|machine learning| ai | llm|model|cody|langchain|openai|ai-powered|security scanning)\b/,
+        target: /\b(mlops|machine learning| ai | llm|model|vertex|mlflow|pytorch|tensorflow|agent|data science)\b/,
+      },
+      {
+        label: 'cloud infrastructure',
+        evidence: /\b(aws|azure|gcp|cloud|infrastructure|deployment|environment|configuration|terraform|iac)\b/,
+        target: /\b(aws|azure|gcp|cloud|infrastructure|terraform|iac|gke|cloud run|platform)\b/,
+      },
+      {
+        label: 'platform reliability',
+        evidence: /\b(reliability|stability|production|incident|sla|on-call|root cause|rca|remediation|systemic|availability)\b/,
+        target: /\b(reliability|stability|production|incident|monitor|scale|platform|sre|availability)\b/,
+      },
+      {
+        label: 'automation',
+        evidence: /\b(automation|automate|python|script|scripting|tooling|workflow|manual effort)\b/,
+        target: /\b(automation|python|script|scripting|workflow|tooling|enable)\b/,
+      },
+      {
+        label: 'production diagnostics',
+        evidence: /\b(diagnostic|troubleshoot|investigation|debug|log analysis|reproduction|performance|issue resolution)\b/,
+        target: /\b(diagnostic|troubleshoot|monitor|performance|reliability|production|quality)\b/,
+      },
+      {
+        label: 'CI/CD and release engineering',
+        evidence: /\b(ci\/cd|pipeline|github actions|gitlab|jenkins|circleci|buildkite|release|deployment)\b/,
+        target: /\b(ci\/cd|pipeline|gitlab|github actions|release|deployment|ship)\b/,
+      },
+      {
+        label: 'containerization and orchestration',
+        evidence: /\b(kubernetes|docker|container|gke|helm)\b/,
+        target: /\b(kubernetes|docker|container|gke|helm|orchestration)\b/,
+      },
+      {
+        label: 'observability and monitoring',
+        evidence: /\b(monitoring|observability|grafana|prometheus|datadog|new relic|logs?|metrics|alert)\b/,
+        target: /\b(monitoring|observability|grafana|prometheus|datadog|new relic|logs?|metrics|alert)\b/,
+      },
+      {
+        label: 'data pipelines and quality',
+        evidence: /\b(data pipeline|etl|airflow|bigquery|dataflow|sql|data quality|database)\b/,
+        target: /\b(data pipeline|etl|airflow|bigquery|dataflow|sql|data quality|data platform)\b/,
+      },
+      {
+        label: 'security platform engineering',
+        evidence: /\b(security|semgrep|scan|false positive|vulnerabilit|sast|pipeline instability)\b/,
+        target: /\b(security|scan|compliance|vulnerabilit|sast|secure)\b/,
+      },
+      {
+        label: 'engineering enablement',
+        evidence: /\b(mentor|guidance|documentation|runbook|knowledge base|framework|enable|training|standard|process)\b/,
+        target: /\b(enable|guidance|mentor|documentation|framework|team|collaborat|knowledge)\b/,
+      },
+    ];
+
+    const matches = categories
+      .map((category, index) => {
+        const hasEvidence = category.evidence.test(roleText);
+        if (!hasEvidence) return null;
+        const targetScore = category.target.test(combinedTarget) ? 2 : 0;
+        const evidenceScore = category.evidence.test(supportedText) ? 1 : 0;
+        return { ...category, index, score: targetScore + evidenceScore };
+      })
+      .filter(Boolean)
+      .filter(item => item.score > 0);
+
+    const selected = matches
+      .sort((a, b) => b.score - a.score || a.index - b.index)
+      .slice(0, 5)
+      .map(item => item.label);
+
+    if (selected.length < 2) return '';
+    return this._formatList(selected);
+  }
+
+  _formatList(items = []) {
+    const unique = this._uniqueDisplaySkills(items);
+    if (unique.length <= 2) return unique.join(' and ');
+    return `${unique.slice(0, -1).join(', ')}, and ${unique[unique.length - 1]}`;
+  }
+
+  _findTitleLineIndex(lines, title, start = 0) {
+    const titleKey = this._normaliseText(title);
+    if (!titleKey) return -1;
+    for (let i = Math.max(0, start); i < lines.length; i++) {
+      const line = this._normaliseText(lines[i]);
+      if (!line) continue;
+      if (line === titleKey) return i;
+      if (line === this._normaliseText(`Position: ${title}`)) return i;
+      if (/^position\s+/.test(line) && line.includes(titleKey)) return i;
+      if (line.startsWith(titleKey) && line.length <= titleKey.length + 80) return i;
+      if (line.includes(titleKey) && line.length <= titleKey.length + 20) return i;
+    }
+    return -1;
+  }
+
+  _nextMeaningfulLineIndex(lines, start = 0) {
+    for (let i = Math.max(0, start); i < lines.length; i++) {
+      if (String(lines[i] || '').trim()) return i;
+    }
+    return -1;
+  }
+
+  _extractAtomicSkillCandidates(requirement) {
+    const cleaned = this._cleanSkillItem(requirement);
+    if (!this._isUsefulSkillItem(cleaned)) return [];
+    if (this._isJdRequirementProse(cleaned)) return [];
+    const tokens = this._getCoreTokens(cleaned);
+    if (tokens.length > 4) return [];
+    return [cleaned];
+  }
+
   _getCoreTokens(requirement) {
     const NOISE = this._noiseWords();
     const needle = this._normaliseText(requirement);
@@ -447,6 +770,103 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
   _isLikelySectionHeader(line) {
     return /^(professional\s+summary|core\s+competenc(?:y|ies)|professional\s+experience|technical\s+skills?|education|certifications?\s*(?:&|and)\s*awards?|technical\s+leadership|achievements?|projects?)\s*[:\-]?$/i
       .test(String(line || '').trim());
+  }
+
+  _isSkillsSectionHeader(line) {
+    return /^(core\s+competenc(?:y|ies)|technical\s+skills?|skills|technologies|tools|expertise)\s*[:\-]?$/i
+      .test(String(line || '').trim());
+  }
+
+  _normaliseSkillSectionLines(sectionLines, matchMap = [], confirmedSkills = []) {
+    const rawItems = [];
+    for (const line of sectionLines) {
+      const trimmed = String(line || '').trim();
+      if (!trimmed) continue;
+      const body = trimmed.replace(/^[-•*●▪◦–—]\s*/, '').trim();
+      if (!body) continue;
+      rawItems.push(...this._splitSkillLine(body));
+    }
+
+    const allowedSeed = [
+      ...((matchMap || []).filter(m => m.allowedToMention).map(m => m.requirement)),
+      ...(confirmedSkills || []),
+    ];
+    const allowedPhrases = this._uniqueDisplaySkills(
+      allowedSeed.flatMap(item => this._splitSkillLine(String(item || '')))
+    );
+
+    const compactItems = [];
+    for (const item of rawItems) {
+      const cleaned = this._cleanSkillItem(item);
+      if (this._isUsefulSkillItem(cleaned)) compactItems.push(cleaned);
+    }
+
+    for (const item of allowedPhrases) {
+      const cleaned = this._cleanSkillItem(item);
+      if (this._isUsefulSkillItem(cleaned)) compactItems.push(cleaned);
+    }
+
+    const unique = this._uniqueDisplaySkills(compactItems)
+      .filter(item => !this._isJdRequirementProse(item))
+      .slice(0, 18);
+
+    if (unique.length === 0) return [];
+    return unique.map(item => `- ${item}`);
+  }
+
+  _splitSkillLine(line) {
+    let text = String(line || '')
+      .replace(/\)\s*(?=[A-Z][A-Za-z ]{2,30}:)/g, ') ')
+      .replace(/([a-z)])(?=[A-Z][A-Za-z ]{2,30}:)/g, '$1, ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!text) return [];
+
+    const labelled = [...text.matchAll(/(?:^|[.;,]\s*)([A-Z][A-Za-z/& ]{2,40}):\s*([\s\S]*?)(?=(?:[.;,]\s*[A-Z][A-Za-z/& ]{2,40}:)|$)/g)];
+    if (labelled.length >= 2) {
+      return labelled.map(([, label, value]) => `${label.trim()}: ${value.trim()}`);
+    }
+
+    return text
+      .split(/\s*(?:;|\n|•)\s*/)
+      .flatMap(part => part.split(/\s*,\s+(?=[A-Z][A-Za-z/& ]{2,40}:)/))
+      .map(part => part.trim())
+      .filter(Boolean);
+  }
+
+  _cleanSkillItem(item) {
+    return String(item || '')
+      .replace(/^[-•*●▪◦–—]\s*/, '')
+      .replace(/\.\s*Strong experience with version control systems,\s*particularly\s+Git/gi, ', Git')
+      .replace(/\b(?:strong|solid|excellent|deep)\s+(?:knowledge|understanding|experience)\s+of\s+/gi, '')
+      .replace(/\bproficiency\s+in\s+/gi, '')
+      .replace(/\bexpertise\s+in\s+/gi, '')
+      .replace(/\bfamiliarity\s+with\s+/gi, '')
+      .replace(/\bexperience\s+with\s+/gi, '')
+      .replace(/\s+/g, ' ')
+      .replace(/\s+([),.;:])/g, '$1')
+      .replace(/[.,;]\s*$/, '')
+      .trim();
+  }
+
+  _isUsefulSkillItem(item) {
+    const text = String(item || '').trim();
+    if (!text || text.length < 2 || text.length > 140) return false;
+    if (this._isJdRequirementProse(text)) return false;
+    if (/^\(?\d+\s*(?:year|yr|month)/i.test(text)) return false;
+    if (/:\s*\(?\d+\s*(?:year|yr|month)/i.test(text)) return false;
+    if (/\b(?:bachelor|master|degree|related field|advanced degree|certification[s]?\s+in)\b/i.test(text)) return false;
+    return /[A-Za-z]/.test(text);
+  }
+
+  _isJdRequirementProse(item) {
+    const text = String(item || '').trim();
+    return text.length > 160
+      || /\b\d+\+?\s+years?\s+of\s+experience\b/i.test(text)
+      || /\bat least\s+\d+\s+years?\b/i.test(text)
+      || /\b(highly preferred|required|minimum qualifications?|related field)\b/i.test(text)
+      || /\bdeploying and managing\b/i.test(text)
+      || /\bor other relevant standards\b/i.test(text);
   }
 
   /** Find CV source snippets that mention the requirement. */
