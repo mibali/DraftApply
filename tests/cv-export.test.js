@@ -10,8 +10,13 @@ function loadFormatter() {
     textContent: '',
   };
   const sandbox = {
-    chrome: { storage: { local: { async get() { return {}; }, async remove() {} } } },
-    document: { getElementById() { return fakeEl; } },
+    chrome: {
+      storage: { local: { async get() { return {}; }, async remove() {} } },
+      tabs: { async getCurrent() { return null; }, async remove() {} },
+    },
+    document: { getElementById() { return { ...fakeEl, addEventListener() {} }; } },
+    window: { print() {}, close() {} },
+    URL,
     console,
   };
 
@@ -37,6 +42,22 @@ http://linkedin.com/in/michael-temitope-bali-830640171`);
     expect(html).toContain('href="http://linkedin.com/in/michael-temitope-bali-830640171"');
     expect(html).toContain('>LinkedIn</a>');
     expect(html).not.toContain('cv-body"><a href="http://linkedin.com/in/michael-temitope-bali-830640171"');
+  });
+
+  it('suppresses generated website links that are only email domains', () => {
+    const formatCvToHtml = loadFormatter();
+    const html = formatCvToHtml(`Michael T Bali
+Infra & MLOps Engineer
+Birmingham, UK
+mtbdesigns01@gmail.com || 07401731548
+http://linkedin.com/in/michael-temitope-bali-830640171
+http://gmail.com
+
+Professional Summary
+Cloud platform support experience.`);
+
+    expect(html).toContain('mtbdesigns01@gmail.com');
+    expect(html).not.toContain('http://gmail.com');
   });
 
   it('recognizes common generated CV headings as section headers', () => {

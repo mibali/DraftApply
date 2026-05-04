@@ -1,4 +1,17 @@
 (async () => {
+  document.getElementById('print-btn')?.addEventListener('click', () => window.print());
+  document.getElementById('close-btn')?.addEventListener('click', async () => {
+    try {
+      const tab = await chrome.tabs.getCurrent();
+      if (tab?.id) {
+        await chrome.tabs.remove(tab.id);
+        return;
+      }
+    } catch {}
+
+    window.close();
+  });
+
   const { tailoredCvExport } = await chrome.storage.local.get('tailoredCvExport');
   const loading = document.getElementById('loading');
   const content = document.getElementById('cv-content');
@@ -80,6 +93,19 @@ function extractSocialUrls(text) {
   return urls;
 }
 
+function extractEmailDomains(text) {
+  const emails = String(text || '').match(/[\w.+-]+@[\w-]+\.[\w.]+/g) || [];
+  return new Set(emails.map(email => email.split('@')[1]?.toLowerCase()).filter(Boolean));
+}
+
+function urlHost(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./i, '').toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
 function socialLabelUrl(line, socialUrls) {
   if (/^linkedin$/i.test(line) && socialUrls.linkedin) return { label: 'LinkedIn', url: socialUrls.linkedin };
   if (/^github$/i.test(line) && socialUrls.github) return { label: 'GitHub', url: socialUrls.github };
@@ -98,6 +124,7 @@ function formatCvToHtml(rawText) {
   // already inline in the text; we don't want them duplicated at the bottom.
   const socialUrls = extractSocialUrls(rawText);
   const knownSocialUrls = new Set(Object.values(socialUrls).filter(Boolean).map(normalizeUrl));
+  const emailDomains = extractEmailDomains(rawText);
   const mainText = rawText.replace(/\n\nLinks:\n[\s\S]+$/i, '').trim();
   const lines = mainText.split('\n');
 
@@ -147,6 +174,12 @@ function formatCvToHtml(rawText) {
         html += '<hr class="cv-header-rule">';
       }
       html += '<div class="cv-spacer"></div>';
+      continue;
+    }
+
+    // Some generated CVs inherit a bad "website" from the parser when an
+    // email domain is mistaken for a URL, e.g. mtbdesigns01@gmail.com → http://gmail.com.
+    if (/^https?:\/\//i.test(line) && emailDomains.has(urlHost(line))) {
       continue;
     }
 
