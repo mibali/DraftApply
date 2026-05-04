@@ -14,6 +14,20 @@
 
 const pendingRequests = new Map(); // requestId -> AbortController
 
+function rateLimitError(response) {
+  const resetHeader = response.headers.get('RateLimit-Reset') || response.headers.get('X-RateLimit-Reset');
+  if (resetHeader) {
+    const resetSec = Number(resetHeader);
+    if (!isNaN(resetSec) && resetSec > 1e9) {
+      const resetTime = new Date(resetSec * 1000);
+      const hh = resetTime.getHours().toString().padStart(2, '0');
+      const mm = resetTime.getMinutes().toString().padStart(2, '0');
+      return `Rate limit reached — you can try again at ${hh}:${mm}.`;
+    }
+  }
+  return 'Rate limit reached — please try again in up to 60 minutes.';
+}
+
 const DEFAULT_PROXY_URL = 'https://draftapply.onrender.com';
 
 async function getProxyUrl() {
@@ -104,7 +118,7 @@ async function ensureContentScriptInjected(tabId) {
     });
     await chrome.scripting.executeScript({
       target: { tabId, allFrames: true },
-      files: ['page-extractor.js', 'content.js']
+      files: ['stats.js', 'page-extractor.js', 'content.js']
     });
   } catch (err) {
     console.warn('Could not inject content script:', err.message);
@@ -343,6 +357,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             });
           }
 
+          if (response.status === 429) throw new Error(rateLimitError(response));
           if (!response.ok) {
             const err = await response.json().catch(() => ({}));
             throw new Error(err.error || `Error ${response.status}`);
@@ -399,6 +414,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           });
         }
 
+        if (response.status === 429) throw new Error(rateLimitError(response));
         if (!response.ok) {
           const err = await response.json().catch(() => ({}));
           throw new Error(err.error || `Error ${response.status}`);
@@ -456,7 +472,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (!mainFrameReady) {
         try {
           await chrome.scripting.insertCSS({ target: { tabId, frameIds: [0] }, files: ['content.css'] });
-          await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, files: ['page-extractor.js', 'content.js'] });
+          await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, files: ['stats.js', 'page-extractor.js', 'content.js'] });
         } catch { /* restricted page */ }
         // Brief delay for content script to initialize after fresh injection
         await new Promise(r => setTimeout(r, 300));

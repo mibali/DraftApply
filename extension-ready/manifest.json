@@ -51,7 +51,7 @@
         "https://*.glassdoor.com/*",
         "https://*.glassdoor.co.uk/*"
       ],
-      "js": ["page-extractor.js", "content.js"],
+      "js": ["stats.js", "page-extractor.js", "content.js"],
       "css": ["content.css"],
       "run_at": "document_idle",
       "all_frames": true

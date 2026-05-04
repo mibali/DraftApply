@@ -435,15 +435,22 @@ class PageExtractor {
   extractCleanPageText() {
     if (!document.body) return '';
 
-    const clone = document.body.cloneNode(true);
-    const removeSelectors = [
-      'script', 'style', 'nav', 'footer', 'header',
-      'aside', '.sidebar', '.navigation', '.menu',
-      '.cookie', '.popup', '.modal', '.ad', '.advertisement'
-    ];
-
-    for (const selector of removeSelectors) {
-      clone.querySelectorAll(selector).forEach(el => el.remove());
+    let bodyText = '';
+    try {
+      const clone = document.body.cloneNode(true);
+      const removeSelectors = [
+        'script', 'style', 'nav', 'footer', 'header',
+        'aside', '.sidebar', '.navigation', '.menu',
+        '.cookie', '.popup', '.modal', '.ad', '.advertisement'
+      ];
+      for (const selector of removeSelectors) {
+        clone.querySelectorAll(selector).forEach(el => el.remove());
+      }
+      bodyText = clone.textContent || '';
+    } catch {
+      // cloneNode can throw on pages with date/number inputs whose value attribute
+      // is "undefined" or out of range (e.g. Ashby application forms)
+      bodyText = document.body.innerText || document.body.textContent || '';
     }
 
     const shadowText = this.openRoots()
@@ -451,7 +458,7 @@ class PageExtractor {
       .map(root => root.textContent || '')
       .join('\n');
 
-    return this.cleanText(`${clone.textContent || ''}\n${shadowText}`);
+    return this.cleanText(`${bodyText}\n${shadowText}`);
   }
 
   /**

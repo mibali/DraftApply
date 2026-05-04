@@ -30,6 +30,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     pageStatusText:  document.getElementById('page-status-text'),
     activateBtn:     document.getElementById('activate-btn'),
     tailorOpenBtn:   document.getElementById('tailor-open-btn'),
+    statsCard:       document.getElementById('stats-card'),
+    statsToggle:     document.getElementById('stats-toggle'),
+    statsSummary:    document.getElementById('stats-summary'),
+    statsDetails:    document.getElementById('stats-details'),
+    statsAnswers:    document.getElementById('stats-answers'),
+    statsExports:    document.getElementById('stats-exports'),
+    statsTailored:   document.getElementById('stats-tailored'),
+    statsSaved:      document.getElementById('stats-saved'),
+    statsWeek:       document.getElementById('stats-week'),
+    statsStreak:     document.getElementById('stats-streak'),
+    statsTopAction:  document.getElementById('stats-top-action'),
+    statsResetBtn:   document.getElementById('stats-reset-btn'),
     // Tailor view
     mainView:              document.getElementById('main-view'),
     tailorView:            document.getElementById('tailor-view'),
@@ -75,12 +87,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   // If the value changes while a request is in flight, the response is discarded.
   let analyzeToken = 0;
   let savingDraftTimer = null;
+  let statsResetTimer = null;
 
   // Load saved state
   await loadState();
   await checkProxy();
   await checkPageStatus();
   await restoreTailorDraft();
+  await refreshStatsUI();
 
   // ── Event listeners ──────────────────────────────────────────────────────
 
@@ -99,6 +113,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   elements.tailorRedoBtn.addEventListener('click', runTailorCV);
   elements.tailorCopyBtn.addEventListener('click', copyTailoredCV);
   elements.tailorPdfBtn.addEventListener('click', downloadAsPdf);
+  elements.statsToggle.addEventListener('click', toggleStatsCard);
+  elements.statsResetBtn.addEventListener('click', resetStatsWithConfirm);
 
   // Reset analysis when JD inputs change
   elements.tailorJd.addEventListener('input', handleTailorDraftInput);
@@ -130,6 +146,48 @@ document.addEventListener('DOMContentLoaded', async () => {
   async function loadState() {
     const response = await chrome.runtime.sendMessage({ type: 'GET_CV' });
     if (response.cvText) showCVLoaded(response.cvText);
+  }
+
+  async function refreshStatsUI() {
+    const helper = window.DraftApplyStats;
+    if (!helper) return;
+
+    const stats = await helper.read();
+    const summary = helper.summarize(stats);
+    elements.statsSummary.textContent = summary.summaryText;
+    elements.statsAnswers.textContent = String(summary.answersInserted);
+    elements.statsExports.textContent = String(summary.cvExports);
+    elements.statsTailored.textContent = String(summary.cvsTailored);
+    elements.statsSaved.textContent = summary.timeSavedLabel;
+    elements.statsWeek.textContent = String(summary.thisWeekCount);
+    elements.statsStreak.textContent = `${summary.assistStreakDays} ${summary.assistStreakDays === 1 ? 'day' : 'days'}`;
+    elements.statsTopAction.textContent = summary.topActionLabel;
+  }
+
+  function toggleStatsCard() {
+    const expanded = elements.statsDetails.hidden;
+    elements.statsDetails.hidden = !expanded;
+    elements.statsToggle.setAttribute('aria-expanded', String(expanded));
+    elements.statsCard.classList.toggle('expanded', expanded);
+  }
+
+  async function resetStatsWithConfirm() {
+    if (elements.statsResetBtn.dataset.confirming === 'true') {
+      clearTimeout(statsResetTimer);
+      elements.statsResetBtn.dataset.confirming = 'false';
+      elements.statsResetBtn.textContent = 'Reset stats';
+      await window.DraftApplyStats?.reset?.();
+      await refreshStatsUI();
+      return;
+    }
+
+    elements.statsResetBtn.dataset.confirming = 'true';
+    elements.statsResetBtn.textContent = 'Confirm reset';
+    clearTimeout(statsResetTimer);
+    statsResetTimer = setTimeout(() => {
+      elements.statsResetBtn.dataset.confirming = 'false';
+      elements.statsResetBtn.textContent = 'Reset stats';
+    }, 4000);
   }
 
   async function checkProxy() {
@@ -499,6 +557,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       displayTailorResults(result);
       await saveTailorDraft();
+      await window.DraftApplyStats?.track?.('cvsTailored');
+      await refreshStatsUI();
     } catch (e) {
       showTailorMessage('Something went wrong: ' + e.message, 'error');
     } finally {
@@ -665,6 +725,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!text) return;
     await chrome.storage.local.set({ tailoredCvExport: text });
     chrome.tabs.create({ url: chrome.runtime.getURL('cv-export.html') });
+    await window.DraftApplyStats?.track?.('cvExports');
+    await refreshStatsUI();
   }
 
   function showTailorMessage(text, type = 'success') {
