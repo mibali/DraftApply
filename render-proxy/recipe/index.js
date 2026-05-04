@@ -211,15 +211,16 @@ function detectQuestionType(question) {
     )
   ) return 'why_company';
 
+  // Salary / compensation questions need a concrete number or range. They are
+  // not CV-story questions, even when the modal has job context available.
+  if (isSalaryQuestion(q)) return 'salary';
+
   // Short factual — about candidate's current situation
   if (
     /notice\s*period/.test(q) ||
     /\bstart\s+date\b/.test(q) ||
     /when\s+(can|could|are)\s+you\s+(start|available|join)/.test(q) ||
     /\bavailability\b/.test(q) ||
-    /salary\s*(expectation|requirement|expect)/.test(q) ||
-    /expected\s+salary/.test(q) ||
-    /current\s+salary/.test(q) ||
     /right\s+to\s+work/.test(q) ||
     /work\s*authori[sz]ation/.test(q) ||
     /\bvisa\s+(status|type|sponsorship)\b/.test(q) ||
@@ -272,6 +273,19 @@ function detectQuestionType(question) {
   return 'general';
 }
 
+function isSalaryQuestion(question) {
+  const q = String(question || '').toLowerCase();
+  return (
+    /\b(salary|compensation|pay|remuneration)\b/.test(q) ||
+    /\b(hourly|daily|monthly|annual|yearly)\s+(rate|pay|salary)\b/.test(q) ||
+    /\brate\s+(expectation|requirement|range|desired|expected)s?\b/.test(q)
+  ) && (
+    /\b(expectation|expectations|requirement|requirements|expected|desired|target|current|range|minimum|min|max|maximum)\b/.test(q) ||
+    /\bwhat\s+(salary|compensation|pay|rate)\b/.test(q) ||
+    /\bhow\s+much\b/.test(q)
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Plain-field data extraction (name, email, LinkedIn, phone, etc.)
 // ---------------------------------------------------------------------------
@@ -310,7 +324,6 @@ function isDataExtractionQuestion(question) {
     /^nationality$/i,
     /^visa\s*status$/i,
     /^work\s*authori[sz]ation$/i,
-    /^salary/i,
     /^notice\s*period$/i,
     /^availability$/i,
     /^start\s*date$/i,
@@ -358,6 +371,51 @@ Rules:
   const cvContext = getCvContext(cvText, 40000);
   const userPrompt = `CV:\n${cvContext}\n\nQuestion: ${question}\n\nAnswer in 1-2 sentences about the candidate's current situation.`;
   return { systemPrompt, userPrompt, temperature: 0.1, maxTokens: 120 };
+}
+
+function buildSalaryPrompt(cvText, question, jobCtx, jobTitle) {
+  const q = String(question || '').toLowerCase();
+  const asksMonthly = /\b(monthly|per\s+month|\/\s*month|pcm)\b/.test(q);
+  const asksAnnual = /\b(annual|annually|yearly|per\s+year|\/\s*year|base\s+salary)\b/.test(q);
+  const asksHourly = /\b(hourly|per\s+hour|\/\s*hour|hourly\s+rate)\b/.test(q);
+  const asksDaily = /\b(daily|day\s+rate|per\s+day|\/\s*day)\b/.test(q);
+  const currency = /\b(usd|us\$|\$)\b/.test(q) ? 'USD'
+    : /\b(gbp|gb£|£)\b/.test(q) ? 'GBP'
+      : /\b(eur|€)\b/.test(q) ? 'EUR'
+        : 'the local currency';
+
+  const period = asksMonthly ? 'monthly'
+    : asksHourly ? 'hourly'
+      : asksDaily ? 'daily'
+        : asksAnnual ? 'annual'
+          : 'the period requested by the form';
+
+  const systemPrompt = `You are this candidate completing a salary expectation field in a job application.
+
+This is a SALARY / COMPENSATION question. The answer must be a direct number or range, not a career summary.
+
+Rules:
+- Start with the salary expectation in the first words.
+- Use ${currency}; use a ${period} figure if the question asks for one.
+- If the question asks for monthly USD, answer as "$X-$Y per month".
+- Keep it to 1 sentence unless a very short note about negotiability is useful.
+- Do NOT mention previous employers, role history, projects, skills, or CV details.
+- Do NOT say "As a seasoned professional", "based on my experience", or any similar preamble.
+- Do NOT avoid the question with "open to discussion" alone; give a concrete range.
+- If exact market data is uncertain, give a reasonable professional range and say it is negotiable.`;
+
+  const cvContext = getCvContext(cvText, 12000);
+  let userPrompt = `MY CV, for seniority context only. Do not summarize it in the answer:\n${cvContext}\n\n`;
+  if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
+  userPrompt += `Question: ${question}
+
+Write only the answer to paste into the form. It must contain a concrete ${currency} ${period} salary range and no CV narrative.`;
+
+  if (jobTitle) {
+    userPrompt += ` Use the ${jobTitle} role as the market anchor.`;
+  }
+
+  return { systemPrompt, userPrompt, temperature: 0.2, maxTokens: 90 };
 }
 
 function buildYesNoPrompt(cvText, question, jobCtx, candidateName, tone) {
@@ -653,6 +711,9 @@ export function buildPrompts(input) {
 
   let result;
   switch (qType) {
+    case 'salary':
+      result = buildSalaryPrompt(cvText, question, jobCtx, jobTitle);
+      break;
     case 'short_factual':
       result = buildShortFactualPrompt(cvText, question);
       break;
