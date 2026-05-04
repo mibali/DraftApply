@@ -14,6 +14,20 @@
 
 const pendingRequests = new Map(); // requestId -> AbortController
 
+function rateLimitError(response) {
+  const resetHeader = response.headers.get('RateLimit-Reset') || response.headers.get('X-RateLimit-Reset');
+  if (resetHeader) {
+    const resetSec = Number(resetHeader);
+    if (!isNaN(resetSec) && resetSec > 1e9) {
+      const resetTime = new Date(resetSec * 1000);
+      const hh = resetTime.getHours().toString().padStart(2, '0');
+      const mm = resetTime.getMinutes().toString().padStart(2, '0');
+      return `Rate limit reached — you can try again at ${hh}:${mm}.`;
+    }
+  }
+  return 'Rate limit reached — please try again in up to 60 minutes.';
+}
+
 const DEFAULT_PROXY_URL = 'https://draftapply.onrender.com';
 
 async function getProxyUrl() {
@@ -343,6 +357,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             });
           }
 
+          if (response.status === 429) throw new Error(rateLimitError(response));
           if (!response.ok) {
             const err = await response.json().catch(() => ({}));
             throw new Error(err.error || `Error ${response.status}`);
@@ -399,6 +414,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           });
         }
 
+        if (response.status === 429) throw new Error(rateLimitError(response));
         if (!response.ok) {
           const err = await response.json().catch(() => ({}));
           throw new Error(err.error || `Error ${response.status}`);
