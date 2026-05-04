@@ -602,6 +602,7 @@ async function handleStreamingAPICall(payload, requestId, tabId, frameId) {
       response = await doRequest();
     }
 
+    if (response.status === 429) throw new Error(rateLimitError(response));
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
       throw new Error(err.error || `Proxy error: ${response.status}`);
@@ -707,6 +708,7 @@ async function handleAPICall(payload, requestId) {
       response = await doRequest();
     }
 
+    if (response.status === 429) throw new Error(rateLimitError(response));
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
       const msg = error.error || `Proxy error: ${response.status}`;
