@@ -350,6 +350,8 @@ function formatCvToHtml(rawText) {
   // True immediately after emitting an entry row, so the next short line → cv-job-title
   let afterEntryRow = false;
   let openEntry = false;
+  // Prevent duplicate Focus: lines — LLMs sometimes emit one per sub-section
+  let focusEmitted = false;
 
   const closeList = () => {
     if (listOpen) { html += '</ul>'; listOpen = false; }
@@ -364,6 +366,7 @@ function formatCvToHtml(rawText) {
     closeEntry();
     html += '<div class="cv-entry">';
     openEntry = true;
+    focusEmitted = false;
     html += '<div class="cv-entry-row">';
     html += `<span class="cv-company">${esc(company)}</span>`;
     if (dates) html += `<span class="cv-entry-dates">${esc(dates)}</span>`;
@@ -509,6 +512,8 @@ function formatCvToHtml(rawText) {
       afterEntryRow = false;
 
       if (/^focus\s*:/i.test(line)) {
+        if (focusEmitted) continue; // skip duplicate Focus: lines for the same entry
+        focusEmitted = true;
         html += `<p class="cv-role-focus">${esc(line)}</p>`;
         continue;
       }
