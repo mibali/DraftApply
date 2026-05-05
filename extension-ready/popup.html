@@ -311,7 +311,7 @@
       padding: 9px 14px;
       font-size: 12px;
       color: #64748b;
-      max-height: 52px;
+      max-height: 72px;
       overflow: hidden;
       line-height: 1.5;
       background: #fbfcfe;
@@ -509,7 +509,7 @@
       border-top-color: #2563eb;
       border-right-color: #7c3aed;
       border-radius: 50%;
-      animation: tailor-spin 0.8s linear infinite;
+      animation: tailor-spin 0.75s cubic-bezier(0.4, 0, 0.2, 1) infinite;
       margin: 0 auto;
     }
 
@@ -587,7 +587,7 @@
     .match-chip {
       padding: 4px 8px;
       border-radius: 8px;
-      font-size: 11px;
+      font-size: 12px;
       font-weight: 500;
       line-height: 1.25;
     }
@@ -816,6 +816,25 @@
       cursor: not-allowed;
       transform: none !important;
       box-shadow: none !important;
+    }
+
+    .btn:disabled:hover {
+      transform: none !important;
+      box-shadow: none !important;
+    }
+
+    /* Keyboard focus indicators */
+    .btn:focus-visible {
+      outline: 2px solid #2563eb;
+      outline-offset: 2px;
+    }
+
+    .cv-change-btn:focus-visible,
+    .tailor-back-btn:focus-visible,
+    .stats-reset-btn:focus-visible {
+      outline: 2px solid #2563eb;
+      outline-offset: 2px;
+      border-radius: 4px;
     }
   </style>
 </head>

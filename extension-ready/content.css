@@ -126,7 +126,7 @@
 }
 
 .da-context-badge {
-  font-size: 11px;
+  font-size: 12px;
   padding: 4px 8px;
   background: rgba(255, 255, 255, 0.2);
   border-radius: 12px;
@@ -269,7 +269,7 @@
   border: 1px solid #e2e8f0;
   border-radius: 8px;
   min-height: 120px;
-  max-height: 260px;
+  max-height: 300px;
   font-size: 14px;
   line-height: 1.6;
   color: #1e293b;
@@ -303,6 +303,11 @@
 .da-char-counter.da-char-over {
   color: #ef4444;
   font-weight: 600;
+}
+
+.da-answer-output.da-char-over {
+  border-color: #ef4444;
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.12);
 }
 
 .da-modal-actions {
@@ -388,7 +393,7 @@
   padding: 6px 8px;
   border: none;
   border-radius: 6px;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
   cursor: pointer;
   background: transparent;
@@ -446,6 +451,17 @@
   cursor: pointer;
   transition: opacity 0.2s, transform 0.15s, box-shadow 0.15s;
   font-family: inherit;
+}
+
+.da-btn:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+.da-length-pill:focus-visible,
+.da-tone-pill:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 1px;
 }
 
 .da-btn-regenerate {
@@ -525,7 +541,7 @@
   border-top-color: #2563eb;
   border-right-color: #7c3aed;
   border-radius: 50%;
-  animation: da-spin 0.8s linear infinite;
+  animation: da-spin 0.75s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }
 
 @keyframes da-spin {
@@ -569,8 +585,9 @@
 }
 
 .da-field-btn-overlay:hover {
-  transform: scale(1.12);
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.2), 0 4px 10px rgba(124, 58, 237, 0.25);
+  transform: scale(1.08);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.18), 0 4px 10px rgba(124, 58, 237, 0.22);
+  transition: opacity 0.15s ease, transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.18s ease;
 }
 
 /* Notification */
