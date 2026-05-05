@@ -88,6 +88,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   let analyzeToken = 0;
   let savingDraftTimer = null;
   let statsResetTimer = null;
+  let messageTimer = null;
+  let tailorMessageTimer = null;
 
   // ── Event listeners ──────────────────────────────────────────────────────
 
@@ -300,9 +302,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       showMessage('Please enter more CV content', 'error');
       return;
     }
-    await chrome.runtime.sendMessage({ type: 'SAVE_CV', cvText: text });
-    showCVLoaded(text);
-    showMessage('CV saved successfully');
+    elements.saveCvBtn.disabled = true;
+    elements.saveCvBtn.textContent = 'Saving…';
+    try {
+      await chrome.runtime.sendMessage({ type: 'SAVE_CV', cvText: text });
+      showCVLoaded(text);
+      showMessage('CV saved successfully');
+    } finally {
+      elements.saveCvBtn.disabled = false;
+      elements.saveCvBtn.textContent = 'Save CV';
+    }
   }
 
   function showCVLoaded(text) {
@@ -331,10 +340,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function showMessage(text, type = 'success') {
+    clearTimeout(messageTimer);
     elements.message.textContent = text;
     elements.message.className = 'message' + (type === 'error' ? ' error' : '');
     elements.message.hidden = false;
-    setTimeout(() => { elements.message.hidden = true; }, 4000);
+    messageTimer = setTimeout(() => { elements.message.hidden = true; }, 4000);
   }
 
   async function checkPageStatus() {
@@ -383,6 +393,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // ── Tailor CV flow ────────────────────────────────────────────────────────
 
   function openTailorView() {
+    analyzeToken++; // discard any in-flight response from a previous session
     elements.mainView.hidden = true;
     elements.tailorView.hidden = false;
     elements.tailorResults.hidden = true;
@@ -401,6 +412,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   function closeTailorView() {
     elements.tailorView.hidden = true;
     elements.mainView.hidden = false;
+    // Clear generated output so re-opening shows a clean state
+    elements.tailorOutputWrap.hidden = true;
+    elements.tailorActionRow.hidden = true;
+    elements.tailorOutput.value = '';
+    elements.tailorWarningsBox.hidden = true;
+    elements.tailorMessage.hidden = true;
   }
 
   async function restoreTailorDraft() {
@@ -479,6 +496,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     elements.tailorAnalyzeBtn.disabled = true;
     elements.tailorAnalyzeBtn.textContent = 'Analyzing…';
+    elements.tailorReanalyzeBtn.disabled = true;
     elements.tailorReanalyzeBtn.style.display = 'none';
     elements.tailorLoading.hidden = false;
     elements.tailorLoadingText.textContent = 'Analyzing job description…';
@@ -522,6 +540,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         elements.tailorLoading.hidden = true;
         elements.tailorAnalyzeBtn.disabled = false;
         elements.tailorAnalyzeBtn.textContent = 'Analyze JD';
+        elements.tailorReanalyzeBtn.disabled = false;
       }
     }
   }
@@ -535,6 +554,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     elements.tailorGenerateBtn.disabled = true;
     elements.tailorGenerateBtn.textContent = 'Generating…';
+    elements.tailorRedoBtn.disabled = true;
     elements.tailorLoading.hidden = false;
     elements.tailorLoadingText.textContent = 'Tailoring your CV…';
     elements.tailorLoadingSub.textContent = 'This takes 15–30 seconds';
@@ -568,6 +588,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       elements.tailorLoading.hidden = true;
       elements.tailorGenerateBtn.disabled = false;
       elements.tailorGenerateBtn.textContent = 'Generate Tailored CV';
+      elements.tailorRedoBtn.disabled = false;
     }
   }
 
@@ -737,10 +758,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function showTailorMessage(text, type = 'success') {
+    clearTimeout(tailorMessageTimer);
     elements.tailorMessage.textContent = text;
     elements.tailorMessage.className = 'message' + (type === 'error' ? ' error' : '');
     elements.tailorMessage.hidden = false;
-    setTimeout(() => { elements.tailorMessage.hidden = true; }, 5000);
+    tailorMessageTimer = setTimeout(() => { elements.tailorMessage.hidden = true; }, 5000);
   }
 
   function esc(str) {

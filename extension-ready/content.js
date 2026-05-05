@@ -207,7 +207,7 @@ class DraftApplyExtension {
             </div>
           </div>
         </div>
-        <div class="da-loading" id="da-loading" hidden>
+        <div class="da-loading" id="da-loading" hidden role="status" aria-label="Generating answer">
           <div class="da-spinner"></div>
           <span id="da-loading-text">Generating answer…</span>
           <button class="da-btn da-btn-stop" id="da-btn-stop" type="button">Stop</button>
@@ -687,14 +687,20 @@ class DraftApplyExtension {
   _updateCharCounter() {
     const maxLen = this.currentFieldMaxLength;
     const counter = this.modal?.querySelector('#da-char-counter');
+    const outputEl = this.modal?.querySelector('#da-answer-output');
     if (!counter) return;
-    if (!maxLen) { counter.hidden = true; return; }
-    const text = this.modal.querySelector('#da-answer-output')?.value || '';
+    if (!maxLen) {
+      counter.hidden = true;
+      outputEl?.classList.remove('da-char-over');
+      return;
+    }
+    const text = outputEl?.value || '';
     const count = text.length;
     const over = count > maxLen;
     counter.hidden = false;
     counter.textContent = `${count} / ${maxLen} characters`;
     counter.className = over ? 'da-char-counter da-char-over' : 'da-char-counter';
+    outputEl?.classList.toggle('da-char-over', over);
   }
 
   findFieldLabel(field) {
@@ -818,8 +824,14 @@ class DraftApplyExtension {
       const result = await chrome.runtime.sendMessage({ type: 'CALL_API', requestId: null, payload });
       cacheEntry.answer = result?.answer || result?.text || result?.content || null;
       cacheEntry.status = cacheEntry.answer ? 'ready' : 'error';
-      // Also store by question string so re-rendered React fields can still hit the cache
-      if (cacheEntry.answer) this._prefetchByQuestion.set(question, cacheEntry.answer);
+      // Also store by question string so re-rendered React fields can still hit the cache.
+      // Cap at 20 entries (LRU-evict oldest) to prevent unbounded memory growth.
+      if (cacheEntry.answer) {
+        this._prefetchByQuestion.set(question, cacheEntry.answer);
+        if (this._prefetchByQuestion.size > 20) {
+          this._prefetchByQuestion.delete(this._prefetchByQuestion.keys().next().value);
+        }
+      }
       if (btn?.isConnected) {
         btn.classList.remove('da-btn-prefetching');
         if (cacheEntry.status === 'ready') btn.classList.add('da-btn-ready');
@@ -882,6 +894,9 @@ class DraftApplyExtension {
       'backdrop-filter:blur(4px) !important;visibility:visible !important;' +
       'opacity:1 !important;pointer-events:auto !important;'
     );
+
+    // Move focus into the modal so keyboard users can interact immediately
+    setTimeout(() => modal.querySelector('#da-question-preview')?.focus(), 60);
   }
 
   hideModal() {
