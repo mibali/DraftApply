@@ -179,6 +179,28 @@ Open `http://localhost:3001`
 | Marquee (1400x560) | `store-assets/marquee-promo-1400x560.png` |
 | Screenshots (1280x800) | `store-assets/screenshot-*.png` |
 
+## Chrome Web Store release
+
+Public Chrome users only receive updates after a new Chrome Web Store package is uploaded and reviewed.
+
+```bash
+npm run release:chrome          # test + package only
+npm run release:chrome:upload   # upload package to Chrome Web Store
+npm run release:chrome:publish  # upload and submit for review
+```
+
+Before releasing, bump `extension-ready/manifest.json` and commit the change. The release script creates `dist/draftapply-chrome-<version>.zip` from the contents of `extension-ready/`.
+
+For automated releases, set these GitHub Actions secrets:
+
+- `CHROME_CLIENT_ID`
+- `CHROME_CLIENT_SECRET`
+- `CHROME_REFRESH_TOKEN`
+- `CHROME_EXTENSION_ID`
+- `CHROME_PUBLISHER_ID`
+
+Creating a tag like `v2.0.1` runs `.github/workflows/chrome-web-store-release.yml`, uploads the extension package, and submits it for Chrome Web Store review.
+
 ## Troubleshooting
 
 | Issue | Fix |

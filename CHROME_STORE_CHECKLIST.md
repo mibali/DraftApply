@@ -25,6 +25,17 @@
 
 ## Packaging
 
-- [ ] Zip the `extension-ready/` folder contents (not the parent folder)
-- [ ] Upload to Chrome Web Store
+- [ ] Bump `extension-ready/manifest.json` version before every public release
+- [ ] Run `npm run release:chrome` to test and create `dist/draftapply-chrome-<version>.zip`
+- [ ] Upload manually, or run `npm run release:chrome:upload` with Chrome Web Store API credentials
+- [ ] Submit manually, or run `npm run release:chrome:publish` to upload and submit for review
 
+## Automated release secrets
+
+Set these as GitHub Actions secrets before using `.github/workflows/chrome-web-store-release.yml`:
+
+- `CHROME_CLIENT_ID`
+- `CHROME_CLIENT_SECRET`
+- `CHROME_REFRESH_TOKEN`
+- `CHROME_EXTENSION_ID`
+- `CHROME_PUBLISHER_ID`

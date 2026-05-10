@@ -1,0 +1,62 @@
+name: Chrome Web Store release
+
+on:
+  workflow_dispatch:
+    inputs:
+      submit_for_review:
+        description: 'Submit uploaded package for Chrome Web Store review'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    name: Package and upload extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Node
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Package extension
+        run: npm run release:chrome
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: draftapply-chrome-package
+          path: dist/*.zip
+          if-no-files-found: error
+
+      - name: Upload to Chrome Web Store
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.submit_for_review == 'false'
+        env:
+          CHROME_CLIENT_ID: ${{ secrets.CHROME_CLIENT_ID }}
+          CHROME_CLIENT_SECRET: ${{ secrets.CHROME_CLIENT_SECRET }}
+          CHROME_REFRESH_TOKEN: ${{ secrets.CHROME_REFRESH_TOKEN }}
+          CHROME_EXTENSION_ID: ${{ secrets.CHROME_EXTENSION_ID }}
+          CHROME_PUBLISHER_ID: ${{ secrets.CHROME_PUBLISHER_ID }}
+        run: npm run release:chrome:upload -- --skip-tests
+
+      - name: Upload and submit to Chrome Web Store
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.submit_for_review == 'true')
+        env:
+          CHROME_CLIENT_ID: ${{ secrets.CHROME_CLIENT_ID }}
+          CHROME_CLIENT_SECRET: ${{ secrets.CHROME_CLIENT_SECRET }}
+          CHROME_REFRESH_TOKEN: ${{ secrets.CHROME_REFRESH_TOKEN }}
+          CHROME_EXTENSION_ID: ${{ secrets.CHROME_EXTENSION_ID }}
+          CHROME_PUBLISHER_ID: ${{ secrets.CHROME_PUBLISHER_ID }}
+        run: npm run release:chrome:publish -- --skip-tests
