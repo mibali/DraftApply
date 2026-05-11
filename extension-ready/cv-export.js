@@ -50,6 +50,7 @@ function stripJobTitleLabel(line) {
 }
 
 function isSectionHeader(line) {
+  if (/^[\-•*●▪◦–—]\s/.test(line)) return false; // bullet lines are never section headers
   if (SECTION_RE.test(line)) return true;
   // ALL CAPS line that reads as a heading
   if (line.length >= 3 && line === line.toUpperCase() && /[A-Z]/.test(line) && !/[@+\d\/]/.test(line)) return true;
