@@ -484,8 +484,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   async function runAnalyzeCV() {
-    const jd = elements.tailorJd.value.trim();
-    if (jd.length < 50) {
+    const rawJd = elements.tailorJd.value.trim();
+    if (rawJd.length < 50) {
       showTailorMessage('Please paste a job description (at least a few lines)', 'error');
       return;
     }
@@ -499,11 +499,30 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.tailorReanalyzeBtn.disabled = true;
     elements.tailorReanalyzeBtn.style.display = 'none';
     elements.tailorLoading.hidden = false;
-    elements.tailorLoadingText.textContent = 'Analyzing job description…';
-    elements.tailorLoadingSub.textContent = 'Matching against your CV';
     elements.tailorResults.hidden = true;
     elements.tailorMessage.hidden = true;
-    setStep('paste'); // keep at step 1 while loading
+    setStep('paste');
+
+    // For full job postings, strip boilerplate before analyzing
+    let jd = rawJd;
+    if (rawJd.length > 500) {
+      elements.tailorLoadingText.textContent = 'Extracting job requirements…';
+      elements.tailorLoadingSub.textContent = 'Filtering out company blurb and boilerplate';
+      try {
+        const extracted = await chrome.runtime.sendMessage({ type: 'EXTRACT_JD', text: rawJd });
+        if (myToken !== analyzeToken) return;
+        if (extracted?.extractedText?.trim()) {
+          jd = extracted.extractedText;
+          elements.tailorJd.value = jd;
+          await saveTailorDraft();
+        }
+      } catch {
+        // Fall back to raw text silently
+      }
+    }
+
+    elements.tailorLoadingText.textContent = 'Analyzing job description…';
+    elements.tailorLoadingSub.textContent = 'Matching against your CV';
 
     try {
       const result = await chrome.runtime.sendMessage({

@@ -377,6 +377,45 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === 'EXTRACT_JD') {
+    (async () => {
+      try {
+        const proxyUrl = await getProxyUrl();
+        let token = await ensureInstallToken(proxyUrl);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30000);
+
+        const doRequest = () => fetch(`${proxyUrl}/api/jd/extract`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          signal: controller.signal,
+          body: JSON.stringify({ text: message.text }),
+        });
+
+        try {
+          let response = await doRequest();
+          if (response.status === 401) {
+            await clearInstallToken();
+            token = await ensureInstallToken(proxyUrl);
+            response = await doRequest();
+          }
+          if (!response.ok) {
+            const err = await response.json().catch(() => ({}));
+            throw new Error(err.error || `Error ${response.status}`);
+          }
+          const data = await response.json();
+          sendResponse({ success: true, extractedText: data.extractedText });
+        } finally {
+          clearTimeout(timeout);
+        }
+      } catch (e) {
+        if (e?.name === 'AbortError') sendResponse({ error: 'Extraction timed out' });
+        else sendResponse({ error: e.message });
+      }
+    })();
+    return true;
+  }
+
   if (message.type === 'ANALYZE_CV_MATCH') {
     (async () => {
       try {
