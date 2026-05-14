@@ -285,6 +285,91 @@ app.post('/api/generate', async (req, res) => {
 });
 
 /**
+ * Job Description Extraction endpoint
+ * Strips company blurb, benefits, and EEO boilerplate from a full job posting,
+ * returning only responsibilities, required qualifications, and technical skills.
+ */
+app.post('/api/jd/extract', async (req, res) => {
+  try {
+    const { text, llmConfig } = req.body || {};
+
+    if (!text || text.trim().length < 100) {
+      return res.status(400).json({ error: 'text must be at least 100 characters' });
+    }
+
+    const normalizedText = text.trim();
+    if (normalizedText.length > 60000) {
+      return res.status(413).json({ error: 'Job posting is too large. Please paste a shorter posting.' });
+    }
+
+    const systemPrompt = `You are a job posting parser. Extract only the job-relevant content from a full job posting.
+
+Return ONLY these sections (when present):
+- Responsibilities / What you will do
+- Required qualifications / Minimum requirements
+- Preferred qualifications / Nice to have
+- Required technical skills and tools
+
+Remove completely:
+- Company descriptions, mission statements, values, culture blurbs
+- Benefits, compensation, equity, perks
+- Equal opportunity / EEO statements
+- Application instructions or "how to apply" sections
+- "About us" or "Who we are" sections
+
+Preserve the original bullet point structure and section headings. Output only the extracted content with no preamble, no commentary, and no markdown code fences.`;
+
+    const userPrompt = `Extract the job requirements from this posting:\n\n${normalizedText}`;
+
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ];
+    const options = { temperature: 0.1, max_tokens: 2000 };
+
+    let userProviderName = null;
+    let userProviderConfig = null;
+    if (llmConfig?.provider && llmConfig?.apiKey && PROVIDERS[llmConfig.provider]) {
+      userProviderName = llmConfig.provider;
+      userProviderConfig = {
+        ...PROVIDERS[llmConfig.provider],
+        apiKey: llmConfig.apiKey,
+        model: llmConfig.model || PROVIDERS[llmConfig.provider].defaultModel
+      };
+    }
+
+    let result;
+    if (userProviderName && userProviderConfig) {
+      try {
+        result = await generate(userProviderName, userProviderConfig, messages, options);
+        result.provider = userProviderName;
+      } catch (e) {
+        console.warn(`[JD Extract] User provider ${userProviderName} failed, falling back:`, e.message);
+      }
+    }
+
+    if (!result) {
+      if (USE_FALLBACK && FALLBACK_CHAIN.length > 1) {
+        result = await generateWithFallback(FALLBACK_CHAIN, messages, options);
+      } else {
+        result = await generate(PROVIDER_NAME, PROVIDER_CONFIG, messages, options);
+        result.provider = PROVIDER_NAME;
+      }
+    }
+
+    const extractedText = result.answer?.trim();
+    if (!extractedText) {
+      return res.status(502).json({ error: 'No output from provider' });
+    }
+
+    res.json({ extractedText });
+  } catch (error) {
+    console.error('JD extract error:', error);
+    res.status(500).json({ error: 'Failed to extract job description', details: error.message });
+  }
+});
+
+/**
  * Direct text-based CV input
  */
 app.post('/api/cv/text', (req, res) => {

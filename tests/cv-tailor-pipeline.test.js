@@ -85,7 +85,9 @@ Senior Technical Support Engineer
     expect(text).not.toMatch(/Bachelor.*related field/i);
     expect(text).not.toMatch(/deploying and managing AI, ML models/i);
     expect(bulletTexts.every(item => item.length <= 160)).toBe(true);
-    expect(bulletTexts).toContain('Containerization and Orchestration: Docker, Kubernetes');
-    expect(bulletTexts.some(item => /Programming & Scripting: .*Python.*Bash.*Terraform.*Git/.test(item))).toBe(true);
+    expect(bulletTexts.some(item => /Model Serving & Infrastructure: .*Docker.*Kubernetes/.test(item))).toBe(true);
+    expect(bulletTexts.some(item => /Programming & Automation: .*Python.*Bash/.test(item))).toBe(true);
+    expect(text).toMatch(/\bTerraform\b/);
+    expect(text).toMatch(/\bGit\b/);
   });
 });

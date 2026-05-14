@@ -104,6 +104,39 @@ const INFRA_MLOPS_JD = {
   dealBreakers: [],
 };
 
+const GOOGLE_FDE_JD = {
+  jobTitle: 'Forward Deployed Engineering Manager, GenAI, Google Cloud',
+  company: 'Google',
+  seniority: 'senior/executive',
+  requiredSkills: [
+    'cloud computing',
+    'technical customer-facing role',
+    'Python',
+    'AI/Generative AI solutions',
+    'multi-agent workflows',
+    'RAG systems',
+    'people management',
+  ],
+  preferredSkills: [
+    'data sovereignty',
+    'secure governance',
+    'context engineering',
+    'transparency',
+    'explainability',
+    'ReAct',
+    'tool-calling protocols',
+  ],
+  tools: ['Google Cloud', 'Vertex AI', 'Python', 'Go', 'ReAct'],
+  responsibilities: [
+    'Serve as the ultimate technical lead',
+    'Partner with sales and tech leadership',
+    'Lead technical hiring for FDE',
+    'Identify skill gaps in emerging tech',
+  ],
+  atsKeywords: ['genai', 'forward deployed engineering', 'google cloud', 'vertex ai'],
+  dealBreakers: [],
+};
+
 // Builds a faithful tailored CV preserving all locked fields
 function faithfulTailoring() {
   return `John Doe
@@ -558,13 +591,57 @@ TechCorp`;
 
     const result = tailor.cleanSkillsSection(tailored, matchMap);
 
-    expect(result).toContain('- MLOps');
-    expect(result).toContain('- Docker');
-    expect(result).toContain('- Kubernetes');
-    expect(result).toContain('- Python');
+    expect(result).toContain('MLOps & ML Lifecycle: MLOps');
+    expect(result).toMatch(/Model Serving & Infrastructure: .*Docker.*Kubernetes/);
+    expect(result).toMatch(/Programming & Automation: .*Python/);
     expect(result).not.toMatch(/4\+ years of experience/i);
     expect(result).not.toMatch(/Bachelor.*related field/i);
     expect(result).not.toMatch(/highly preferred/i);
+  });
+
+  it('rebuilds Google FDE skills as professional grouped lines without JD fragments', () => {
+    const tailored = `John Doe
+
+TECHNICAL SKILLS
+Engineering Enablement: Python, ReAct, Go, Vertex AI, GitHub Actions, Argo Workflows, Prefect, ArgoCD
+MLOps & ML Lifecycle: MLflow, DVC, model registry, experiment tracking, artifact versioning, reproducible training workflows
+Model Serving & ML Infrastructure: KServe, SageMaker, Flask, FastAPI, BentoML, Docker, Kubernetes
+CI/CD & Automation: GitHub Actions, GitLab CI, Jenkins, CircleCI, Azure DevOps, Makefiles, pre-commit, Ruff, Black
+Observability & Reliability: Prometheus, Grafana, logging, distributed tracing, incident response, RCA, runbooks
+years of experience in cloud computing or a technical customer-facing role, with experience in Python
+Experience developing AI
+Generative AI solutions utilizing AI tools and designing multi-agent workflows and RAG systems
+Experience in people management
+Python
+ReAct
+Go
+Vertex AI
+leadership
+Google Cloud
+
+PROFESSIONAL EXPERIENCE
+TechCorp`;
+
+    const matchMap = tailor.buildMatchMap(CV, GOOGLE_FDE_JD, [
+      'ReAct',
+      'Go',
+      'Vertex AI',
+      'Google Cloud',
+      'multi-agent workflows',
+      'RAG systems',
+      'people management',
+    ]);
+    const result = tailor.cleanSkillsSection(tailored, matchMap, [], GOOGLE_FDE_JD);
+
+    expect(result).toContain('AI & GenAI Systems:');
+    expect(result).toContain('Cloud & Platform Engineering:');
+    expect(result).toContain('Leadership & Stakeholder Management:');
+    expect(result).toContain('Vertex AI');
+    expect(result).toContain('ReAct');
+    expect(result).not.toMatch(/years of experience in cloud computing/i);
+    expect(result).not.toMatch(/Experience developing AI/i);
+    expect(result).not.toMatch(/Generative AI solutions utilizing AI tools/i);
+    expect(result).not.toMatch(/^Python$/m);
   });
 });
 

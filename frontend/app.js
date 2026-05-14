@@ -591,14 +591,43 @@ class UIController {
     }
   }
 
-  handleJobLoad() {
+  async handleJobLoad() {
     const jobTitle = this.jobTitleInput.value.trim();
     const company = this.companyInput.value.trim();
-    const description = this.jobDescriptionInput.value.trim();
+    const rawDescription = this.jobDescriptionInput.value.trim();
 
-    if (description.length < 50) {
+    if (rawDescription.length < 50) {
       this.showToast('Please enter more job description content', 'error');
       return;
+    }
+
+    let description = rawDescription;
+
+    if (rawDescription.length > 500) {
+      try {
+        this.showLoading(true);
+        this.loadJobBtn.disabled = true;
+        const llmConfig = this.llmSettings?.getLLMConfig();
+        const response = await fetch(`${CONFIG.apiEndpoint}/jd/extract`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: rawDescription,
+            ...(llmConfig ? { llmConfig } : {})
+          })
+        });
+        if (response.ok) {
+          const data = await response.json();
+          if (data.extractedText?.trim()) {
+            description = data.extractedText;
+          }
+        }
+      } catch {
+        // Fall back to raw text if extraction fails
+      } finally {
+        this.loadJobBtn.disabled = false;
+        this.showLoading(false);
+      }
     }
 
     try {

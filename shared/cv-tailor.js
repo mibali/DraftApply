@@ -259,7 +259,8 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
         matchMap
       ),
       matchMap,
-      confirmedSkills
+      confirmedSkills,
+      jdData
     );
   }
 
@@ -374,7 +375,7 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
     return lines.join('\n');
   }
 
-  cleanSkillsSection(tailoredText, matchMap = [], confirmedSkills = []) {
+  cleanSkillsSection(tailoredText, matchMap = [], confirmedSkills = [], jdData = {}) {
     if (!tailoredText) return tailoredText;
 
     const lines = String(tailoredText).split('\n');
@@ -396,7 +397,7 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
         i++;
       }
 
-      const skillLines = this._normaliseSkillSectionLines(sectionLines, matchMap, confirmedSkills);
+      const skillLines = this._normaliseSkillSectionLines(sectionLines, matchMap, confirmedSkills, jdData);
       cleaned.push(...skillLines);
       continue;
     }
@@ -777,7 +778,7 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
       .test(String(line || '').trim());
   }
 
-  _normaliseSkillSectionLines(sectionLines, matchMap = [], confirmedSkills = []) {
+  _normaliseSkillSectionLines(sectionLines, matchMap = [], confirmedSkills = [], jdData = {}) {
     const rawItems = [];
     for (const line of sectionLines) {
       const trimmed = String(line || '').trim();
@@ -798,38 +799,57 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
     const compactItems = [];
     for (const item of rawItems) {
       const cleaned = this._cleanSkillItem(item);
-      if (this._isUsefulSkillItem(cleaned)) compactItems.push(cleaned);
+      for (const split of this._splitSkillValues(cleaned)) {
+        const skill = this._cleanSkillItem(split);
+        if (this._isUsefulSkillItem(skill)) compactItems.push(skill);
+      }
     }
 
     for (const item of allowedPhrases) {
       const cleaned = this._cleanSkillItem(item);
-      if (this._isUsefulSkillItem(cleaned)) compactItems.push(cleaned);
+      for (const split of this._splitSkillValues(cleaned)) {
+        const skill = this._cleanSkillItem(split);
+        if (this._isUsefulSkillItem(skill)) compactItems.push(skill);
+      }
     }
 
     const unique = this._uniqueDisplaySkills(compactItems)
       .filter(item => !this._isJdRequirementProse(item))
-      .slice(0, 18);
+      .filter(item => !this._isRequirementFragment(item));
+
+    const grouped = this._buildGroupedSkills(unique, jdData);
+    if (grouped.length > 0) return grouped;
 
     if (unique.length === 0) return [];
-    return unique.map(item => `- ${item}`);
+    return unique.slice(0, 18).map(item => `- ${item}`);
   }
 
   _splitSkillLine(line) {
     let text = String(line || '')
       .replace(/\)\s*(?=[A-Z][A-Za-z ]{2,30}:)/g, ') ')
       .replace(/([a-z)])(?=[A-Z][A-Za-z ]{2,30}:)/g, '$1, ')
+      .replace(/\((?:e\.g\.|eg),?\s*([^)]+)\)/gi, ', $1')
       .replace(/\s+/g, ' ')
       .trim();
     if (!text) return [];
 
-    const labelled = [...text.matchAll(/(?:^|[.;,]\s*)([A-Z][A-Za-z/& ]{2,40}):\s*([\s\S]*?)(?=(?:[.;,]\s*[A-Z][A-Za-z/& ]{2,40}:)|$)/g)];
-    if (labelled.length >= 2) {
-      return labelled.map(([, label, value]) => `${label.trim()}: ${value.trim()}`);
+    const labelled = [...text.matchAll(/(?:^|[.;,]\s*)([A-Z][A-Za-z0-9/& -]{2,56}):\s*([\s\S]*?)(?=(?:[.;,]\s*[A-Z][A-Za-z0-9/& -]{2,56}:)|$)/g)];
+    if (labelled.length >= 1) {
+      return labelled.flatMap(([, , value]) => this._splitSkillValues(value));
     }
 
     return text
       .split(/\s*(?:;|\n|•)\s*/)
-      .flatMap(part => part.split(/\s*,\s+(?=[A-Z][A-Za-z/& ]{2,40}:)/))
+      .flatMap(part => part.split(/\s*,\s*/))
+      .flatMap(part => part.split(/\s+\band\b\s+(?=[A-Z][A-Za-z0-9+#/. -]{2,40}$)/i))
+      .map(part => part.trim())
+      .filter(Boolean);
+  }
+
+  _splitSkillValues(value) {
+    return String(value || '')
+      .replace(/\((?:e\.g\.|eg),?\s*([^)]+)\)/gi, ', $1')
+      .split(/\s*,\s*|\s+\/\s+|\s+\|\s+/)
       .map(part => part.trim())
       .filter(Boolean);
   }
@@ -843,6 +863,13 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
       .replace(/\bexpertise\s+in\s+/gi, '')
       .replace(/\bfamiliarity\s+with\s+/gi, '')
       .replace(/\bexperience\s+with\s+/gi, '')
+      .replace(/\bpython\s+and\s+scripting\s+for\s+automation\b/gi, 'Python, automation')
+      .replace(/\bcontainerization\s+with\s+Docker\s+and\s+orchestration\s+with\s+Kubernetes\b/gi, 'Docker, Kubernetes')
+      .replace(/^(?:minimum|preferred)\s+qualifications?\s*:\s*/i, '')
+      .replace(/^(?:technical\s+stack|programming\s*&\s*scripting|security\s+mindset|ethical\s+ai\s+knowledge|education|experience)\s*:\s*/i, '')
+      .replace(/^[A-Z][A-Za-z0-9/& -]{2,56}:\s*/, '')
+      .replace(/\b(?:e\.g\.|eg)\.?,?\s*/gi, '')
+      .replace(/[()]/g, '')
       .replace(/\s+/g, ' ')
       .replace(/\s+([),.;:])/g, '$1')
       .replace(/[.,;]\s*$/, '')
@@ -864,9 +891,98 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
     return text.length > 160
       || /\b\d+\+?\s+years?\s+of\s+experience\b/i.test(text)
       || /\bat least\s+\d+\s+years?\b/i.test(text)
-      || /\b(highly preferred|required|minimum qualifications?|related field)\b/i.test(text)
+      || /\b(highly preferred|required|minimum qualifications?|preferred qualifications?|related field|equivalent practical experience)\b/i.test(text)
       || /\bdeploying and managing\b/i.test(text)
-      || /\bor other relevant standards\b/i.test(text);
+      || /\bor other relevant standards\b/i.test(text)
+      || /\b(?:developing|architecting|designing|utilizing|ensuring|prioritizing|foster|evaluate|maintains?)\b.{20,}/i.test(text);
+  }
+
+  _isRequirementFragment(item) {
+    const text = String(item || '').trim();
+    if (!text) return true;
+    if (/^(?:years?|experience|ability|minimum qualifications?|preferred qualifications?)\b/i.test(text)) return true;
+    if (/^(?:developing|architecting|designing|utilizing|ensuring|prioritizing|fostering|managing)\b/i.test(text)) return true;
+    if (/\b(?:with experience in|technical customer-facing role)\b/i.test(text)) return true;
+    if (/\b(?:bachelor|master|phd|degree|science, technology, engineering, mathematics)\b/i.test(text)) return true;
+    if (text.split(/\s+/).length > 12 && !/:/.test(text)) return true;
+    return false;
+  }
+
+  _buildGroupedSkills(items = [], jdData = {}) {
+    const buckets = [
+      { label: 'AI & GenAI Systems', terms: ['Generative AI', 'AI solutions', 'RAG systems', 'multi-agent workflows', 'agentic systems', 'ReAct', 'tool-calling', 'context engineering', 'explainability', 'transparency'] },
+      { label: 'Cloud & Platform Engineering', terms: ['Google Cloud', 'GCP', 'Vertex AI', 'AWS', 'Azure', 'cloud infrastructure', 'platform reliability', 'production reliability', 'engineering enablement'] },
+      { label: 'Programming & Automation', terms: ['Python', 'Go', 'Bash', 'PowerShell', 'automation', 'scripting', 'FastAPI', 'Flask'] },
+      { label: 'MLOps & ML Lifecycle', terms: ['MLOps', 'MLflow', 'DVC', 'model registry', 'experiment tracking', 'artifact versioning', 'reproducible training workflows'] },
+      { label: 'Model Serving & Infrastructure', terms: ['KServe', 'SageMaker', 'BentoML', 'Docker', 'Kubernetes', 'Kubeflow Pipelines'] },
+      { label: 'CI/CD & Delivery', terms: ['GitHub Actions', 'GitLab CI', 'Jenkins', 'CircleCI', 'Azure DevOps', 'ArgoCD', 'Argo Workflows', 'Prefect'] },
+      { label: 'Observability & Reliability', terms: ['Prometheus', 'Grafana', 'logging', 'distributed tracing', 'incident response', 'RCA', 'runbooks', 'on-call'] },
+      { label: 'Leadership & Stakeholder Management', terms: ['people management', 'technical mentorship', 'technical hiring', 'stakeholder management', 'sales partnership', 'engineering leadership', 'technical lead', 'team leadership', 'customer-facing technical leadership'] },
+    ];
+
+    const itemKeys = new Map(this._uniqueDisplaySkills(items).map(item => [this._normaliseText(item), item]));
+    const jdText = this._normaliseText([
+      jdData.jobTitle,
+      ...(jdData.requiredSkills || []),
+      ...(jdData.preferredSkills || []),
+      ...(jdData.tools || []),
+      ...(jdData.responsibilities || []),
+      ...(jdData.atsKeywords || []),
+    ].join(' '));
+
+    const used = new Set();
+    const lines = [];
+
+    for (const bucket of buckets) {
+      const matched = [];
+      for (const term of bucket.terms) {
+        const key = this._normaliseText(term);
+        const existing = itemKeys.get(key);
+        if (existing && !used.has(key)) {
+          matched.push(existing);
+          used.add(key);
+        } else if (jdText.includes(key) && itemKeys.has(key) && !used.has(key)) {
+          matched.push(itemKeys.get(key));
+          used.add(key);
+        }
+      }
+
+      for (const item of itemKeys.values()) {
+        const key = this._normaliseText(item);
+        if (used.has(key)) continue;
+        if (this._skillBelongsInBucket(item, bucket.label)) {
+          matched.push(item);
+          used.add(key);
+        }
+      }
+
+      const cleaned = this._uniqueDisplaySkills(matched).slice(0, 8);
+      if (cleaned.length > 0) lines.push(`${bucket.label}: ${cleaned.join(', ')}`);
+    }
+
+    const leftovers = this._uniqueDisplaySkills([...itemKeys.values()].filter(item => !used.has(this._normaliseText(item))))
+      .filter(item => !this._isRequirementFragment(item))
+      .slice(0, 8);
+    if (leftovers.length > 0 && lines.length < 8) {
+      lines.push(`Additional Relevant Skills: ${leftovers.join(', ')}`);
+    }
+
+    return lines;
+  }
+
+  _skillBelongsInBucket(item, bucketLabel) {
+    const text = this._normaliseText(item);
+    const patterns = {
+      'AI & GenAI Systems': /\b(genai|generative ai|rag|agent|react|tool calling|context engineering|explainability|ai solutions?)\b/,
+      'Cloud & Platform Engineering': /\b(gcp|google cloud|vertex|aws|azure|cloud|platform|infrastructure|reliability|enablement)\b/,
+      'Programming & Automation': /\b(python|golang|go|bash|powershell|automation|scripting|fastapi|flask)\b/,
+      'MLOps & ML Lifecycle': /\b(mlops|mlflow|dvc|model registry|experiment|artifact|training workflow)\b/,
+      'Model Serving & Infrastructure': /\b(kserve|sagemaker|bentoml|docker|kubernetes|kubeflow|serving)\b/,
+      'CI/CD & Delivery': /\b(ci cd|github actions|gitlab|jenkins|circleci|azure devops|argocd|argo|prefect|delivery)\b/,
+      'Observability & Reliability': /\b(prometheus|grafana|logging|tracing|incident|rca|runbook|on call|observability)\b/,
+      'Leadership & Stakeholder Management': /\b(people management|mentorship|hiring|stakeholder|sales|leadership|technical lead|customer facing|team)\b/,
+    };
+    return patterns[bucketLabel]?.test(text) || false;
   }
 
   /** Find CV source snippets that mention the requirement. */

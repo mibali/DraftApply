@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process';
-import { createReadStream, existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 
 const ROOT = resolve(new URL('..', import.meta.url).pathname);
@@ -171,12 +171,24 @@ async function main() {
   run('node', ['--check', join(EXT_DIR, 'stats.js')]);
 
   const { zipPath, zipName, size } = zipExtension(manifest.version);
-  console.log(`Packaged ${basename(zipName)} (${Math.round(size / 1024)} KB)`);
+  console.log(`\nPackaged ${zipName} (${Math.round(size / 1024)} KB)`);
+
+  const allReleases = readdirSync(DIST_DIR)
+    .filter(f => f.endsWith('.zip'))
+    .map(f => ({ name: f, mtime: statSync(join(DIST_DIR, f)).mtimeMs }))
+    .sort((a, b) => b.mtime - a.mtime);
+
+  console.log('\nAll builds in dist/ (newest → oldest):');
+  for (const r of allReleases) {
+    const marker = r.name === zipName ? '  ← this build' : '';
+    console.log(`  ${r.name}${marker}`);
+  }
 
   if (!shouldUpload) {
-    console.log(`Dry run complete. ZIP ready at ${zipPath}`);
-    console.log('To upload: npm run release:chrome:upload');
-    console.log('To upload and submit for review: npm run release:chrome:publish');
+    console.log(`\nDry run complete. ZIP ready at:\n  ${zipPath}`);
+    console.log('\nNext steps:');
+    console.log('  npm run release:chrome:upload   — upload to Web Store (draft)');
+    console.log('  npm run release:chrome:publish  — upload + submit for review');
     return;
   }
 
