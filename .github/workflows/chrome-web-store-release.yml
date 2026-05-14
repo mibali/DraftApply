@@ -49,7 +49,7 @@ jobs:
           CHROME_REFRESH_TOKEN: ${{ secrets.CHROME_REFRESH_TOKEN }}
           CHROME_EXTENSION_ID: ${{ secrets.CHROME_EXTENSION_ID }}
           CHROME_PUBLISHER_ID: ${{ secrets.CHROME_PUBLISHER_ID }}
-        run: npm run release:chrome:upload -- --skip-tests
+        run: npm run release:chrome:upload
 
       - name: Upload and submit to Chrome Web Store
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.submit_for_review == 'true')
@@ -59,4 +59,4 @@ jobs:
           CHROME_REFRESH_TOKEN: ${{ secrets.CHROME_REFRESH_TOKEN }}
           CHROME_EXTENSION_ID: ${{ secrets.CHROME_EXTENSION_ID }}
           CHROME_PUBLISHER_ID: ${{ secrets.CHROME_PUBLISHER_ID }}
-        run: npm run release:chrome:publish -- --skip-tests
+        run: npm run release:chrome:publish
