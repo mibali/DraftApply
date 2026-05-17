@@ -40,7 +40,12 @@ class DraftApplyExtension {
     img.width = sizePx;
     img.height = sizePx;
     img.style.pointerEvents = 'none'; // Clicks pass through to parent button
-    img.src = chrome.runtime.getURL('icons/icon128.png');
+    try {
+      img.src = chrome.runtime.getURL('icons/icon128.png');
+    } catch {
+      // Context invalidated (extension reloaded) — onerror will swap in the SVG fallback
+      img.src = '';
+    }
     img.decoding = 'async';
     img.loading = 'eager';
     img.onerror = () => {
@@ -84,16 +89,19 @@ class DraftApplyExtension {
     
     // Re-extract context and re-scan fields after delay (for SPAs that load content async)
     setTimeout(() => {
+      try { if (!chrome.runtime?.id) return; } catch { return; }
       this.extractPageContext();
       this.updateContextBadge();
     }, 2000);
     // Some pages render fields late; force a second scan
     setTimeout(() => {
+      try { if (!chrome.runtime?.id) return; } catch { return; }
       if (this._rescanFields) this._rescanFields();
     }, 1500);
     
     // Re-extract on SPA navigation — stored so destroy() can remove it
     this._onPopState = () => {
+      try { if (!chrome.runtime?.id) return; } catch { return; }
       this.extractPageContext();
       this.updateContextBadge();
     };
@@ -262,19 +270,26 @@ class DraftApplyExtension {
       if (e.target === modal) this.hideModal();
     };
 
-    // Prevent page-level handlers from seeing events inside the modal content.
-    // Some ATS pages close their own overlays on any document click/focus, which
-    // can inadvertently close or interfere with our modal.
+    // Stop events from bubbling OUT of the modal to page-level handlers.
+    // Using bubble phase (no capture flag) so events fire on our buttons/textareas
+    // first, then we stop them from reaching the page — not the other way around.
     const modalContent = modal.querySelector('.da-modal-content');
-    modalContent.addEventListener('click', (e) => e.stopPropagation(), true);
-    modalContent.addEventListener('mousedown', (e) => e.stopPropagation(), true);
+    const stopPageEvent = (e) => e.stopPropagation();
+    for (const eventName of ['click', 'mousedown', 'mouseup', 'pointerdown', 'pointerup', 'touchstart', 'touchend']) {
+      modalContent.addEventListener(eventName, stopPageEvent);
+      modalContent.addEventListener(eventName, stopPageEvent, true);
+    }
 
-    // Handle ESC and stop key propagation from inside the modal so the page
-    // never sees keyboard events typed into our question/answer textareas.
+    // Stop keydown/focusin from bubbling to page handlers (e.g. ATS close-on-key).
+    // ESC is handled here; all other keys already fired on our textarea first.
     modal.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') this.hideModal();
       e.stopPropagation();
-    }, true);
+    });
+    modal.addEventListener('focusin', stopPageEvent);
+    modal.addEventListener('focusin', stopPageEvent, true);
+    modal.addEventListener('focusout', stopPageEvent);
+    modal.addEventListener('focusout', stopPageEvent, true);
 
     // Fallback document-level ESC handler (catches Escape when focus is outside modal)
     this._onKeyDown = (e) => {
@@ -483,6 +498,15 @@ class DraftApplyExtension {
     };
 
     const addButtons = () => {
+      // chrome.runtime itself throws when the extension context is invalidated,
+      // so we can't use it as a plain expression — must catch.
+      let ctxOk;
+      try { ctxOk = !!chrome.runtime?.id; } catch { ctxOk = false; }
+      if (!ctxOk) {
+        // Context is dead — disconnect the observer so this never fires again.
+        try { this.observer?.disconnect(); } catch {}
+        return;
+      }
       if (!document.body) return; // Not ready yet (iframe still loading)
       this.observeAllRoots(debouncedAddButtons);
 
@@ -744,21 +768,33 @@ class DraftApplyExtension {
 
   findFieldLabel(field) {
     const root = field.getRootNode?.() || document;
+    const cleanText = (text) => String(text || '')
+      .replace(/\*/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const labelTextWithoutControls = (el) => {
+      if (!el) return '';
+      const clone = el.cloneNode(true);
+      clone.querySelectorAll?.('input,textarea,select,button,script,style').forEach(node => node.remove());
+      return cleanText(clone.textContent);
+    };
 
     // 1. Explicit <label for="...">
     if (field.id) {
       try {
         const label = root.querySelector?.(`label[for="${CSS.escape(field.id)}"]`);
-        if (label) return label.textContent.trim();
+        const text = labelTextWithoutControls(label) || cleanText(label?.textContent);
+        if (text) return text;
       } catch (e) {
         const label = root.querySelector?.(`label[for="${field.id}"]`);
-        if (label) return label.textContent.trim();
+        const text = labelTextWithoutControls(label) || cleanText(label?.textContent);
+        if (text) return text;
       }
     }
 
     // 2. aria-label attribute
     const ariaLabel = field.getAttribute('aria-label');
-    if (ariaLabel) return ariaLabel;
+    if (ariaLabel) return cleanText(ariaLabel);
 
     // 3. aria-labelledby (may be space-separated list of ids)
     const labelledBy = field.getAttribute('aria-labelledby');
@@ -770,31 +806,40 @@ class DraftApplyExtension {
             || document.getElementById(id)?.textContent?.trim();
         })
         .filter(Boolean);
-      if (parts.length) return parts.join(' ');
+      if (parts.length) return cleanText(parts.join(' '));
     }
 
     // 4. title attribute
-    if (field.title) return field.title;
+    if (field.title) return cleanText(field.title);
 
-    // 5. Walk up DOM ancestry — look for label/heading text before the input
+    // 5. Wrapping label, common on Ashby/Greenhouse/Lever-style forms.
+    // Use only the text outside form controls so the user's typed value is not
+    // accidentally treated as the question.
+    const wrappingLabel = field.closest?.('label');
+    if (wrappingLabel && !wrappingLabel.closest?.('#draftapply-modal')) {
+      const text = labelTextWithoutControls(wrappingLabel);
+      if (text && text.length < 200) return text;
+    }
+
+    // 6. Walk up DOM ancestry — look for label/heading text before the input
     const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'BUTTON', 'INPUT', 'TEXTAREA', 'SELECT', 'OPTION']);
     const isGoodText = (t) => t && t.length > 2 && t.length < 400;
 
     let ancestor = field.parentElement;
     for (let depth = 0; depth < 10 && ancestor; depth++, ancestor = ancestor.parentElement) {
-      // 5a. Explicit <label> or <legend> anywhere in the ancestor (not wrapping the field).
+      // 6a. Explicit <label> or <legend> anywhere in the ancestor (not wrapping the field).
       // Only use if there is exactly ONE such element in this ancestor — multiple labels
       // in a shared container (e.g. LinkedIn/GitHub/Portfolio all under one div) would
       // otherwise always return the first (LinkedIn) label for every field.
       for (const tag of ['label', 'legend']) {
         const els = ancestor.querySelectorAll(tag);
         if (els.length === 1 && !els[0].contains(field)) {
-          const t = els[0].textContent.trim();
+          const t = labelTextWithoutControls(els[0]) || cleanText(els[0].textContent);
           if (isGoodText(t)) return t;
         }
       }
 
-      // 5b. Look at DOM siblings that come BEFORE the field's branch in this ancestor
+      // 6b. Look at DOM siblings that come BEFORE the field's branch in this ancestor
       const children = Array.from(ancestor.children);
       // Find which child contains (or is) the field
       const branchIdx = children.findIndex(c => c === field || c.contains(field));
@@ -805,16 +850,22 @@ class DraftApplyExtension {
           if (SKIP_TAGS.has(sib.tagName)) continue;
           // Prefer explicit label/heading elements
           const heading = sib.querySelector('label, legend, h1, h2, h3, h4, h5, h6, p, strong, b') || sib;
-          const t = heading.textContent.trim();
+          const t = labelTextWithoutControls(heading) || cleanText(heading.textContent);
           if (isGoodText(t) && !SKIP_TAGS.has(heading.tagName)) return t;
         }
       }
 
-      // 5c. Any heading/strong element within this ancestor (not the field itself).
+      // 6c. Any heading/strong element within this ancestor (not the field itself).
       // Cap at 200 chars to avoid returning full paragraph sentences as a "label".
+      // Only use this broad fallback when the ancestor owns a single field; in
+      // repeated URL groups a shared ancestor often contains labels like
+      // LinkedIn/GitHub/Portfolio, and querySelector would always return the
+      // first one for every input.
+      const fieldsInAncestor = ancestor.querySelectorAll?.(this.fieldSelector())?.length ?? 0;
+      if (fieldsInAncestor > 1) continue;
       const heading = ancestor.querySelector('h1,h2,h3,h4,h5,h6,legend,strong,b,p,[class*="label" i],[class*="question" i],[class*="heading" i],[class*="title" i]');
       if (heading && !heading.contains(field)) {
-        const t = heading.textContent.trim();
+        const t = labelTextWithoutControls(heading) || cleanText(heading.textContent);
         if (isGoodText(t) && t.length <= 200) return t;
       }
 

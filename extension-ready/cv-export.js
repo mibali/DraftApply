@@ -18,7 +18,9 @@
     window.close();
   });
 
-  const { tailoredCvExport } = await chrome.storage.local.get('tailoredCvExport');
+  const stored = await chrome.storage.local.get(['tailoredCvExport', 'tailoredCvContactUrls']);
+  const tailoredCvExport = stored.tailoredCvExport;
+  const originalContactUrls = stored.tailoredCvContactUrls || {};
   const loading = document.getElementById('loading');
   const content = document.getElementById('cv-content');
 
@@ -27,13 +29,13 @@
     return;
   }
 
-  await chrome.storage.local.remove('tailoredCvExport');
+  await chrome.storage.local.remove(['tailoredCvExport', 'tailoredCvContactUrls']);
 
   // Set page title (and therefore PDF filename) to "Full Name CV"
   const candidateName = tailoredCvExport.split('\n').map(l => l.trim()).find(l => l.length > 0);
   if (candidateName) document.title = `${candidateName} CV`;
 
-  content.innerHTML = formatCvToHtml(tailoredCvExport);
+  content.innerHTML = formatCvToHtml(tailoredCvExport, originalContactUrls);
   loading.hidden = true;
   content.hidden = false;
 })();
@@ -86,10 +88,16 @@ function isDateLine(line) {
 }
 
 function linkify(html) {
+  // Full https?:// URLs
   html = html.replace(/https?:\/\/[\w\-.~:/?#%@!$&amp;'()*+,;=]+/gi, url => {
     const raw = url.replace(/&amp;/g, '&');
     return `<a href="${raw}" target="_blank" rel="noopener">${url}</a>`;
   });
+  // Partial social URLs that lack the scheme, e.g. "linkedin.com/in/..." or "github.com/..."
+  html = html.replace(/(?<![/"'>])\b((?:linkedin|github|twitter|x)\.com\/[\w\-./]+)/gi, url => {
+    return `<a href="https://${url}" target="_blank" rel="noopener">${url}</a>`;
+  });
+  // Email addresses
   html = html.replace(/([\w.+-]+@[\w-]+\.[\w.]+)/g, e => `<a href="mailto:${e}">${e}</a>`);
   return html;
 }
@@ -128,11 +136,18 @@ function urlHost(url) {
 }
 
 function socialLabelUrl(line, socialUrls) {
-  if (/^linkedin$/i.test(line) && socialUrls.linkedin) return { label: 'LinkedIn', url: socialUrls.linkedin };
-  if (/^github$/i.test(line) && socialUrls.github) return { label: 'GitHub', url: socialUrls.github };
-  if (/^(website|portfolio|personal\s+website|personal\s+site)$/i.test(line) && (socialUrls.portfolio || socialUrls.website)) {
+  // Match label-only lines like "LinkedIn", "LinkedIn Profile", "LinkedIn Profile URL",
+  // "GitHub", "GitHub Profile", "Portfolio", "Website", etc.
+  // Lines that already contain a raw URL are handled by linkify() instead.
+  if (/https?:\/\//i.test(line)) return null;
+  if (/^linkedin(\s+(profile|url|link|profile\s+url|profile\s+link))?$/i.test(line) && socialUrls.linkedin)
+    return { label: 'LinkedIn', url: socialUrls.linkedin };
+  if (/^github(\s+(profile|url|link|profile\s+url))?$/i.test(line) && socialUrls.github)
+    return { label: 'GitHub', url: socialUrls.github };
+  if (/^twitter(\s+(profile|url|handle))?$|^x(\s+profile)?$/i.test(line) && socialUrls.twitter)
+    return { label: line, url: socialUrls.twitter };
+  if (/^(website|portfolio|personal\s+website|personal\s+site|portfolio\s+website)(\s+url)?$/i.test(line) && (socialUrls.portfolio || socialUrls.website))
     return { label: line, url: socialUrls.portfolio || socialUrls.website };
-  }
   return null;
 }
 
@@ -327,10 +342,15 @@ function isUsefulSkillItem(item) {
   return /[A-Za-z]/.test(text);
 }
 
-function formatCvToHtml(rawText) {
+function formatCvToHtml(rawText, fallbackContactUrls = {}) {
   // Strip trailing "Links:" section added by PDF/DOCX extractor — links are
   // already inline in the text; we don't want them duplicated at the bottom.
-  const socialUrls = extractSocialUrls(rawText);
+  // Merge: tailored-text URLs take priority; original CV URLs fill any gaps.
+  const tailoredUrls = extractSocialUrls(rawText);
+  const socialUrls = {};
+  for (const key of ['linkedin', 'github', 'portfolio', 'website', 'twitter']) {
+    socialUrls[key] = tailoredUrls[key] || fallbackContactUrls[key] || '';
+  }
   const knownSocialUrls = new Set(Object.values(socialUrls).filter(Boolean).map(normalizeUrl));
   const emailDomains = extractEmailDomains(rawText);
   const mainText = rawText.replace(/\n\nLinks:\n[\s\S]+$/i, '').trim();
