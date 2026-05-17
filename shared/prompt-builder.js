@@ -138,6 +138,23 @@ export class PromptBuilder {
         'biggest weakness',
         'room for improvement',
         'what do you bring'
+      ],
+      profile_url: [
+        'linkedin profile',
+        'linkedin url',
+        'linkedin link',
+        'github profile',
+        'github url',
+        'github link',
+        'portfolio url',
+        'portfolio link',
+        'portfolio website',
+        'personal website',
+        'personal site',
+        'website url',
+        'twitter profile',
+        'twitter url',
+        'x profile',
       ]
     };
 
@@ -152,7 +169,16 @@ export class PromptBuilder {
    * Detect the type of question being asked
    */
   detectQuestionType(question) {
-    const lowerQuestion = question.toLowerCase();
+    const lowerQuestion = question.toLowerCase().trim();
+
+    // Short standalone platform labels on application forms (e.g. "LinkedIn", "GitHub")
+    if (lowerQuestion.length <= 25) {
+      if (/^linkedin\s*(profile|url|link)?$/.test(lowerQuestion)) return 'profile_url';
+      if (/^github\s*(profile|url|link)?$/.test(lowerQuestion))   return 'profile_url';
+      if (/^portfolio(\s+(url|link|website))?$/.test(lowerQuestion)) return 'profile_url';
+      if (/^(personal\s+)?website(\s+url)?$/.test(lowerQuestion)) return 'profile_url';
+      if (/^twitter\s*(profile|url)?$/.test(lowerQuestion))        return 'profile_url';
+    }
 
     for (const [type, patterns] of Object.entries(this.questionTypes)) {
       for (const pattern of patterns) {
@@ -408,6 +434,18 @@ RULES:
 - Do not give two weaknesses unless specifically asked
 - Do not claim your weakness is "perfectionism" or "caring too much"`,
 
+      profile_url: `This is a PROFILE URL FIELD on a job application form — it expects a URL, not a written answer.
+
+Look at the "Contact & Links" section in the CV data above and return ONLY the matching URL:
+- If the field says LinkedIn → return the LinkedIn URL
+- If the field says GitHub → return the GitHub URL
+- If the field says Portfolio or Website → return the portfolio or website URL
+- If the field says Twitter/X → return the Twitter URL
+
+RULES:
+- Output the bare URL only — no label, no explanation, no punctuation around it
+- If the URL is not present in the CV data, output nothing`,
+
       general: `Answer this question directly, specifically, and with evidence from the CV.
 
 APPROACH:
@@ -513,6 +551,26 @@ APPROACH:
         : questionType === 'salary'
           ? (salaryLengths[length] || salaryLengths.medium)
           : lengthSpec;
+
+    // Profile URL fields: skip essay scaffolding — just look up and return the URL
+    if (questionType === 'profile_url') {
+      const ci = cvData.contactInfo || {};
+      const lq = question.toLowerCase();
+      const url =
+        /linkedin/.test(lq) ? ci.linkedin :
+        /github/.test(lq)   ? ci.github   :
+        /twitter|^x\b/.test(lq) ? ci.twitter :
+        /portfolio/.test(lq) ? (ci.portfolio || ci.website) :
+        (ci.website || ci.portfolio);
+
+      return {
+        systemPrompt: 'You fill in job application form fields. Return only the exact value requested — nothing else.',
+        userPrompt: url?.trim()
+          ? `The candidate's profile URL for this field is: ${url.trim()}\n\nReturn only that URL, with no other text.\n\nField label: ${question}`
+          : `The CV does not contain a URL for this field. Return an empty string.\n\nField label: ${question}`,
+        metadata: { questionType, length, options, hasJobContext: false },
+      };
+    }
 
     const systemPrompt = this.buildSystemPrompt(options.tone || 'natural');
     const cvContext = this.buildCVContext(cvData, questionType);
