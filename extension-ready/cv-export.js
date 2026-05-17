@@ -93,12 +93,26 @@ function linkify(html) {
     const raw = url.replace(/&amp;/g, '&');
     return `<a href="${raw}" target="_blank" rel="noopener">${url}</a>`;
   });
-  // Partial social URLs that lack the scheme, e.g. "linkedin.com/in/..." or "github.com/..."
-  html = html.replace(/(?<![/"'>])\b((?:linkedin|github|twitter|x)\.com\/[\w\-./]+)/gi, url => {
-    return `<a href="https://${url}" target="_blank" rel="noopener">${url}</a>`;
-  });
   // Email addresses
   html = html.replace(/([\w.+-]+@[\w-]+\.[\w.]+)/g, e => `<a href="mailto:${e}">${e}</a>`);
+  // Bare domains that lack the scheme, e.g. "michaelbali.dev", "portfolio.site/work",
+  // "linkedin.com/in/...", or "github.com/...". Avoid matching inside href/src/mailto
+  // attributes or inside email addresses that were already linkified above.
+  html = html.replace(
+    /(?<![@/"'=.:>-])\b((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|org|net|io|dev|app|co|ai|me|info|tech|cloud|site|online|uk|us|ca|de|fr|ie|nl|be|au|in|edu|gov)(?:\/[a-z0-9\-._~:/?#[\]@!$&amp;'()*+,;=%]*)?)([).,;:!?]?)/gi,
+    (match, url, trailing = '') => {
+      let displayUrl = url;
+      let suffix = trailing || '';
+      const punctuation = displayUrl.match(/[).,;:!?]+$/)?.[0] || '';
+      if (punctuation) {
+        displayUrl = displayUrl.slice(0, -punctuation.length);
+        suffix = punctuation + suffix;
+      }
+      const raw = displayUrl.replace(/&amp;/g, '&');
+      if (/^(?:mailto|http|https):/i.test(raw)) return match;
+      return `<a href="https://${raw}" target="_blank" rel="noopener">${displayUrl}</a>${suffix}`;
+    }
+  );
   return html;
 }
 

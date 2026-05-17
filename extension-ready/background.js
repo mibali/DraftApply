@@ -29,6 +29,14 @@ function rateLimitError(response) {
 }
 
 const DEFAULT_PROXY_URL = 'https://draftapply.onrender.com';
+const TAILOR_JOB_KEY = 'tailorCvJob';
+
+async function setTailorJobIfCurrent(jobId, nextState) {
+  const stored = await chrome.storage.local.get(TAILOR_JOB_KEY);
+  if (stored?.[TAILOR_JOB_KEY]?.id !== jobId) return false;
+  await chrome.storage.local.set({ [TAILOR_JOB_KEY]: nextState });
+  return true;
+}
 
 async function getProxyUrl() {
   return DEFAULT_PROXY_URL;
@@ -315,9 +323,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === 'TAILOR_CV') {
     (async () => {
+      const jobId = `tailor_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+      const jobSnapshot = {
+        id: jobId,
+        status: 'running',
+        startedAt: new Date().toISOString(),
+        jobDescription: message.jobDescription || '',
+        jobTitle: message.jobTitle || '',
+        company: message.company || '',
+        confirmedSkills: message.confirmedSkills || [],
+      };
       try {
         const { cvText } = await chrome.storage.local.get('cvText');
         if (!cvText) { sendResponse({ error: 'No CV loaded — please save your CV first' }); return; }
+        await chrome.storage.local.set({ [TAILOR_JOB_KEY]: jobSnapshot });
 
         const proxyUrl = await getProxyUrl();
         let token = await ensureInstallToken(proxyUrl);
@@ -364,14 +383,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
 
           const data = await response.json();
+          await setTailorJobIfCurrent(jobId, {
+            ...jobSnapshot,
+            status: 'done',
+            result: data,
+            completedAt: new Date().toISOString(),
+          });
           sendResponse({ success: true, ...data });
         } finally {
           clearTimeout(timeout);
           clearInterval(keepAlive);
         }
       } catch (e) {
-        if (e?.name === 'AbortError') sendResponse({ error: 'Timed out — please try again' });
-        else sendResponse({ error: e.message });
+        const error = e?.name === 'AbortError' ? 'Timed out — please try again' : e.message;
+        await setTailorJobIfCurrent(jobId, {
+            ...jobSnapshot,
+            status: 'error',
+            error,
+            completedAt: new Date().toISOString(),
+        });
+        sendResponse({ error });
       }
     })();
     return true;

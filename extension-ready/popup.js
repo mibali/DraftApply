@@ -87,6 +87,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Stale-response guard: incremented on every new analyze call.
   // If the value changes while a request is in flight, the response is discarded.
   let analyzeToken = 0;
+  let tailorToken = 0;
   let savingDraftTimer = null;
   let tailorJobPollTimer = null;
   let statsResetTimer = null;
@@ -530,8 +531,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function resetTailorReview() {
-    // Invalidate any in-flight analyze response
+    // Invalidate any in-flight analyze/tailor responses
     analyzeToken++;
+    tailorToken++;
 
     elements.tailorAnalyzeBtn.hidden = false;
     elements.tailorAnalyzeBtn.disabled = false;
@@ -648,6 +650,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.tailorOutputWrap.hidden = true;
     elements.tailorActionRow.hidden = true;
     setStep('generate');
+    tailorToken++;
+    const myToken = tailorToken;
 
     try {
       const result = await chrome.runtime.sendMessage({
@@ -657,6 +661,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         company:  elements.tailorCompany.value.trim(),
         confirmedSkills,
       });
+
+      if (myToken !== tailorToken) return;
 
       if (result?.error) {
         showTailorMessage(result.error, 'error');
@@ -668,12 +674,15 @@ document.addEventListener('DOMContentLoaded', async () => {
       await window.DraftApplyStats?.track?.('cvsTailored');
       await refreshStatsUI();
     } catch (e) {
+      if (myToken !== tailorToken) return;
       showTailorMessage('Something went wrong: ' + e.message, 'error');
     } finally {
-      elements.tailorLoading.hidden = true;
-      elements.tailorGenerateBtn.disabled = false;
-      elements.tailorGenerateBtn.textContent = 'Generate Tailored CV';
-      elements.tailorRedoBtn.disabled = false;
+      if (myToken === tailorToken) {
+        elements.tailorLoading.hidden = true;
+        elements.tailorGenerateBtn.disabled = false;
+        elements.tailorGenerateBtn.textContent = 'Generate Tailored CV';
+        elements.tailorRedoBtn.disabled = false;
+      }
     }
   }
 

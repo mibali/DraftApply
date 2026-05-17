@@ -78,6 +78,81 @@ http://linkedin.com/in/michael-temitope-bali-830640171`);
     expect(html).not.toContain('cv-body"><a href="http://linkedin.com/in/michael-temitope-bali-830640171"');
   });
 
+  it('uses original CV contact URLs when tailored text only has social labels', () => {
+    const formatCvToHtml = loadFormatter();
+    const html = formatCvToHtml(`Michael T Bali
+Birmingham, UK
+mtbdesigns01@gmail.com
+LinkedIn Profile
+GitHub Profile
+Website
+
+Senior Platform Engineer
+
+Professional Summary
+Cloud platform support experience.`, {
+      linkedin: 'https://linkedin.com/in/michael-temitope-bali-830640171',
+      github: 'https://github.com/mibali',
+      website: 'https://michaelbali.dev',
+    });
+
+    expect(html).toContain('href="https://linkedin.com/in/michael-temitope-bali-830640171"');
+    expect(html).toContain('>LinkedIn</a>');
+    expect(html).toContain('href="https://github.com/mibali"');
+    expect(html).toContain('>GitHub</a>');
+    expect(html).toContain('href="https://michaelbali.dev"');
+    expect(html).toContain('>Website</a>');
+  });
+
+  it('prefers tailored CV URLs over original CV fallback URLs', () => {
+    const formatCvToHtml = loadFormatter();
+    const html = formatCvToHtml(`Jane Doe
+jane@example.com
+GitHub
+https://github.com/new-handle
+
+Professional Summary
+Cloud engineer.`, {
+      github: 'https://github.com/old-handle',
+    });
+
+    expect(html).toContain('href="https://github.com/new-handle"');
+    expect(html).not.toContain('https://github.com/old-handle');
+  });
+
+  it('linkifies partial social URLs without an https scheme in body content', () => {
+    const formatCvToHtml = loadFormatter();
+    const html = formatCvToHtml(`Jane Doe
+jane@example.com
+Senior Engineer
+
+Projects
+- Maintained github.com/janedoe/platform-tools and documented linkedin.com/in/janedoe examples`);
+
+    expect(html).toContain('href="https://github.com/janedoe/platform-tools"');
+    expect(html).toContain('href="https://linkedin.com/in/janedoe"');
+  });
+
+  it('linkifies bare non-social domains without breaking emails or punctuation', () => {
+    const formatCvToHtml = loadFormatter();
+    const html = formatCvToHtml(`Jane Doe
+jane@example.com
+Senior Engineer
+
+Projects
+- Portfolio: michaelbali.dev/work.
+- Case studies at docs.example.co.uk/case-study, plus demo app portfolio.app/demo.
+- Contact remains jane@example.com`);
+
+    expect(html).toContain('href="https://michaelbali.dev/work"');
+    expect(html).toContain('michaelbali.dev/work</a>.');
+    expect(html).toContain('href="https://docs.example.co.uk/case-study"');
+    expect(html).toContain('docs.example.co.uk/case-study</a>,');
+    expect(html).toContain('href="https://portfolio.app/demo"');
+    expect(html).toContain('href="mailto:jane@example.com"');
+    expect(html).not.toContain('https://example.com');
+  });
+
   it('suppresses generated website links that are only email domains', () => {
     const formatCvToHtml = loadFormatter();
     const html = formatCvToHtml(`Michael T Bali
