@@ -174,6 +174,13 @@ class DraftApplyExtension {
         </div>
         <div class="da-modal-body">
           <div class="da-context-info" id="da-context-info"></div>
+          <div class="da-jd-paste-area" id="da-jd-paste-area" hidden>
+            <textarea class="da-jd-input" id="da-jd-input" rows="4" placeholder="Paste the full job posting here — we'll extract the relevant requirements…"></textarea>
+            <div class="da-jd-paste-actions">
+              <button type="button" class="da-btn da-btn-jd-use" id="da-jd-confirm">Use this JD</button>
+              <button type="button" class="da-btn da-btn-jd-cancel" id="da-jd-cancel">Cancel</button>
+            </div>
+          </div>
           <div class="da-question-label">Question <span class="da-question-hint">(editable)</span></div>
           <textarea class="da-question-preview" id="da-question-preview" rows="2" spellcheck="false"></textarea>
           <div class="da-answer-label">Generated Answer <span id="da-char-hint" class="da-char-hint"></span></div>
@@ -228,6 +235,8 @@ class DraftApplyExtension {
     modal.querySelector('#da-btn-regenerate').onclick = () => this.regenerate();
     modal.querySelector('#da-btn-copy').onclick = () => this.copyAnswer();
     modal.querySelector('#da-btn-stop').onclick = () => this.cancelGeneration();
+    modal.querySelector('#da-jd-confirm').onclick = () => this._confirmJdPaste();
+    modal.querySelector('#da-jd-cancel').onclick = () => this._cancelJdPaste();
     modal.querySelector('#da-length-pills').onclick = (e) => {
       const pill = e.target.closest('.da-length-pill');
       if (!pill) return;
@@ -253,7 +262,21 @@ class DraftApplyExtension {
       if (e.target === modal) this.hideModal();
     };
 
-    // ESC to close — stored so destroy() can remove it
+    // Prevent page-level handlers from seeing events inside the modal content.
+    // Some ATS pages close their own overlays on any document click/focus, which
+    // can inadvertently close or interfere with our modal.
+    const modalContent = modal.querySelector('.da-modal-content');
+    modalContent.addEventListener('click', (e) => e.stopPropagation(), true);
+    modalContent.addEventListener('mousedown', (e) => e.stopPropagation(), true);
+
+    // Handle ESC and stop key propagation from inside the modal so the page
+    // never sees keyboard events typed into our question/answer textareas.
+    modal.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') this.hideModal();
+      e.stopPropagation();
+    }, true);
+
+    // Fallback document-level ESC handler (catches Escape when focus is outside modal)
     this._onKeyDown = (e) => {
       if (e.key === 'Escape' && modal.style.display !== 'none') {
         this.hideModal();
@@ -304,12 +327,28 @@ class DraftApplyExtension {
       badge.textContent = '⚠ Partial context';
       badge.className = 'da-context-badge da-badge-warning';
       info.className = 'da-context-info da-context-warning';
-      info.textContent = 'Job description section not found — answers will be based on your CV only and may not be tailored to this specific role.';
+      info.replaceChildren();
+      const warnMsg = document.createElement('span');
+      warnMsg.textContent = 'Job description not found — answers may not be tailored to this role.';
+      const pasteBtn = document.createElement('button');
+      pasteBtn.type = 'button';
+      pasteBtn.className = 'da-paste-jd-btn';
+      pasteBtn.textContent = 'Paste JD';
+      pasteBtn.onclick = () => this._showJdPasteArea();
+      info.append(warnMsg, document.createTextNode(' '), pasteBtn);
     } else {
       badge.textContent = 'No context';
       badge.className = 'da-context-badge';
       info.className = 'da-context-info da-context-none';
-      info.textContent = 'No job description detected. Open the job listing tab before generating, or paste the job description into your CV.';
+      info.replaceChildren();
+      const noneMsg = document.createElement('span');
+      noneMsg.textContent = 'No job description detected — open the job listing tab first, or ';
+      const pasteBtn2 = document.createElement('button');
+      pasteBtn2.type = 'button';
+      pasteBtn2.className = 'da-paste-jd-btn da-paste-jd-btn-muted';
+      pasteBtn2.textContent = 'paste JD manually';
+      pasteBtn2.onclick = () => this._showJdPasteArea();
+      info.append(noneMsg, pasteBtn2);
     }
   }
 
@@ -743,11 +782,14 @@ class DraftApplyExtension {
 
     let ancestor = field.parentElement;
     for (let depth = 0; depth < 10 && ancestor; depth++, ancestor = ancestor.parentElement) {
-      // 5a. Explicit <label> or <legend> anywhere in the ancestor (not wrapping the field)
+      // 5a. Explicit <label> or <legend> anywhere in the ancestor (not wrapping the field).
+      // Only use if there is exactly ONE such element in this ancestor — multiple labels
+      // in a shared container (e.g. LinkedIn/GitHub/Portfolio all under one div) would
+      // otherwise always return the first (LinkedIn) label for every field.
       for (const tag of ['label', 'legend']) {
-        const el = ancestor.querySelector(tag);
-        if (el && !el.contains(field)) {
-          const t = el.textContent.trim();
+        const els = ancestor.querySelectorAll(tag);
+        if (els.length === 1 && !els[0].contains(field)) {
+          const t = els[0].textContent.trim();
           if (isGoodText(t)) return t;
         }
       }
@@ -768,11 +810,12 @@ class DraftApplyExtension {
         }
       }
 
-      // 5c. Any heading/strong element within this ancestor (not the field itself)
+      // 5c. Any heading/strong element within this ancestor (not the field itself).
+      // Cap at 200 chars to avoid returning full paragraph sentences as a "label".
       const heading = ancestor.querySelector('h1,h2,h3,h4,h5,h6,legend,strong,b,p,[class*="label" i],[class*="question" i],[class*="heading" i],[class*="title" i]');
       if (heading && !heading.contains(field)) {
         const t = heading.textContent.trim();
-        if (isGoodText(t)) return t;
+        if (isGoodText(t) && t.length <= 200) return t;
       }
 
       // Stop climbing if we've reached a major landmark
@@ -872,6 +915,9 @@ class DraftApplyExtension {
     modal.querySelector('#da-question-preview').value = question;
     modal.querySelector('#da-answer-output').value = '';
     modal.querySelector('#da-loading').hidden = true;
+    // Always hide the JD paste area when opening for a field
+    const jdPasteArea = modal.querySelector('#da-jd-paste-area');
+    if (jdPasteArea) jdPasteArea.hidden = true;
 
     // Auto-select length based on field constraints
     const autoLength = this._inferLengthFromField(this.currentField);
@@ -1313,6 +1359,33 @@ class DraftApplyExtension {
     } catch (e) {
       this.showNotification('Could not copy. Please select and copy the text manually.', 'error');
     }
+  }
+
+  _showJdPasteArea() {
+    const area = this.modal?.querySelector('#da-jd-paste-area');
+    const input = this.modal?.querySelector('#da-jd-input');
+    if (!area) return;
+    area.hidden = false;
+    input.value = '';
+    setTimeout(() => input.focus(), 50);
+  }
+
+  _confirmJdPaste() {
+    const area = this.modal?.querySelector('#da-jd-paste-area');
+    const input = this.modal?.querySelector('#da-jd-input');
+    if (!area || !input) return;
+    const text = input.value.trim();
+    if (!text) return;
+    if (!this.pageContext) this.pageContext = {};
+    this.pageContext.jobDescription = text;
+    this.pageContext.contextQuality = 'heuristic';
+    area.hidden = true;
+    this.updateContextBadge();
+  }
+
+  _cancelJdPaste() {
+    const area = this.modal?.querySelector('#da-jd-paste-area');
+    if (area) area.hidden = true;
   }
 
   showNotification(message, type = 'success') {
