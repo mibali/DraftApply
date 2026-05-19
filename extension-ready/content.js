@@ -271,13 +271,12 @@ class DraftApplyExtension {
     };
 
     // Stop events from bubbling OUT of the modal to page-level handlers.
-    // Using bubble phase (no capture flag) so events fire on our buttons/textareas
-    // first, then we stop them from reaching the page — not the other way around.
+    // Do not use capture listeners here: capture-phase stopPropagation on an
+    // ancestor prevents button clicks from reaching their own handlers.
     const modalContent = modal.querySelector('.da-modal-content');
     const stopPageEvent = (e) => e.stopPropagation();
     for (const eventName of ['click', 'mousedown', 'mouseup', 'pointerdown', 'pointerup', 'touchstart', 'touchend']) {
       modalContent.addEventListener(eventName, stopPageEvent);
-      modalContent.addEventListener(eventName, stopPageEvent, true);
     }
 
     // Stop keydown/focusin from bubbling to page handlers (e.g. ATS close-on-key).
@@ -287,9 +286,7 @@ class DraftApplyExtension {
       e.stopPropagation();
     });
     modal.addEventListener('focusin', stopPageEvent);
-    modal.addEventListener('focusin', stopPageEvent, true);
     modal.addEventListener('focusout', stopPageEvent);
-    modal.addEventListener('focusout', stopPageEvent, true);
 
     // Fallback document-level ESC handler (catches Escape when focus is outside modal)
     this._onKeyDown = (e) => {

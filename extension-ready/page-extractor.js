@@ -364,10 +364,36 @@ class PageExtractor {
     // 3. Full page text fallback — cap at 3000 chars
     const pageText = this.extractCleanPageText();
     if (pageText.length > 100) {
-      return { jobDescription: pageText.slice(0, 3000), contextQuality: 'fullpage' };
+      const capped = pageText.slice(0, 5000);
+      return {
+        jobDescription: capped,
+        contextQuality: this.isLikelyJobPostingText(capped) ? 'heuristic' : 'fullpage'
+      };
     }
 
     return { jobDescription: '', contextQuality: 'none' };
+  }
+
+  /**
+   * Some generic application pages render the JD as plain visible page text
+   * without semantic containers. Treat that as usable context when there are
+   * multiple job-posting signals, instead of downgrading to noisy fullpage.
+   */
+  isLikelyJobPostingText(text) {
+    const value = String(text || '');
+    if (value.length < 250) return false;
+
+    const signals = [
+      /\b(responsibilities|your responsibilities|what you(?:'|’)ll do|what you will do)\b/i,
+      /\b(requirements|qualifications|must have|you must|this role requires)\b/i,
+      /\b(tech|technical skills|skills|experience with|experience in)\b/i,
+      /\b(salary|£\s?\d|€\s?\d|\$\s?\d|\d+\s?k)\b/i,
+      /\b(apply|covering letter|cv upload|resume upload)\b/i,
+      /\b(role|position|job title|engineer|architect|manager|developer|consultant)\b/i,
+    ];
+
+    const score = signals.reduce((count, re) => count + (re.test(value) ? 1 : 0), 0);
+    return score >= 3;
   }
 
   /**
