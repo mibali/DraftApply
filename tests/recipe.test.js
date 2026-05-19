@@ -66,4 +66,97 @@ Used log analysis to reproduce and isolate customer platform issues.`,
     expect(prompt.userPrompt).toMatch(/no bullet list/i);
     expect(prompt.maxTokens).toBeLessThanOrEqual(380);
   });
+
+  it('does not inject a requirements bridge when the question does not map to those requirements', () => {
+    const prompt = buildPrompts({
+      question: 'What kind of work environment helps you do your best work?',
+      length: 'medium',
+      tone: 'natural',
+      cvText: CV,
+      matchMap: [
+        {
+          requirement: 'Kubernetes platform operations',
+          allowedToMention: true,
+          evidence: ['Led Kubernetes migration for production services'],
+        },
+        {
+          requirement: 'Python automation',
+          allowedToMention: true,
+          evidence: ['Built Python automation scripts for diagnostics'],
+        },
+      ],
+    });
+
+    expect(prompt.userPrompt).not.toMatch(/JD REQUIREMENTS YOUR BACKGROUND COVERS/);
+    expect(prompt.userPrompt).not.toMatch(/Kubernetes platform operations/);
+  });
+
+  it('uses parsed JD data for why-company role focus hints', () => {
+    const prompt = buildPrompts({
+      question: 'Why are you interested in this role?',
+      length: 'medium',
+      tone: 'natural',
+      cvText: CV,
+      jobTitle: 'Senior SRE',
+      company: 'Acme AI',
+      jobDescription: 'We need reliability and automation experience.',
+      jdData: {
+        responsibilities: [
+          'Own production reliability for customer-facing AI systems',
+          'Build automation that reduces manual operational toil',
+        ],
+        requiredSkills: ['Incident response'],
+        tools: ['Kubernetes', 'Python'],
+        atsKeywords: ['reliability', 'automation'],
+      },
+    });
+
+    expect(prompt.userPrompt).toMatch(/ROLE\/JD SIGNALS TO USE FOR TAILORING/);
+    expect(prompt.userPrompt).toMatch(/Own production reliability/);
+    expect(prompt.userPrompt).toMatch(/Keywords\/tools to echo naturally: Incident response, Kubernetes, Python, reliability, automation/);
+  });
+
+  it('can surface achievements in the evidence hint when they match the question', () => {
+    const prompt = buildPrompts({
+      question: 'Tell me about a time you improved reliability',
+      length: 'medium',
+      tone: 'natural',
+      cvText: CV,
+      cvData: {
+        experience: [
+          {
+            title: 'Senior Technical Support Engineer',
+            company: 'Sourcegraph',
+            responsibilities: ['Handled customer escalations and technical support workflows'],
+          },
+        ],
+        achievements: ['Improved production reliability by cutting repeat incidents through RCA follow-up'],
+      },
+    });
+
+    expect(prompt.userPrompt).toMatch(/MOST RELEVANT CV BULLETS/);
+    expect(prompt.userPrompt).toMatch(/\[Achievement\] Improved production reliability/);
+  });
+
+  it('allows cover letters to use top matched requirements even without question word overlap', () => {
+    const prompt = buildPrompts({
+      question: 'Cover letter',
+      length: 'short',
+      tone: 'natural',
+      cvText: CV,
+      jobTitle: 'Platform Engineer',
+      company: 'Acme AI',
+      jobDescription: 'We need Kubernetes and Python automation.',
+      matchMap: [
+        {
+          requirement: 'Kubernetes platform operations',
+          allowedToMention: true,
+          evidence: ['Led Kubernetes migration for production services'],
+        },
+      ],
+    });
+
+    expect(prompt.userPrompt).toMatch(/JD REQUIREMENTS YOUR BACKGROUND COVERS/);
+    expect(prompt.userPrompt).toMatch(/Kubernetes platform operations/);
+  });
 });

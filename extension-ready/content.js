@@ -114,6 +114,11 @@ class DraftApplyExtension {
       this.scheduleContextRefresh('history', 250);
     };
     window.addEventListener('draftapply:navigation', this._onDraftApplyNavigation);
+
+    this._onStorageChanged = (changes, areaName) => {
+      if (areaName === 'local' && changes.tailorCvDraft) this.clearAnswerCaches();
+    };
+    chrome.storage?.onChanged?.addListener(this._onStorageChanged);
   }
 
   destroy() {
@@ -122,6 +127,7 @@ class DraftApplyExtension {
     if (this._onKeyDown) document.removeEventListener('keydown', this._onKeyDown);
     if (this._onPopState) window.removeEventListener('popstate', this._onPopState);
     if (this._onDraftApplyNavigation) window.removeEventListener('draftapply:navigation', this._onDraftApplyNavigation);
+    if (this._onStorageChanged) chrome.storage?.onChanged?.removeListener(this._onStorageChanged);
     if (this._contextRefreshTimer) clearTimeout(this._contextRefreshTimer);
     // Clean up overlay buttons
     document.querySelectorAll('.da-field-btn-overlay').forEach(btn => btn.remove());
@@ -976,6 +982,45 @@ class DraftApplyExtension {
     return ctx.sectionedJobContext || ctx.jobDescription || undefined;
   }
 
+  async _jobContextForPayload(ctx = this.pageContext || {}) {
+    const jobDescription = this._jobDescriptionForPayload(ctx);
+    if (jobDescription) {
+      return {
+        jobTitle: ctx.jobTitle || undefined,
+        company: ctx.company || undefined,
+        jobDescription,
+        requirements: (ctx.requirements?.length > 0) ? ctx.requirements : undefined,
+      };
+    }
+
+    try {
+      const { tailorCvDraft } = await chrome.storage.local.get('tailorCvDraft');
+      const draftJobDescription = tailorCvDraft?.jobDescription?.trim();
+      if (!draftJobDescription) {
+        return {
+          jobTitle: ctx.jobTitle || undefined,
+          company: ctx.company || undefined,
+          jobDescription: undefined,
+          requirements: undefined,
+        };
+      }
+
+      return {
+        jobTitle: ctx.jobTitle || tailorCvDraft.jobTitle?.trim() || undefined,
+        company: ctx.company || tailorCvDraft.company?.trim() || undefined,
+        jobDescription: draftJobDescription,
+        requirements: undefined,
+      };
+    } catch (_) {
+      return {
+        jobTitle: ctx.jobTitle || undefined,
+        company: ctx.company || undefined,
+        jobDescription: undefined,
+        requirements: undefined,
+      };
+    }
+  }
+
   async _startPrefetch(field) {
     const label = this.findFieldLabel(field);
     const fieldHint = field.name || field.id || field.placeholder || null;
@@ -990,17 +1035,17 @@ class DraftApplyExtension {
     const btn = this._buttonMap.get(field);
     const ctx = this.pageContext || {};
     const cacheKey = this.answerCacheKey(question, ctx);
-    const jobDescriptionForPayload = this._jobDescriptionForPayload(ctx);
+    const jobContextForPayload = await this._jobContextForPayload(ctx);
     const fieldMaxLen = (field.maxLength > 0) ? field.maxLength : null;
     const payload = {
       question,
       length: this._inferLengthFromField(field) || 'medium',
       tone:   'natural',
       cvText:         cvResponse.cvText,
-      jobTitle:       ctx.jobTitle || undefined,
-      company:        ctx.company || undefined,
-      jobDescription: jobDescriptionForPayload,
-      requirements:   (ctx.requirements?.length > 0) ? ctx.requirements : undefined,
+      jobTitle:       jobContextForPayload.jobTitle,
+      company:        jobContextForPayload.company,
+      jobDescription: jobContextForPayload.jobDescription,
+      requirements:   jobContextForPayload.requirements,
       maxChars:       fieldMaxLen || undefined,
     };
 
@@ -1138,19 +1183,17 @@ class DraftApplyExtension {
       }
 
       const ctx = this.pageContext || {};
-      // Only send jobDescription when it comes from a reliable source.
-      // Prefer sectioned context when available so the recipe sees the role,
-      // team, responsibilities, requirements, and tools without form noise.
-      const jobDescriptionForPayload = this._jobDescriptionForPayload(ctx);
+      // Prefer reliable page context, then fall back to the user's saved Tailor JD.
+      const jobContextForPayload = await this._jobContextForPayload(ctx);
       const structuredPayload = {
         question,
         length,
         tone,
         cvText:         cvResponse.cvText,
-        jobTitle:       ctx.jobTitle || undefined,
-        company:        ctx.company || undefined,
-        jobDescription: jobDescriptionForPayload,
-        requirements:   (ctx.requirements && ctx.requirements.length > 0) ? ctx.requirements : undefined,
+        jobTitle:       jobContextForPayload.jobTitle,
+        company:        jobContextForPayload.company,
+        jobDescription: jobContextForPayload.jobDescription,
+        requirements:   jobContextForPayload.requirements,
         pageUrl:        ctx.url || window.location.href,
         platform:       ctx.platform || undefined,
         maxChars:       this.currentFieldMaxLength || undefined,

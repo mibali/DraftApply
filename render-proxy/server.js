@@ -252,18 +252,37 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
       return res.json({ answer: deterministicAnswer, provider: 'deterministic' });
     }
 
+    // Parse CV and JD into structured data to enrich prompts with a
+    // requirements bridge and relevance-ranked evidence hints.
+    // Both operations are fast synchronous JS — no network, no LLM.
+    // Any parsing failure is silenced; generation falls back to raw-text mode.
+    let cvData;
+    let jdData;
+    let matchMap = [];
+    try {
+      cvData = new CVParser().parse(body.cvText);
+      if (body.jobDescription && cvData) {
+        jdData = new JDParser().parse(body.jobDescription, body.jobTitle || '', body.company || '');
+        matchMap = new CVTailor().buildMatchMap(cvData, jdData);
+      }
+    } catch (_) {}
+
     try {
       const result = recipe.buildPrompts({
         question:       cleanedQuestion,
         length:         body.length || 'medium',
         tone:           body.tone || 'natural',
         cvText:         body.cvText,
+        cvData:         cvData,
+        jdData:         jdData,
+        matchMap:       matchMap.length > 0 ? matchMap : undefined,
         jobTitle:       body.jobTitle || undefined,
         company:        body.company || undefined,
         jobDescription: body.jobDescription || undefined,
         requirements:   Array.isArray(body.requirements) ? body.requirements : undefined,
         pageUrl:        body.pageUrl || undefined,
         platform:       body.platform || undefined,
+        maxChars:       Number.isFinite(Number(body.maxChars)) ? Number(body.maxChars) : undefined,
       });
       systemPrompt = result.systemPrompt;
       userPrompt   = result.userPrompt;

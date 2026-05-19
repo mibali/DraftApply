@@ -13,6 +13,9 @@
  *     length:          'short' | 'medium' | 'long',
  *     tone:            'natural' | 'formal' | 'direct',
  *     cvText:          string,
+ *     cvData:          object?,
+ *     jdData:          object?,
+ *     matchMap:        object[]?,
  *     jobTitle:        string?,
  *     company:         string?,
  *     jobDescription:  string?,
@@ -728,6 +731,165 @@ Answer in approximately ${words} words. First person, no preamble.`;
 }
 
 // ---------------------------------------------------------------------------
+// Structured-data enrichment helpers
+// ---------------------------------------------------------------------------
+
+// Words common in question phrasing that score too many unrelated CV bullets.
+const HINT_STOP = new Set([
+  'about', 'would', 'could', 'should', 'where', 'which', 'while', 'since',
+  'other', 'being', 'using', 'doing', 'going', 'describe', 'example',
+  'situation', 'experience', 'share', 'think', 'tell', 'give', 'walk',
+  'through', 'worked', 'working', 'candidate', 'application', 'answer',
+]);
+
+function significantWords(text) {
+  return [...new Set(
+    String(text || '')
+      .toLowerCase()
+      .split(/\W+/)
+      .filter(w => w.length >= 5 && !HINT_STOP.has(w))
+  )];
+}
+
+function overlapScore(words, text) {
+  const haystack = String(text || '').toLowerCase();
+  return words.filter(w => haystack.includes(w)).length;
+}
+
+/**
+ * Surface the CV bullets most lexically relevant to this question.
+ * Injected before MY CV: so the model knows where to look without losing
+ * the full CV as fallback context.
+ * Returns '' if cvData is absent or no bullets score above zero.
+ */
+function buildEvidenceHint(cvData, question) {
+  const experience = cvData?.experience;
+  if (!experience || experience.length === 0) return '';
+
+  const qWords = significantWords(question);
+  if (qWords.length === 0) return '';
+
+  const bulletsByRole = experience
+    .flatMap(exp =>
+      (exp.responsibilities || []).map(r => ({
+        text: r,
+        label: [exp.title, exp.company].filter(Boolean).join(' @ ') || 'Experience',
+        roleKey: [exp.title, exp.company].filter(Boolean).join('|') || 'Experience',
+        score: overlapScore(qWords, r),
+      }))
+    )
+    .filter(b => b.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  const achievements = (cvData.achievements || [])
+    .map(a => ({
+      text: a,
+      label: 'Achievement',
+      roleKey: `achievement:${a}`,
+      score: overlapScore(qWords, a),
+    }))
+    .filter(b => b.score > 0);
+
+  const selected = [];
+  const usedRoles = new Set();
+  for (const bullet of bulletsByRole) {
+    if (selected.length >= 4) break;
+    if (usedRoles.has(bullet.roleKey)) continue;
+    selected.push(bullet);
+    usedRoles.add(bullet.roleKey);
+  }
+  for (const bullet of [...bulletsByRole, ...achievements].sort((a, b) => b.score - a.score)) {
+    if (selected.length >= 4) break;
+    if (selected.includes(bullet)) continue;
+    selected.push(bullet);
+  }
+
+  if (selected.length === 0) return '';
+
+  const lines = selected.map(b => `  • [${b.label}] ${b.text.slice(0, 130)}`);
+  return `MOST RELEVANT CV BULLETS FOR THIS QUESTION:\n${lines.join('\n')}\n\n`;
+}
+
+function buildJdFocusBlock(jdData, qType) {
+  if (!jdData || !['motivation', 'why_company', 'cover_letter'].includes(qType)) return '';
+
+  const responsibilities = (jdData.responsibilities || []).slice(0, qType === 'cover_letter' ? 5 : 3);
+  const keywords = [
+    ...(jdData.requiredSkills || []),
+    ...(jdData.tools || []),
+    ...(jdData.atsKeywords || []),
+  ].filter(Boolean);
+  const uniqueKeywords = [...new Set(keywords.map(k => String(k).trim()).filter(Boolean))].slice(0, 12);
+
+  if (responsibilities.length === 0 && uniqueKeywords.length === 0) return '';
+
+  let block = 'ROLE/JD SIGNALS TO USE FOR TAILORING:\n';
+  if (responsibilities.length > 0) {
+    block += `Responsibilities that matter:\n${responsibilities.map(r => `  - ${r}`).join('\n')}\n`;
+  }
+  if (uniqueKeywords.length > 0) {
+    block += `Keywords/tools to echo naturally: ${uniqueKeywords.join(', ')}\n`;
+  }
+  return `${block}\n`;
+}
+
+/**
+ * Map the question to the candidate's strongest matched JD requirements
+ * and surface their CV evidence. Injected right before the question so
+ * the model knows exactly which proof points to use.
+ * Returns '' if matchMap is absent or no matched requirements exist.
+ */
+function buildRequirementsBridge(matchMap, question, qType) {
+  if (!Array.isArray(matchMap) || matchMap.length === 0) return '';
+
+  const qWords = significantWords(question);
+  const allowTopMatchesWithoutQuestionOverlap = qType === 'cover_letter';
+
+  const candidates = matchMap
+    .filter(m => m.allowedToMention && m.evidence && m.evidence.length > 0)
+    .map(m => {
+      const reqTokens = significantWords(m.requirement);
+      const overlap = qWords.filter(w => reqTokens.includes(w)).length;
+      return { requirement: m.requirement, evidence: m.evidence, overlap };
+    })
+    .filter(m => allowTopMatchesWithoutQuestionOverlap || m.overlap > 0)
+    .sort((a, b) => b.overlap - a.overlap || b.evidence.length - a.evidence.length)
+    .slice(0, 3);
+
+  if (candidates.length === 0) return '';
+
+  const lines = candidates.map(c => {
+    const ev = (c.evidence[0] || '').slice(0, 110);
+    return ev
+      ? `  ✓ ${c.requirement}\n    → "${ev}"`
+      : `  ✓ ${c.requirement}`;
+  });
+
+  return `JD REQUIREMENTS YOUR BACKGROUND COVERS (use these as your proof points):\n${lines.join('\n')}\n\n`;
+}
+
+/**
+ * Inject structured-data hints into a user prompt.
+ * Evidence hint goes before MY CV: (guidance on where to look).
+ * JD focus and requirements bridge go before Question: or Write a cover letter
+ * (role signals first, then matched proof points closest to the answer task).
+ * If neither insertion point is found the prompt is returned unchanged.
+ */
+function injectHints(userPrompt, evidenceHint, jdFocusBlock, bridge) {
+  let p = userPrompt;
+  if (evidenceHint) {
+    p = p.replace(/^MY CV:/m, `${evidenceHint}MY CV:`);
+  }
+  if (jdFocusBlock) {
+    p = p.replace(/^(Question:|Write a cover letter)/m, `${jdFocusBlock}$1`);
+  }
+  if (bridge) {
+    p = p.replace(/^(Question:|Write a cover letter)/m, `${bridge}$1`);
+  }
+  return p;
+}
+
+// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
@@ -737,6 +899,9 @@ export function buildPrompts(input) {
     length = 'medium',
     tone = 'natural',
     cvText = '',
+    cvData,
+    jdData,
+    matchMap,
     jobTitle,
     company,
     jobDescription,
@@ -794,6 +959,22 @@ export function buildPrompts(input) {
       break;
     default:
       result = buildGeneralPrompt(cvText, question, length, jobCtx, candidateName, tone);
+  }
+
+  // Inject structured-data hints for question types where
+  // structured context meaningfully improves specificity. Skipped for types
+  // that don't draw on CV stories (salary, short_factual, extraction, brief).
+  const HINT_TYPES = new Set([
+    'behavioral', 'troubleshooting', 'strength_weakness',
+    'motivation', 'why_company', 'cover_letter', 'general', 'yes_no',
+  ]);
+  if (result && HINT_TYPES.has(qType)) {
+    const evidenceHint = buildEvidenceHint(cvData, question);
+    const jdFocusBlock = buildJdFocusBlock(jdData, qType);
+    const bridge = buildRequirementsBridge(matchMap, question, qType);
+    if (evidenceHint || jdFocusBlock || bridge) {
+      result = { ...result, userPrompt: injectHints(result.userPrompt, evidenceHint, jdFocusBlock, bridge) };
+    }
   }
 
   // Append a hard character limit instruction when the form field has a known maxlength.
