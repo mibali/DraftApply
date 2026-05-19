@@ -76,6 +76,21 @@ export class PromptBuilder {
         'describe an instance',
         'share an experience where'
       ],
+      troubleshooting: [
+        'troubleshoot',
+        'troubleshooting',
+        'debug',
+        'debugging',
+        'diagnose',
+        'diagnosing',
+        'root cause',
+        'rca',
+        'not immediately know',
+        "don't immediately know",
+        'dont immediately know',
+        'unknown issue',
+        'unclear issue'
+      ],
       technical: [
         'experience with',
         'familiar with',
@@ -183,6 +198,9 @@ export class PromptBuilder {
     for (const [type, patterns] of Object.entries(this.questionTypes)) {
       for (const pattern of patterns) {
         if (lowerQuestion.includes(pattern)) {
+          if (type === 'troubleshooting' && !/\b(how|approach|process|method|steps?|when|what\s+do\s+you\s+do)\b/i.test(lowerQuestion)) {
+            continue;
+          }
           return type;
         }
       }
@@ -384,6 +402,19 @@ RULES:
 - Use past tense throughout
 - The story must come from a specific role/project in the CV — do not fabricate
 - If multiple CV examples are relevant, pick the strongest one (not the most recent)`,
+
+      troubleshooting: `This is a TROUBLESHOOTING / PROBLEM-SOLVING PROCESS question. Show a calm, structured method and prove it with one real example.
+
+APPROACH:
+- Start with the method, not a CV summary: define/reproduce the issue, gather evidence, isolate variables, test hypotheses, fix, then prevent recurrence.
+- Include one concrete CV example from incident response, RCA, log analysis, automation, platform reliability, or production support.
+- Explain how the method reduces repeat issues through remediation, documentation, runbooks, monitoring, or automation.
+- If job context is provided, align the process to the role's reliability/customer/system needs.
+
+RULES:
+- Do not open with "I draw on my experiences from various roles" or "Throughout my career".
+- Do not list several employers. Pick one proof point and make the process clear.
+- Do not invent tools, incidents, metrics, or outcomes.`,
 
       technical: `This is a TECHNICAL question. Demonstrate depth, not just breadth.
 

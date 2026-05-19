@@ -43,4 +43,27 @@ describe('render proxy recipe', () => {
     expect(prompt.systemPrompt).not.toMatch(/data extraction assistant/i);
     expect(prompt.systemPrompt).toMatch(/SALARY \/ COMPENSATION question/);
   });
+
+  it('routes troubleshooting approach questions to a dedicated process prompt', () => {
+    const prompt = buildPrompts({
+      question: "How do you approach troubleshooting when you don't immediately know what's wrong?",
+      length: 'medium',
+      tone: 'natural',
+      cvText: `${CV}
+
+Built Python-based automation tools for diagnostics and environment validation.
+Led root cause analysis for production issues and authored runbooks.
+Used log analysis to reproduce and isolate customer platform issues.`,
+      jobTitle: 'AI Architect',
+      jobDescription: 'The role needs customer-facing technical troubleshooting, production reliability, documentation, and root cause analysis.',
+      requirements: ['Troubleshooting', 'Root cause analysis', 'Customer-facing technical support'],
+    });
+
+    expect(prompt.systemPrompt).toMatch(/troubleshooting\/process question/i);
+    expect(prompt.systemPrompt).toMatch(/define\/reproduce the issue, gather evidence, isolate variables, test hypotheses/i);
+    expect(prompt.systemPrompt).toMatch(/AVOID:/);
+    expect(prompt.userPrompt).toMatch(/one specific CV example/i);
+    expect(prompt.userPrompt).toMatch(/no bullet list/i);
+    expect(prompt.maxTokens).toBeLessThanOrEqual(380);
+  });
 });

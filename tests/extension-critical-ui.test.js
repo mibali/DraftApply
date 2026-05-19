@@ -24,6 +24,21 @@ describe('extension critical modal behavior', () => {
     expect(pageExtractorJs).toContain('classifyContextSections');
     expect(pageExtractorJs).toContain('sectionedJobContext');
     expect(contentJs).toContain('return ctx.sectionedJobContext || ctx.jobDescription || undefined');
-    expect(contentJs).toContain('this.pageContext.sectionedJobContext = this.pageExtractor.buildSectionedContextText');
+    expect(contentJs).toContain('nextContext.sectionedJobContext = this.pageExtractor.buildSectionedContextText');
+  });
+
+  it('keeps answer prefetch caches scoped to the active job context', () => {
+    expect(contentJs).toContain('answerCacheKey(question');
+    expect(contentJs).toContain('cached.question === question && cached.cacheKey === cacheKey');
+    expect(contentJs).toContain('this._prefetchByQuestion.get(cacheKey)');
+    expect(contentJs).toContain('this._prefetchByQuestion.set(cacheKey, cacheEntry.answer)');
+    expect(contentJs).toContain("cacheEntry.status = 'stale'");
+  });
+
+  it('refreshes page context on SPA navigation and DOM mutations', () => {
+    expect(contentJs).toContain('installSpaNavigationWatchers');
+    expect(contentJs).toContain("history[method] = function patchedHistoryMethod");
+    expect(contentJs).toContain("window.addEventListener('draftapply:navigation'");
+    expect(contentJs).toContain("this.scheduleContextRefresh('mutation'");
   });
 });

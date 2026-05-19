@@ -23,11 +23,13 @@ class DraftApplyExtension {
     this.observer = null;
     this._streamResolvers = new Map(); // requestId -> { resolve, reject }
     this._prefetchCache = new WeakMap(); // field -> { status, question, answer, promise }
-    this._prefetchByQuestion = new Map(); // question -> answer (survives React re-renders)
+    this._prefetchByQuestion = new Map(); // context-aware question key -> answer (survives React re-renders)
     this._buttonMap = new WeakMap();    // field -> overlay button
     this._observedRoots = new WeakSet(); // Document/ShadowRoot roots watched for new fields
     this._prefetchTimer = null;
     this._prefetchField = null;
+    this._contextRefreshTimer = null;
+    this._pageContextKey = null;
     this._lastChunkTime = 0; // epoch ms; updated on each STREAM_CHUNK for watchdog
 
     this.init();
@@ -86,6 +88,7 @@ class DraftApplyExtension {
     this.listenForMessages();
     this.observeFormFields();
     this.showPageContextIndicator();
+    this.installSpaNavigationWatchers();
     
     // Re-extract context and re-scan fields after delay (for SPAs that load content async)
     setTimeout(() => {
@@ -102,10 +105,15 @@ class DraftApplyExtension {
     // Re-extract on SPA navigation — stored so destroy() can remove it
     this._onPopState = () => {
       try { if (!chrome.runtime?.id) return; } catch { return; }
-      this.extractPageContext();
-      this.updateContextBadge();
+      this.scheduleContextRefresh('popstate', 100);
     };
     window.addEventListener('popstate', this._onPopState);
+
+    this._onDraftApplyNavigation = () => {
+      try { if (!chrome.runtime?.id) return; } catch { return; }
+      this.scheduleContextRefresh('history', 250);
+    };
+    window.addEventListener('draftapply:navigation', this._onDraftApplyNavigation);
   }
 
   destroy() {
@@ -113,6 +121,8 @@ class DraftApplyExtension {
     this.modal?.remove();
     if (this._onKeyDown) document.removeEventListener('keydown', this._onKeyDown);
     if (this._onPopState) window.removeEventListener('popstate', this._onPopState);
+    if (this._onDraftApplyNavigation) window.removeEventListener('draftapply:navigation', this._onDraftApplyNavigation);
+    if (this._contextRefreshTimer) clearTimeout(this._contextRefreshTimer);
     // Clean up overlay buttons
     document.querySelectorAll('.da-field-btn-overlay').forEach(btn => btn.remove());
     document.querySelectorAll('#draftapply-indicator').forEach(el => el.remove());
@@ -124,13 +134,92 @@ class DraftApplyExtension {
   extractPageContext() {
     try {
       const ctx = this.pageExtractor.extract();
-      if (ctx) this.pageContext = ctx;
+      if (ctx) this.setPageContext(ctx);
     } catch (e) {
       console.warn('[DraftApply] Failed to extract page context:', e);
-      // Preserve last good context rather than nulling it out — on SPA navigation
-      // a failed extraction of a new step should not lose the job description from
-      // the previous step.
+      if (this.pageContext?.url && this.pageContext.url !== window.location.href) {
+        this.setPageContext({
+          url: window.location.href,
+          platform: this.pageContext.platform || 'generic',
+          jobTitle: '',
+          company: '',
+          jobDescription: '',
+          contextQuality: 'none',
+          requirements: [],
+          extractedAt: new Date().toISOString()
+        });
+      }
     }
+  }
+
+  setPageContext(ctx) {
+    const nextKey = this.contextCacheKey(ctx);
+    const changed = this._pageContextKey && nextKey !== this._pageContextKey;
+    this.pageContext = ctx;
+    this._pageContextKey = nextKey;
+    if (changed) this.clearAnswerCaches();
+  }
+
+  contextCacheKey(ctx = this.pageContext || {}) {
+    const contextText = ctx.sectionedJobContext || ctx.jobDescription || ctx.fullPageText || '';
+    const parts = [
+      ctx.url || window.location.href,
+      ctx.jobTitle || '',
+      ctx.company || '',
+      ctx.contextQuality || '',
+      this.hashText(contextText)
+    ];
+    return parts.join('|');
+  }
+
+  hashText(text) {
+    const value = String(text || '').slice(0, 12000);
+    let hash = 5381;
+    for (let i = 0; i < value.length; i++) {
+      hash = ((hash << 5) + hash) + value.charCodeAt(i);
+      hash |= 0;
+    }
+    return String(hash);
+  }
+
+  answerCacheKey(question, ctx = this.pageContext || {}) {
+    return `${this.contextCacheKey(ctx)}::${String(question || '').trim().toLowerCase()}`;
+  }
+
+  clearAnswerCaches() {
+    this._prefetchCache = new WeakMap();
+    this._prefetchByQuestion.clear();
+    document.querySelectorAll('.da-field-btn-overlay.da-btn-ready,.da-field-btn-overlay.da-btn-prefetching')
+      .forEach(btn => btn.classList.remove('da-btn-ready', 'da-btn-prefetching'));
+  }
+
+  scheduleContextRefresh(_reason = 'change', delay = 900) {
+    clearTimeout(this._contextRefreshTimer);
+    this._contextRefreshTimer = setTimeout(() => {
+      try { if (!chrome.runtime?.id) return; } catch { return; }
+      this.extractPageContext();
+      this.updateContextBadge();
+    }, delay);
+  }
+
+  installSpaNavigationWatchers() {
+    if (window.__draftapplyHistoryPatched) return;
+    window.__draftapplyHistoryPatched = true;
+
+    const notify = () => {
+      setTimeout(() => window.dispatchEvent(new Event('draftapply:navigation')), 0);
+    };
+
+    for (const method of ['pushState', 'replaceState']) {
+      const original = history[method];
+      if (typeof original !== 'function') continue;
+      history[method] = function patchedHistoryMethod(...args) {
+        const result = original.apply(this, args);
+        notify();
+        return result;
+      };
+    }
+    window.addEventListener('hashchange', notify);
   }
 
   /**
@@ -554,10 +643,11 @@ class DraftApplyExtension {
           // Use prefetch cache if answer is ready for the same question.
           // Check WeakMap first (same element), then the question-keyed Map as
           // fallback for React re-renders that replaced the DOM element.
+          const cacheKey = this.answerCacheKey(question);
           const cached = this._prefetchCache.get(field);
-          const cachedAnswer = (cached?.status === 'ready' && cached.question === question)
+          const cachedAnswer = (cached?.status === 'ready' && cached.question === question && cached.cacheKey === cacheKey)
             ? cached.answer
-            : this._prefetchByQuestion.get(question);
+            : this._prefetchByQuestion.get(cacheKey);
           if (cachedAnswer) {
             this.showModal(question);
             const output = this.modal.querySelector('#da-answer-output');
@@ -567,7 +657,7 @@ class DraftApplyExtension {
             // Remove ready indicator from button
             btn.classList.remove('da-btn-ready');
             this._prefetchCache.delete(field);
-            this._prefetchByQuestion.delete(question);
+            this._prefetchByQuestion.delete(cacheKey);
             return;
           }
 
@@ -627,7 +717,10 @@ class DraftApplyExtension {
     let debounceTimer;
     const debouncedAddButtons = () => {
       clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(addButtons, 150);
+      debounceTimer = setTimeout(() => {
+        addButtons();
+        this.scheduleContextRefresh('mutation', 900);
+      }, 150);
     };
 
     // Reposition visible buttons on scroll/resize (don't re-scan DOM)
@@ -896,6 +989,7 @@ class DraftApplyExtension {
 
     const btn = this._buttonMap.get(field);
     const ctx = this.pageContext || {};
+    const cacheKey = this.answerCacheKey(question, ctx);
     const jobDescriptionForPayload = this._jobDescriptionForPayload(ctx);
     const fieldMaxLen = (field.maxLength > 0) ? field.maxLength : null;
     const payload = {
@@ -910,18 +1004,23 @@ class DraftApplyExtension {
       maxChars:       fieldMaxLen || undefined,
     };
 
-    const cacheEntry = { status: 'loading', question, answer: null };
+    const cacheEntry = { status: 'loading', question, cacheKey, answer: null };
     this._prefetchCache.set(field, cacheEntry);
     if (btn?.isConnected) btn.classList.add('da-btn-prefetching');
 
     try {
       const result = await chrome.runtime.sendMessage({ type: 'CALL_API', requestId: null, payload });
+      if (cacheKey !== this.answerCacheKey(question)) {
+        cacheEntry.status = 'stale';
+        if (btn?.isConnected) btn.classList.remove('da-btn-prefetching', 'da-btn-ready');
+        return;
+      }
       cacheEntry.answer = result?.answer || result?.text || result?.content || null;
       cacheEntry.status = cacheEntry.answer ? 'ready' : 'error';
       // Also store by question string so re-rendered React fields can still hit the cache.
       // Cap at 20 entries (LRU-evict oldest) to prevent unbounded memory growth.
       if (cacheEntry.answer) {
-        this._prefetchByQuestion.set(question, cacheEntry.answer);
+        this._prefetchByQuestion.set(cacheKey, cacheEntry.answer);
         if (this._prefetchByQuestion.size > 20) {
           this._prefetchByQuestion.delete(this._prefetchByQuestion.keys().next().value);
         }
@@ -1424,20 +1523,22 @@ class DraftApplyExtension {
     if (!area || !input) return;
     const text = input.value.trim();
     if (!text) return;
-    if (!this.pageContext) this.pageContext = {};
-    this.pageContext.jobDescription = text;
+    const nextContext = { ...(this.pageContext || {}) };
+    nextContext.url = nextContext.url || window.location.href;
+    nextContext.jobDescription = text;
     if (this.pageExtractor?.classifyContextSections) {
-      this.pageContext.contextSections = this.pageExtractor.classifyContextSections(text);
-      this.pageContext.sectionedJobContext = this.pageExtractor.buildSectionedContextText(
-        this.pageContext.contextSections,
+      nextContext.contextSections = this.pageExtractor.classifyContextSections(text);
+      nextContext.sectionedJobContext = this.pageExtractor.buildSectionedContextText(
+        nextContext.contextSections,
         text
       );
-      this.pageContext.contextConfidence = this.pageExtractor.scoreContextSections(
-        this.pageContext.contextSections,
+      nextContext.contextConfidence = this.pageExtractor.scoreContextSections(
+        nextContext.contextSections,
         'heuristic'
       );
     }
-    this.pageContext.contextQuality = 'heuristic';
+    nextContext.contextQuality = 'heuristic';
+    this.setPageContext(nextContext);
     area.hidden = true;
     this.updateContextBadge();
   }

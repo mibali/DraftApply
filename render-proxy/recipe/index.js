@@ -245,6 +245,12 @@ function detectQuestionType(question) {
 
   // Behavioral — STAR method
   if (
+    /\b(troubleshoot|troubleshooting|debug|debugging|diagnos(?:e|ing|is)|root\s+cause|rca|incident|unknown|unclear|ambiguous|not\s+immediately\s+know|don['’]?t\s+(immediately\s+)?know)\b/i.test(q) &&
+    /\b(how|approach|process|method|steps?|when|what\s+do\s+you\s+do)\b/i.test(q)
+  ) return 'troubleshooting';
+
+  // Behavioral — STAR method
+  if (
     /tell\s+(me\s+)?about\s+a\s+time/i.test(q) ||
     /describe\s+a\s+(time|situation|scenario|challenge|moment|instance)/i.test(q) ||
     /give\s+(me\s+)?(an?\s+)?example\s+(of|where|when)/i.test(q) ||
@@ -499,6 +505,44 @@ Write a ${words}-word answer. First person, no preamble, no "Great question".`;
   return { systemPrompt, userPrompt, temperature: 0.75, maxTokens };
 }
 
+function buildTroubleshootingPrompt(cvText, question, length, jobCtx, candidateName, tone) {
+  const words = { short: '70-105', medium: '115-165', long: '170-230' }[length] || '115-165';
+  const maxTokens = { short: 240, medium: 380, long: 520 }[length] || 380;
+  const writingGuidance = getWritingGuidance(tone);
+
+  const systemPrompt = `${identityPreamble(candidateName)}
+
+You are answering a troubleshooting/process question for a job application.
+${writingGuidance}${getBrevityInstruction(length)}
+
+WHAT GOOD LOOKS LIKE:
+- Open with the candidate's actual troubleshooting method, not a career summary.
+- Give a clear sequence: define/reproduce the issue, gather evidence, isolate variables, test hypotheses, fix, then prevent recurrence.
+- Include ONE concrete example from the CV to prove the method is real.
+- Sound practical and calm under ambiguity.
+- If job context is provided, subtly align the method to what the role needs: production reliability, customer impact, logs, incidents, systems, automation, documentation, or cross-functional debugging.
+
+AVOID:
+- "I draw on my experience from various roles"
+- Listing multiple employers without a clear method
+- Vague phrases like "break down complex problems" unless followed by the exact steps
+- Invented tools, incidents, metrics, or outcomes`;
+
+  const cvContext = getCvContext(cvText, 40000);
+  let userPrompt = `MY CV:\n${cvContext}\n\n`;
+  if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
+  userPrompt += `Question: ${question}
+
+Write a ${words}-word answer with this shape:
+1. First sentence: direct method for troubleshooting unknown issues.
+2. Middle: 3-5 practical steps in natural prose.
+3. Proof: one specific CV example, preferably from production support, incident response, RCA, log analysis, automation, or platform reliability.
+4. End: how this prevents repeat issues or improves future troubleshooting.
+
+First person, no preamble, no bullet list, no headers.`;
+  return { systemPrompt, userPrompt, temperature: 0.6, maxTokens };
+}
+
 /**
  * Focused strength builder — does not mention weaknesses.
  */
@@ -725,6 +769,9 @@ export function buildPrompts(input) {
       break;
     case 'behavioral':
       result = buildBehavioralPrompt(cvText, question, length, jobCtx, candidateName, tone);
+      break;
+    case 'troubleshooting':
+      result = buildTroubleshootingPrompt(cvText, question, length, jobCtx, candidateName, tone);
       break;
     case 'strength_weakness': {
       const isWeakness = /weakness(es)?|areas?\s+(for|of|to)\s+improve(ment)?|development\s+area|improve\s+about\s+yourself/i.test(question);
