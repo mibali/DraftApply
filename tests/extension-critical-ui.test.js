@@ -19,4 +19,11 @@ describe('extension critical modal behavior', () => {
     expect(pageExtractorJs).toContain('this role requires');
     expect(pageExtractorJs).toContain('your responsibilities');
   });
+
+  it('sends classified page context to answer generation when available', () => {
+    expect(pageExtractorJs).toContain('classifyContextSections');
+    expect(pageExtractorJs).toContain('sectionedJobContext');
+    expect(contentJs).toContain('return ctx.sectionedJobContext || ctx.jobDescription || undefined');
+    expect(contentJs).toContain('this.pageContext.sectionedJobContext = this.pageExtractor.buildSectionedContextText');
+  });
 });

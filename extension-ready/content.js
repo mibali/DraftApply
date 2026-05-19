@@ -877,6 +877,12 @@ class DraftApplyExtension {
    * Silently prefetch an answer for a field so it can be shown instantly on click.
    * Uses the same structured payload as generateAnswer but non-streaming.
    */
+  _jobDescriptionForPayload(ctx = this.pageContext || {}) {
+    const isReliableContext = ctx.contextQuality === 'structured' || ctx.contextQuality === 'heuristic';
+    if (!isReliableContext) return undefined;
+    return ctx.sectionedJobContext || ctx.jobDescription || undefined;
+  }
+
   async _startPrefetch(field) {
     const label = this.findFieldLabel(field);
     const fieldHint = field.name || field.id || field.placeholder || null;
@@ -890,10 +896,7 @@ class DraftApplyExtension {
 
     const btn = this._buttonMap.get(field);
     const ctx = this.pageContext || {};
-    const jobDescriptionForPayload =
-      (ctx.contextQuality === 'structured' || ctx.contextQuality === 'heuristic')
-        ? ctx.jobDescription
-        : undefined;
+    const jobDescriptionForPayload = this._jobDescriptionForPayload(ctx);
     const fieldMaxLen = (field.maxLength > 0) ? field.maxLength : null;
     const payload = {
       question,
@@ -1037,12 +1040,9 @@ class DraftApplyExtension {
 
       const ctx = this.pageContext || {};
       // Only send jobDescription when it comes from a reliable source.
-      // 'fullpage' fallback is noisy raw page text — omitting it is better than
-      // injecting incoherent context that the model will anchor on or ignore.
-      const jobDescriptionForPayload =
-        (ctx.contextQuality === 'structured' || ctx.contextQuality === 'heuristic')
-          ? ctx.jobDescription
-          : undefined;
+      // Prefer sectioned context when available so the recipe sees the role,
+      // team, responsibilities, requirements, and tools without form noise.
+      const jobDescriptionForPayload = this._jobDescriptionForPayload(ctx);
       const structuredPayload = {
         question,
         length,
@@ -1426,6 +1426,17 @@ class DraftApplyExtension {
     if (!text) return;
     if (!this.pageContext) this.pageContext = {};
     this.pageContext.jobDescription = text;
+    if (this.pageExtractor?.classifyContextSections) {
+      this.pageContext.contextSections = this.pageExtractor.classifyContextSections(text);
+      this.pageContext.sectionedJobContext = this.pageExtractor.buildSectionedContextText(
+        this.pageContext.contextSections,
+        text
+      );
+      this.pageContext.contextConfidence = this.pageExtractor.scoreContextSections(
+        this.pageContext.contextSections,
+        'heuristic'
+      );
+    }
     this.pageContext.contextQuality = 'heuristic';
     area.hidden = true;
     this.updateContextBadge();

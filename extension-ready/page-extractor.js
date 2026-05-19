@@ -75,15 +75,21 @@ class PageExtractor {
     }
 
     const { jobDescription, contextQuality } = this.extractJobDescription();
+    const fullPageText = this.extractCleanPageText();
+    const contextSections = this.classifyContextSections(`${jobDescription}\n\n${fullPageText}`);
+    const sectionedJobContext = this.buildSectionedContextText(contextSections, jobDescription);
     const content = {
       url: window.location.href,
       platform: this.detectPlatform(),
       jobTitle: this.extractJobTitle(),
       company: this.extractCompany(),
       jobDescription,
+      sectionedJobContext,
+      contextSections,
+      contextConfidence: this.scoreContextSections(contextSections, contextQuality),
       contextQuality, // 'structured' | 'heuristic' | 'fullpage' | 'none'
       requirements: this.extractRequirements(),
-      fullPageText: this.extractCleanPageText(),
+      fullPageText,
       extractedAt: new Date().toISOString()
     };
 
@@ -347,8 +353,9 @@ class PageExtractor {
 
     for (const selector of selectors) {
       const el = this.querySelectorDeep(selector);
-      if (el?.textContent?.trim().length > 200) {
-        return { jobDescription: this.cleanText(el.textContent), contextQuality: 'heuristic' };
+      const text = this.getElementText(el);
+      if (text.trim().length > 200) {
+        return { jobDescription: this.cleanText(text), contextQuality: 'heuristic' };
       }
     }
 
@@ -356,8 +363,9 @@ class PageExtractor {
     const allSections = this.querySelectorAllDeep('section, article, div[class], div[id]');
     const keywords = /responsibilities|requirements|qualifications|about\s+the\s+role|what\s+you.ll\s+do|about\s+this\s+role|the\s+position/i;
     for (const el of allSections) {
-      if (el.children.length > 2 && keywords.test(el.textContent) && el.textContent.trim().length > 300) {
-        return { jobDescription: this.cleanText(el.textContent), contextQuality: 'heuristic' };
+      const text = this.getElementText(el);
+      if (el.children.length > 2 && keywords.test(text) && text.trim().length > 300) {
+        return { jobDescription: this.cleanText(text), contextQuality: 'heuristic' };
       }
     }
 
@@ -394,6 +402,170 @@ class PageExtractor {
 
     const score = signals.reduce((count, re) => count + (re.test(value) ? 1 : 0), 0);
     return score >= 3;
+  }
+
+  /**
+   * Classify visible job-page text into the sections that matter for answer quality.
+   * This is intentionally generic: it does not depend on a specific ATS or company.
+   */
+  classifyContextSections(text) {
+    const source = String(text || '').replace(/\r/g, '\n');
+    if (!source.trim()) return {};
+
+    const sectionMap = {
+      about_company: [
+        'about us', 'about the company', 'about our company', 'who we are',
+        'our mission', 'company overview', 'why join us'
+      ],
+      about_team: [
+        'about the team', 'our team', 'about our team', 'meet the team',
+        'the team', 'team overview'
+      ],
+      about_role: [
+        'about the role', 'about this role', 'the role', 'role overview',
+        'job details', 'the position', 'about the job', 'your mission'
+      ],
+      responsibilities: [
+        'responsibilities', 'your responsibilities', 'what you will do',
+        "what you'll do", 'what you’ll do', 'where you will have impact',
+        'what you will be doing', 'day to day', 'in this role'
+      ],
+      requirements: [
+        'requirements', 'qualifications', 'minimum qualifications',
+        'who you are', 'what we are looking for', 'what you bring',
+        'must have', 'required skills', 'experience required'
+      ],
+      preferred: [
+        'preferred qualifications', 'nice to have', 'bonus points',
+        'preferred skills', 'we welcome', 'good to have', 'desirable'
+      ],
+      tech_stack: [
+        'technologies', 'technology stack', 'tech stack', 'tools',
+        'technical skills', 'skills', 'tech'
+      ],
+      benefits: [
+        'benefits', "what's in it for you", 'what’s in it for you',
+        'perks', 'compensation', 'rewards'
+      ],
+      application_questions: [
+        'apply for this job', 'application', 'resume/cv', 'cover letter',
+        'salary expectations', 'visa sponsorship', 'legal right to work'
+      ]
+    };
+
+    const allHeadings = Object.values(sectionMap).flat()
+      .map(label => label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+      .sort((a, b) => b.length - a.length);
+    const headingPattern = new RegExp(`(^|\\n)\\s*(${allHeadings.join('|')})\\s*:?\\s*(?=\\n|$)`, 'gim');
+
+    const normalized = source
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/(p|div|li|ul|ol|h[1-6]|section)>/gi, '\n')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(headingPattern, '\n$2\n')
+      .replace(/[ \t]+/g, ' ')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+
+    const lines = normalized
+      .split(/\n+/)
+      .map(line => line.replace(/^[•\-*]\s*/, '').trim())
+      .filter(Boolean);
+
+    const sections = {};
+    let currentKey = null;
+
+    const detectHeading = (line) => {
+      const clean = line.toLowerCase().replace(/[:\-–—]+$/g, '').trim();
+      if (clean.length > 80) return null;
+      for (const [key, labels] of Object.entries(sectionMap)) {
+        if (labels.some(label => clean === label || clean.startsWith(`${label}:`))) return key;
+      }
+      return null;
+    };
+
+    const detectLineSection = (line) => {
+      const value = line.toLowerCase();
+      if (['about_company', 'about_team', 'about_role'].includes(currentKey)) return currentKey;
+      if (/\b(benefit|insurance|pension|holiday|vacation|voucher|allowance|bonus|equity)\b/.test(value)) return 'benefits';
+      if (/\b(apply|resume\/cv|cover letter|salary expectations|sponsorship|legal right to work)\b/.test(value)) return 'application_questions';
+      if (/\b(python|sql|java\b|go\b|react|node|aws|azure|gcp|google cloud|kubernetes|docker|terraform|airflow|vertex|bigquery|grafana|prometheus|mlflow|pytorch|tensorflow|ci\/cd|gitlab|github actions)\b/.test(value)) return 'tech_stack';
+      if (/\b(responsible for|you will|build|develop|design|deploy|maintain|lead|partner with|collaborate)\b/.test(value)) return 'responsibilities';
+      if (/\b(required|requirement|must have|experience with|experience in|proficient|familiarity|bachelor|master|degree|\d+\+?\s+years)\b/.test(value)) return 'requirements';
+      return currentKey;
+    };
+
+    const pushLine = (key, line) => {
+      if (!key || line.length < 8) return;
+      const compact = line.replace(/\s+/g, ' ').trim();
+      if (!compact || compact.length < 8) return;
+      sections[key] ||= [];
+      if (!sections[key].some(existing => existing.toLowerCase() === compact.toLowerCase())) {
+        sections[key].push(compact.slice(0, 700));
+      }
+    };
+
+    for (const line of lines) {
+      const heading = detectHeading(line);
+      if (heading) {
+        currentKey = heading;
+        continue;
+      }
+      pushLine(detectLineSection(line), line);
+    }
+
+    for (const key of Object.keys(sections)) {
+      const maxItems = key === 'application_questions' || key === 'benefits' ? 6 : 10;
+      sections[key] = sections[key].slice(0, maxItems);
+    }
+
+    return sections;
+  }
+
+  /**
+   * Compose a compact, LLM-friendly job context from classified sections.
+   * Benefits and application-form questions are kept in contextSections but omitted
+   * from the prompt by default because they often add noise to generated answers.
+   */
+  buildSectionedContextText(sections, fallback = '') {
+    const labels = [
+      ['about_company', 'About the company'],
+      ['about_team', 'About the team'],
+      ['about_role', 'About the role'],
+      ['responsibilities', 'Responsibilities'],
+      ['requirements', 'Requirements'],
+      ['preferred', 'Preferred qualifications'],
+      ['tech_stack', 'Technology and tools']
+    ];
+
+    const blocks = [];
+    for (const [key, label] of labels) {
+      const lines = sections?.[key] || [];
+      if (!lines.length) continue;
+      blocks.push(`${label}:\n${lines.map(line => `- ${line}`).join('\n')}`);
+    }
+
+    const result = blocks.join('\n\n').trim();
+    return (result || fallback || '').slice(0, 9000);
+  }
+
+  scoreContextSections(sections, contextQuality) {
+    if (contextQuality === 'none') return 0;
+    const weights = {
+      about_company: 8,
+      about_team: 8,
+      about_role: 18,
+      responsibilities: 22,
+      requirements: 22,
+      preferred: 8,
+      tech_stack: 14
+    };
+
+    let score = contextQuality === 'structured' ? 25 : contextQuality === 'heuristic' ? 15 : 5;
+    for (const [key, weight] of Object.entries(weights)) {
+      if (sections?.[key]?.length) score += weight;
+    }
+    return Math.min(score, 100);
   }
 
   /**
@@ -472,7 +644,7 @@ class PageExtractor {
       for (const selector of removeSelectors) {
         clone.querySelectorAll(selector).forEach(el => el.remove());
       }
-      bodyText = clone.textContent || '';
+      bodyText = clone.innerText || clone.textContent || '';
     } catch {
       // cloneNode can throw on pages with date/number inputs whose value attribute
       // is "undefined" or out of range (e.g. Ashby application forms)
@@ -490,10 +662,17 @@ class PageExtractor {
   /**
    * Clean extracted text.
    */
+  getElementText(el) {
+    if (!el) return '';
+    return el.innerText || el.textContent || '';
+  }
+
   cleanText(text) {
-    return text
-      .replace(/\s+/g, ' ')
-      .replace(/\n\s*\n/g, '\n\n')
+    return String(text || '')
+      .replace(/\r/g, '\n')
+      .replace(/[ \t\f\v]+/g, ' ')
+      .replace(/[ \t]*\n[ \t]*/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
       .trim()
       .slice(0, 40000);
   }
