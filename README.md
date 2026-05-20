@@ -68,7 +68,8 @@ See [`render-proxy/README.md`](render-proxy/README.md) for the full API contract
 |----------|----------|-------------|
 | `GROQ_API_KEY` | Yes, unless `OPENROUTER_API_KEY` is set | Groq API key; used as the primary LLM provider when present |
 | `OPENROUTER_API_KEY` | No | OpenRouter API key; used as fallback when Groq is rate-limited, times out, or returns a transient error |
-| `OPENROUTER_MODEL` | No | OpenRouter fallback model (default: `openrouter/owl-alpha`; example free model: `baidu/cobuddy:free`) |
+| `OPENROUTER_MODEL` | No | OpenRouter fallback model (default: `meta-llama/llama-3.3-70b-instruct`) |
+| `OPENROUTER_TAILOR_FALLBACK` | No | Set to `true` only if you want Tailor CV generation/audit to fall back to OpenRouter; default is off to preserve Groq CV quality/format |
 | `TOKEN_SECRET` | Yes | Secret for signing install tokens |
 | `GROQ_MODEL` | No | Model name (default: `llama-3.3-70b-versatile`) |
 | `RECIPE_PATH` | No | Path to custom recipe module (default: bundled `recipe/index.js`) |

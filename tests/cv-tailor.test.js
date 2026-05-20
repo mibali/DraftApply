@@ -461,6 +461,34 @@ describe('enforceTargetHeadline', () => {
   });
 });
 
+// ── restoreLockedExperienceDates ─────────────────────────────────────────────
+
+describe('restoreLockedExperienceDates', () => {
+  it('restores exact locked date strings when the model splits or reformats them', () => {
+    const tailored = `John Doe
+Senior Software Engineer
+
+PROFESSIONAL EXPERIENCE
+TechCorp
+Jan 2021 -
+Present
+Senior Frontend Engineer
+Built React dashboards
+
+StartupXYZ
+Jun 2019 - Dec 2020
+Junior Developer
+Maintained CI pipelines`;
+
+    const result = tailor.restoreLockedExperienceDates(tailored, CV);
+
+    expect(result).toContain('TechCorp\nJan 2021 – Present\nSenior Frontend Engineer');
+    expect(result).toContain('StartupXYZ\nJun 2019 – Dec 2020\nJunior Developer');
+    expect(result).not.toContain('Jan 2021 -\nPresent');
+    expect(result).not.toContain('Jun 2019 - Dec 2020');
+  });
+});
+
 
 // ── detectChangedSections ─────────────────────────────────────────────────────
 

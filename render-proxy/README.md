@@ -122,7 +122,8 @@ If `RECIPE_PATH` is not set (or fails to load), the proxy uses the bundled recip
 |----------|----------|---------|-------------|
 | `GROQ_API_KEY` | Yes, unless `OPENROUTER_API_KEY` is set | — | Groq API key; used as the primary LLM provider when present |
 | `OPENROUTER_API_KEY` | No | — | OpenRouter API key; used as fallback when Groq is rate-limited, times out, or returns a transient error |
-| `OPENROUTER_MODEL` | No | `openrouter/owl-alpha` | OpenRouter fallback model. Example free model: `baidu/cobuddy:free` |
+| `OPENROUTER_MODEL` | No | `meta-llama/llama-3.3-70b-instruct` | OpenRouter fallback model |
+| `OPENROUTER_TAILOR_FALLBACK` | No | `false` | Set to `true` only if you want Tailor CV generation/audit to fall back to OpenRouter; default is off to preserve Groq CV quality/format |
 | `OPENROUTER_SITE_URL` | No | `https://draftapply.com` | Optional OpenRouter attribution header |
 | `OPENROUTER_APP_NAME` | No | `DraftApply` | Optional OpenRouter attribution header |
 | `TOKEN_SECRET` | Yes | — | Random long string for signing install tokens |
@@ -139,7 +140,7 @@ If `RECIPE_PATH` is not set (or fails to load), the proxy uses the bundled recip
 3. Root directory: `render-proxy`
 4. Build command: `npm install`
 5. Start command: `npm start`
-6. Add env vars: `GROQ_API_KEY`, `TOKEN_SECRET`. Optionally add `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` for fallback. No need to set `RECIPE_PATH` unless you use a custom recipe.
+6. Add env vars: `GROQ_API_KEY`, `TOKEN_SECRET`. Optionally add `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` for answer fallback. Leave `OPENROUTER_TAILOR_FALLBACK` unset unless you deliberately want OpenRouter to generate/audit tailored CVs. No need to set `RECIPE_PATH` unless you use a custom recipe.
 
 ---
 
@@ -159,7 +160,7 @@ If `RECIPE_PATH` is not set (or fails to load), the proxy uses the bundled recip
 ```bash
 cd render-proxy
 npm install
-GROQ_API_KEY=your-key OPENROUTER_API_KEY=your-openrouter-key OPENROUTER_MODEL=openrouter/owl-alpha TOKEN_SECRET=your-secret npm start
+GROQ_API_KEY=your-key OPENROUTER_API_KEY=your-openrouter-key OPENROUTER_MODEL=meta-llama/llama-3.3-70b-instruct TOKEN_SECRET=your-secret npm start
 ```
 
 The server starts on `http://localhost:10000`.
