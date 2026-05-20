@@ -531,6 +531,16 @@ function formatCvToHtml(rawText, fallbackContactUrls = {}) {
         continue;
       }
 
+      // "Company Name Month Year – Month Year" on one line without pipe (OpenRouter format)
+      const inlineDateMatch = line.match(
+        /^(.{3,60}?)\s+((?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{4}.{0,40})$/i
+      );
+      if (inlineDateMatch && !isSectionHeader(inlineDateMatch[1].trim())) {
+        flushPendingCompany(null);
+        emitEntryRow(inlineDateMatch[1].trim(), inlineDateMatch[2].trim());
+        continue;
+      }
+
       // Pending company + this is a date line → complete entry row
       if (pendingCompany !== null && isDateLine(line)) {
         flushPendingCompany(line);

@@ -724,8 +724,20 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function displayTailorResults(result) {
-    const { tailoredCvText, matchReport, warnings } = result;
+    const { tailoredCvText, matchReport, warnings, provider } = result;
     displayMatchReport(matchReport, { reviewMode: false, domainSuggestions: [] });
+
+    const badge = document.getElementById('tailor-provider-badge');
+    if (badge) {
+      if (provider) {
+        badge.textContent = provider === 'openrouter' ? 'OpenRouter' : 'Groq';
+        badge.style.background = provider === 'openrouter' ? '#fef3c7' : '#d1fae5';
+        badge.style.color = provider === 'openrouter' ? '#92400e' : '#065f46';
+        badge.style.display = 'inline-block';
+      } else {
+        badge.style.display = 'none';
+      }
+    }
 
     if (warnings?.length > 0) {
       elements.tailorWarningsBox.textContent = warnings.map(w => `⚠ ${w}`).join('\n');

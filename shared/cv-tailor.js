@@ -350,7 +350,7 @@ HARVARD FORMAT — apply this structure exactly:
 INSTRUCTION
 1. HEADER: Job title on line 2 immediately below the candidate name, before any contact lines.
 2. Rewrite the professional summary so it clearly positions the candidate for this exact role and domain without saying it was tailored for a company or application. It must mention only supported evidence from the CV.
-3. CORE COMPETENCIES: Use 4–7 named categories (e.g. "Cloud & Platform Engineering: AWS, GCP, Azure"). Each category on its own line with no bullet prefix. Do NOT include an "Additional Relevant Skills" or "Additional Skills" section — place every skill in a named category or omit it. No duplicate skills across categories.
+3. CORE COMPETENCIES: Use 5–7 named categories relevant to the target role. Each category on its own line, format: "Category Label: Skill A, Skill B, Skill C, Skill D" — aim for 3–6 skills per category, no bullet prefix. Do NOT include an "Additional Relevant Skills" or "Additional Skills" section — place every skill in a named category or omit it. No duplicate skills across categories. Senior roles must have at least 5 populated categories.
 4. For each relevant role: preserve the official job title exactly, then add one short "Focus:" line below it when the original responsibilities support the target role.
 5. For each role: rewrite relevant bullets with JD vocabulary (same meaning, aligned language), reorder bullets so the strongest target-role evidence comes first.
 6. Include every user-confirmed addition in the skills/core competencies section as concise skill names. You may also use them in the summary when natural, but do not attach them to a specific employer, project, metric, certification, or achievement unless that context exists in the original CV.
@@ -521,6 +521,12 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
     return String(tailoredText)
       .split('\n')
       .map(line => line
+        // Strip LLM markdown bold/italic formatting — CV text should be plain
+        .replace(/\*\*([^*]+)\*\*/g, '$1')
+        .replace(/__([^_]+)__/g, '$1')
+        // Strip "Position:", "Title:", "Role:", "Job Title:" label prefixes
+        .replace(/^(position|title|role|job\s*title)\s*:\s*/i, '')
+        // Strip tailoring meta-phrases
         .replace(new RegExp(`\\bTailored\\s+for\\s+${genericCompanyPattern}\\s+using\\s+`, 'gi'), 'Experienced in ')
         .replace(new RegExp(`\\bTailored\\s+for\\s+${genericCompanyPattern}\\s*(?:role|position|application)?\\s*[:\\-–—]?\\s*`, 'gi'), '')
         .replace(/\b(?:customi[sz]ed|optimised|optimized)\s+for\s+(?:this\s+)?(?:role|position|job|application)\s*[:\-–—]?\s*/gi, '')

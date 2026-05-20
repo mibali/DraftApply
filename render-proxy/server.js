@@ -745,6 +745,7 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
       ],
     });
 
+    const tailorProvider = completion.provider;
     const data = await completion.response.json();
     let tailoredCvText = tailor.finalizeTailoredCV(data?.choices?.[0]?.message?.content, {
       cvData,
@@ -790,7 +791,7 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
     const changedSections = tailor.detectChangedSections(cvText, tailoredCvText);
     const matchReport     = tailor.buildMatchSummary(matchMap);
 
-    res.json({ tailoredCvText, matchReport, warnings, changedSections });
+    res.json({ tailoredCvText, matchReport, warnings, changedSections, provider: tailorProvider });
   } catch (e) {
     if (e?.name === 'AbortError') {
       return res.status(504).json({ error: 'AI service timed out. Please try again.' });
