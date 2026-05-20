@@ -599,90 +599,10 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
 
   const cvData  = new CVParser().parse(cvText);
   const jdParser = new JDParser();
-  let jdData    = jdParser.parse(jobDescription, jobTitle, company);
-
-  // Enrich jdData with a fast Groq analysis call so domain detection, skill
-  // grouping, and CV positioning work for any role type — not just tech roles.
-  // Falls back to regex-parsed jdData silently on any failure.
-  const jdAnalysisController = new AbortController();
-  const jdAnalysisTimeout = setTimeout(() => jdAnalysisController.abort(), 15000);
-  try {
-    const { systemPrompt: jdSysPrompt, userPrompt: jdUserPrompt } =
-      jdParser.buildLLMAnalysisPrompt(jobDescription);
-    const jdAnalysisResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${GROQ_API_KEY}`,
-      },
-      signal: jdAnalysisController.signal,
-      body: JSON.stringify({
-        model: GROQ_MODEL,
-        temperature: 0.1,
-        max_tokens: 1500,
-        messages: [
-          { role: 'system', content: jdSysPrompt },
-          { role: 'user',   content: jdUserPrompt },
-        ],
-      }),
-    });
-    if (jdAnalysisResponse.ok) {
-      const jdAnalysisData = await jdAnalysisResponse.json();
-      const rawJson = (jdAnalysisData?.choices?.[0]?.message?.content || '')
-        .replace(/^```(?:json)?\s*/i, '')
-        .replace(/\s*```\s*$/, '')
-        .trim();
-      jdData = jdParser.mergeWithLLMAnalysis(jdData, JSON.parse(rawJson));
-    }
-  } catch (e) {
-    console.warn('[DraftApply] JD analysis failed, using regex fallback:', e.message);
-  } finally {
-    clearTimeout(jdAnalysisTimeout);
-  }
+  const jdData    = jdParser.parse(jobDescription, jobTitle, company);
 
   const tailor = new CVTailor();
-  let matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
-
-  // Replace lexical matchMap with a Groq semantic match — catches equivalences
-  // like "stakeholder workshops" ↔ "pre-sales engagement" that token matching misses.
-  const smController = new AbortController();
-  const smTimeout = setTimeout(() => smController.abort(), 30000);
-  try {
-    const { systemPrompt: smSysPrompt, userPrompt: smUserPrompt } =
-      tailor.buildSemanticMatchPrompt(cvData, jdData, confirmedSkills);
-    const smResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${GROQ_API_KEY}`,
-      },
-      signal: smController.signal,
-      body: JSON.stringify({
-        model: GROQ_MODEL,
-        temperature: 0.1,
-        max_tokens: 6000,
-        messages: [
-          { role: 'system', content: smSysPrompt },
-          { role: 'user',   content: smUserPrompt },
-        ],
-      }),
-    });
-    if (smResponse.ok) {
-      const smData = await smResponse.json();
-      const smRaw = (smData?.choices?.[0]?.message?.content || '')
-        .replace(/^```(?:json)?\s*/i, '')
-        .replace(/\s*```\s*$/, '')
-        .trim();
-      const semanticMatchMap = tailor.mergeSemanticMatchResult(
-        JSON.parse(smRaw), jdData, confirmedSkills
-      );
-      if (semanticMatchMap) matchMap = semanticMatchMap;
-    }
-  } catch (e) {
-    console.warn('[DraftApply] Semantic match failed, using lexical fallback:', e.message);
-  } finally {
-    clearTimeout(smTimeout);
-  }
+  const matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
 
   const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(cvData, jdData, matchMap);
 

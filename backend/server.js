@@ -429,50 +429,10 @@ app.post('/api/cv/tailor', async (req, res) => {
 
     const cvData = new CVParser().parse(cvText);
     const jdParser = new JDParser();
-    let jdData = jdParser.parse(jobDescription, jobTitle, company);
-
-    // Enrich jdData with LLM analysis — generalises domain/skill detection to any role type.
-    // If the call fails, the regex-parsed jdData is used unchanged as fallback.
-    try {
-      const { systemPrompt: jdSysPrompt, userPrompt: jdUserPrompt } =
-        jdParser.buildLLMAnalysisPrompt(jobDescription);
-      const jdAnalysisResult = await generate(PROVIDER_NAME, PROVIDER_CONFIG, [
-        { role: 'system', content: jdSysPrompt },
-        { role: 'user',   content: jdUserPrompt },
-      ], { temperature: 0.1, max_tokens: 1500 });
-      const rawJson = jdAnalysisResult.answer
-        .replace(/^```(?:json)?\s*/i, '')
-        .replace(/\s*```\s*$/, '')
-        .trim();
-      const llmAnalysis = JSON.parse(rawJson);
-      jdData = jdParser.mergeWithLLMAnalysis(jdData, llmAnalysis);
-    } catch (e) {
-      console.warn('[JD analysis] LLM enrichment failed, using regex fallback:', e.message);
-    }
+    const jdData = jdParser.parse(jobDescription, jobTitle, company);
 
     const tailor = new CVTailor();
-    let matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
-
-    // Replace lexical matchMap with a Groq semantic match — catches equivalences
-    // like "stakeholder workshops" ↔ "pre-sales engagement" that token matching misses.
-    try {
-      const { systemPrompt: smSysPrompt, userPrompt: smUserPrompt } =
-        tailor.buildSemanticMatchPrompt(cvData, jdData, confirmedSkills);
-      const smResult = await generate(PROVIDER_NAME, PROVIDER_CONFIG, [
-        { role: 'system', content: smSysPrompt },
-        { role: 'user',   content: smUserPrompt },
-      ], { temperature: 0.1, max_tokens: 6000 });
-      const smRaw = smResult.answer
-        .replace(/^```(?:json)?\s*/i, '')
-        .replace(/\s*```\s*$/, '')
-        .trim();
-      const semanticMatchMap = tailor.mergeSemanticMatchResult(
-        JSON.parse(smRaw), jdData, confirmedSkills
-      );
-      if (semanticMatchMap) matchMap = semanticMatchMap;
-    } catch (e) {
-      console.warn('[Semantic match] failed, using lexical fallback:', e.message);
-    }
+    const matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
 
     const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(cvData, jdData, matchMap);
 
