@@ -18,11 +18,12 @@ describe('Tailor CV Groq budget', () => {
     const route = getCvTailorRoute(renderProxyServer);
     const llmCalls = route.match(/callChatCompletionWithFallback/g) || [];
 
-    expect(llmCalls).toHaveLength(2);
+    // 4 calls: JD analysis, semantic match, main tailoring, audit
+    expect(llmCalls).toHaveLength(4);
+    expect(route).toContain('buildLLMAnalysisPrompt');
+    expect(route).toContain('buildSemanticMatchPrompt');
     expect(route).toContain('buildTailoringPrompt');
     expect(route).toContain('buildTailoredCvAuditPrompt');
-    expect(route).not.toContain('buildLLMAnalysisPrompt');
-    expect(route).not.toContain('buildSemanticMatchPrompt');
   });
 
   it('uses OpenRouter only as a retry fallback behind Groq in production', () => {
