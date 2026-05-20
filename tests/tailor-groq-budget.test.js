@@ -16,13 +16,21 @@ function getCvTailorRoute(source) {
 describe('Tailor CV Groq budget', () => {
   it('keeps the production Tailor CV route to the main generation call plus audit', () => {
     const route = getCvTailorRoute(renderProxyServer);
-    const groqCalls = route.match(/fetch\('https:\/\/api\.groq\.com\/openai\/v1\/chat\/completions'/g) || [];
+    const llmCalls = route.match(/callChatCompletionWithFallback/g) || [];
 
-    expect(groqCalls).toHaveLength(2);
+    expect(llmCalls).toHaveLength(2);
     expect(route).toContain('buildTailoringPrompt');
     expect(route).toContain('buildTailoredCvAuditPrompt');
     expect(route).not.toContain('buildLLMAnalysisPrompt');
     expect(route).not.toContain('buildSemanticMatchPrompt');
+  });
+
+  it('uses OpenRouter only as a retry fallback behind Groq in production', () => {
+    expect(renderProxyServer).toContain('const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY');
+    expect(renderProxyServer).toContain("url: 'https://openrouter.ai/api/v1/chat/completions'");
+    expect(renderProxyServer).toContain("const primary = GROQ_API_KEY ? 'groq' : 'openrouter'");
+    expect(renderProxyServer).toContain("const canFallback = primary === 'groq' && OPENROUTER_API_KEY && isRetryableLLMError(error)");
+    expect(renderProxyServer).toContain("console.warn(`[DraftApply] Groq ${error.status || error.name || 'error'}; falling back to OpenRouter.`)");
   });
 
   it('keeps the local Tailor CV route to the main generation call plus audit', () => {

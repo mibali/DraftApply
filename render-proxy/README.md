@@ -120,7 +120,11 @@ If `RECIPE_PATH` is not set (or fails to load), the proxy uses the bundled recip
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `GROQ_API_KEY` | Yes | — | Groq API key |
+| `GROQ_API_KEY` | Yes, unless `OPENROUTER_API_KEY` is set | — | Groq API key; used as the primary LLM provider when present |
+| `OPENROUTER_API_KEY` | No | — | OpenRouter API key; used as fallback when Groq is rate-limited, times out, or returns a transient error |
+| `OPENROUTER_MODEL` | No | `openrouter/owl-alpha` | OpenRouter fallback model. Example free model: `baidu/cobuddy:free` |
+| `OPENROUTER_SITE_URL` | No | `https://draftapply.com` | Optional OpenRouter attribution header |
+| `OPENROUTER_APP_NAME` | No | `DraftApply` | Optional OpenRouter attribution header |
 | `TOKEN_SECRET` | Yes | — | Random long string for signing install tokens |
 | `GROQ_MODEL` | No | `llama-3.3-70b-versatile` | Groq model identifier |
 | `RECIPE_PATH` | No | `./recipe/index.js` | Path to recipe module (optional override) |
@@ -135,17 +139,18 @@ If `RECIPE_PATH` is not set (or fails to load), the proxy uses the bundled recip
 3. Root directory: `render-proxy`
 4. Build command: `npm install`
 5. Start command: `npm start`
-6. Add env vars: `GROQ_API_KEY`, `TOKEN_SECRET`. No need to set `RECIPE_PATH` unless you use a custom recipe.
+6. Add env vars: `GROQ_API_KEY`, `TOKEN_SECRET`. Optionally add `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` for fallback. No need to set `RECIPE_PATH` unless you use a custom recipe.
 
 ---
 
 ## Privacy Guarantees
 
 - **No logging of CV text, job descriptions, or generated answers** in the proxy engine.
-- **GROQ_API_KEY** and **TOKEN_SECRET** are read from env vars only — never committed.
+- **GROQ_API_KEY**, **OPENROUTER_API_KEY**, and **TOKEN_SECRET** are read from env vars only — never committed.
 - **Rate limiting** and **token auth** are built into the engine.
 - The extension stores the CV locally in `chrome.storage.local` — it is never persisted server-side.
 - Groq is configured with **Zero Data Retention (ZDR)** — prompts and completions are not stored by the LLM provider.
+- If OpenRouter fallback is enabled, provider retention depends on the selected OpenRouter model/provider. Review that model's privacy notes before sending sensitive CVs.
 
 ---
 
@@ -154,7 +159,7 @@ If `RECIPE_PATH` is not set (or fails to load), the proxy uses the bundled recip
 ```bash
 cd render-proxy
 npm install
-GROQ_API_KEY=your-key TOKEN_SECRET=your-secret npm start
+GROQ_API_KEY=your-key OPENROUTER_API_KEY=your-openrouter-key OPENROUTER_MODEL=openrouter/owl-alpha TOKEN_SECRET=your-secret npm start
 ```
 
 The server starts on `http://localhost:10000`.

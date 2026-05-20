@@ -15,6 +15,10 @@ import { CVTailor } from '../shared/cv-tailor.js';
 const PORT = Number(process.env.PORT || 10000);
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'openrouter/owl-alpha';
+const OPENROUTER_SITE_URL = process.env.OPENROUTER_SITE_URL || 'https://draftapply.com';
+const OPENROUTER_APP_NAME = process.env.OPENROUTER_APP_NAME || 'DraftApply';
 const TOKEN_SECRET = process.env.TOKEN_SECRET;
 
 // Recipe module – default is the bundled open-source recipe. Set RECIPE_PATH to override.
@@ -30,8 +34,8 @@ try {
   recipe = await import('./recipe/index.js');
 }
 
-if (!GROQ_API_KEY || !TOKEN_SECRET) {
-  console.error('Missing required env vars: GROQ_API_KEY and TOKEN_SECRET must be set. Exiting.');
+if ((!GROQ_API_KEY && !OPENROUTER_API_KEY) || !TOKEN_SECRET) {
+  console.error('Missing required env vars: TOKEN_SECRET and at least one LLM key (GROQ_API_KEY or OPENROUTER_API_KEY) must be set. Exiting.');
   process.exit(1);
 }
 
@@ -90,6 +94,101 @@ function getBearerToken(req) {
   return m ? m[1] : null;
 }
 
+class LLMProviderError extends Error {
+  constructor(provider, status, detail = '') {
+    super(`${provider} request failed${status ? ` (${status})` : ''}`);
+    this.name = 'LLMProviderError';
+    this.provider = provider;
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
+function isRetryableLLMError(error) {
+  if (error?.name === 'AbortError') return true;
+  const status = Number(error?.status);
+  return status === 429 || status === 408 || status >= 500;
+}
+
+function llmProviderConfig(provider) {
+  if (provider === 'groq') {
+    return {
+      provider,
+      apiKey: GROQ_API_KEY,
+      model: GROQ_MODEL,
+      url: 'https://api.groq.com/openai/v1/chat/completions',
+      headers: {},
+    };
+  }
+
+  return {
+    provider: 'openrouter',
+    apiKey: OPENROUTER_API_KEY,
+    model: OPENROUTER_MODEL,
+    url: 'https://openrouter.ai/api/v1/chat/completions',
+    headers: {
+      'HTTP-Referer': OPENROUTER_SITE_URL,
+      'X-Title': OPENROUTER_APP_NAME,
+    },
+  };
+}
+
+async function callProviderChat(provider, {
+  messages,
+  temperature = 0.7,
+  maxTokens,
+  stream = false,
+  timeoutMs = 60000,
+}) {
+  const config = llmProviderConfig(provider);
+  if (!config.apiKey) {
+    throw new LLMProviderError(provider, 0, 'Missing API key');
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(config.url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.apiKey}`,
+        ...config.headers,
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: config.model,
+        temperature,
+        ...(maxTokens ? { max_tokens: maxTokens } : {}),
+        stream,
+        messages,
+      }),
+    });
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      throw new LLMProviderError(provider, response.status, text.slice(0, 500));
+    }
+
+    return { response, provider: config.provider, model: config.model };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function callChatCompletionWithFallback(options) {
+  const primary = GROQ_API_KEY ? 'groq' : 'openrouter';
+  try {
+    return await callProviderChat(primary, options);
+  } catch (error) {
+    const canFallback = primary === 'groq' && OPENROUTER_API_KEY && isRetryableLLMError(error);
+    if (!canFallback) throw error;
+
+    console.warn(`[DraftApply] Groq ${error.status || error.name || 'error'}; falling back to OpenRouter.`);
+    return callProviderChat('openrouter', options);
+  }
+}
+
 const registerLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   limit: 20,
@@ -118,7 +217,13 @@ function authRequired(req, res, next) {
 }
 
 app.get('/api/health', (req, res) => {
-  res.json({ ok: true, provider: 'groq', model: GROQ_MODEL });
+  res.json({
+    ok: true,
+    provider: GROQ_API_KEY ? 'groq' : 'openrouter',
+    model: GROQ_API_KEY ? GROQ_MODEL : OPENROUTER_MODEL,
+    fallbackProvider: GROQ_API_KEY && OPENROUTER_API_KEY ? 'openrouter' : null,
+    fallbackModel: GROQ_API_KEY && OPENROUTER_API_KEY ? OPENROUTER_MODEL : null,
+  });
 });
 
 app.post('/api/register', registerLimiter, (req, res) => {
@@ -225,8 +330,6 @@ function cleanFieldLabel(raw) {
 }
 
 app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
-  if (!GROQ_API_KEY) return res.status(500).json({ error: 'Server misconfigured' });
-
   const body = req.body || {};
 
   let systemPrompt, userPrompt, temperature, maxTokens;
@@ -312,35 +415,19 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
   }
 
   const useStream = body.stream === true;
-  const groqController = new AbortController();
-  const groqTimeout = setTimeout(() => groqController.abort(), 60000);
 
   try {
-    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${GROQ_API_KEY}`
-      },
-      signal: groqController.signal,
-      body: JSON.stringify({
-        model: GROQ_MODEL,
-        temperature,
-        ...(maxTokens ? { max_tokens: maxTokens } : {}),
-        stream: useStream,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
-        ]
-      })
+    const completion = await callChatCompletionWithFallback({
+      temperature,
+      maxTokens,
+      stream: useStream,
+      timeoutMs: 60000,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ],
     });
-
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      console.error(`[DraftApply] Groq error ${response.status}:`, text.slice(0, 400));
-      const status = response.status === 429 ? 429 : 502;
-      return res.status(status).json({ error: status === 429 ? 'Rate limit reached — please try again shortly.' : 'Service temporarily unavailable.' });
-    }
+    const response = completion.response;
 
     if (useStream) {
       res.setHeader('Content-Type', 'text/event-stream');
@@ -369,15 +456,18 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
     const answer = data?.choices?.[0]?.message?.content;
     if (!answer?.trim()) return res.status(502).json({ error: 'No answer from provider' });
 
-    res.json({ answer, provider: 'groq', model: GROQ_MODEL });
+    res.json({ answer, provider: completion.provider, model: completion.model });
   } catch (e) {
     if (e?.name === 'AbortError') {
       return res.status(504).json({ error: 'AI service timed out. Please try again.' });
     }
+    if (e instanceof LLMProviderError) {
+      console.error(`[DraftApply] ${e.provider} generate error ${e.status}:`, String(e.detail || '').slice(0, 400));
+      const status = e.status === 429 ? 429 : 502;
+      return res.status(status).json({ error: status === 429 ? 'Rate limit reached — please try again shortly.' : 'Service temporarily unavailable.' });
+    }
     console.error('[DraftApply] Generate error:', e.message);
     return res.status(500).json({ error: 'Failed to generate answer.' });
-  } finally {
-    clearTimeout(groqTimeout);
   }
 });
 
@@ -472,38 +562,26 @@ app.post('/api/cv/upload', authRequired, generateLimiter, upload.single('cv'), a
  * Returns an array of tool name strings, or null on any failure.
  */
 async function fetchLLMDomainSuggestions(jobTitle, jdTools) {
-  if (!jobTitle || !GROQ_API_KEY) return null;
+  if (!jobTitle) return null;
 
   const toolList = (jdTools || []).slice(0, 25).join(', ') || 'none specified';
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
 
   try {
-    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${GROQ_API_KEY}`,
-      },
-      signal: controller.signal,
-      body: JSON.stringify({
-        model: GROQ_MODEL,
-        temperature: 0.2,
-        max_tokens: 200,
-        messages: [
-          {
-            role: 'system',
-            content: 'You are a technical hiring expert. Respond only with valid JSON — no markdown, no explanation.',
-          },
-          {
-            role: 'user',
-            content: `Job title: ${jobTitle}\nTechnologies already in the job description: ${toolList}\n\nList up to 10 additional tools, frameworks, or technologies that are commonly expected or genuinely valued for this exact role type but are NOT in the list above. Focus on what a hiring manager for this role would realistically look for.\n\nOutput a JSON array of strings only, e.g.: ["Tool1", "Tool2"]`,
-          },
-        ],
-      }),
+    const { response } = await callChatCompletionWithFallback({
+      temperature: 0.2,
+      maxTokens: 200,
+      timeoutMs: 8000,
+      messages: [
+        {
+          role: 'system',
+          content: 'You are a technical hiring expert. Respond only with valid JSON — no markdown, no explanation.',
+        },
+        {
+          role: 'user',
+          content: `Job title: ${jobTitle}\nTechnologies already in the job description: ${toolList}\n\nList up to 10 additional tools, frameworks, or technologies that are commonly expected or genuinely valued for this exact role type but are NOT in the list above. Focus on what a hiring manager for this role would realistically look for.\n\nOutput a JSON array of strings only, e.g.: ["Tool1", "Tool2"]`,
+        },
+      ],
     });
-
-    if (!response.ok) return null;
 
     const data = await response.json();
     const text = (data?.choices?.[0]?.message?.content || '').trim();
@@ -522,8 +600,6 @@ async function fetchLLMDomainSuggestions(jobTitle, jdTools) {
       .slice(0, 10);
   } catch {
     return null;
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
@@ -606,40 +682,18 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
 
   const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(cvData, jdData, matchMap);
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 90000);
-
   try {
-    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${GROQ_API_KEY}`
-      },
-      signal: controller.signal,
-      body: JSON.stringify({
-        model: GROQ_MODEL,
-        temperature: 0.3,
-        max_tokens: 4000,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user',   content: userPrompt   }
-        ]
-      })
+    const completion = await callChatCompletionWithFallback({
+      temperature: 0.3,
+      maxTokens: 4000,
+      timeoutMs: 90000,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user',   content: userPrompt   }
+      ],
     });
 
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      console.error(`[DraftApply] Groq tailor error ${response.status}:`, text.slice(0, 400));
-      const status = response.status === 429 ? 429 : 502;
-      return res.status(status).json({
-        error: status === 429
-          ? 'Rate limit reached — please try again shortly.'
-          : 'Service temporarily unavailable.'
-      });
-    }
-
-    const data = await response.json();
+    const data = await completion.response.json();
     let tailoredCvText = tailor.finalizeTailoredCV(data?.choices?.[0]?.message?.content, {
       cvData,
       jdData,
@@ -650,47 +704,31 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
       return res.status(502).json({ error: 'No output from provider' });
     }
 
-    const auditController = new AbortController();
-    const auditTimeout = setTimeout(() => auditController.abort(), 45000);
     try {
       const { systemPrompt: auditSystemPrompt, userPrompt: auditUserPrompt, temperature: auditTemperature } =
         tailor.buildTailoredCvAuditPrompt(cvData, jdData, matchMap, tailoredCvText, confirmedSkills);
-      const auditResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${GROQ_API_KEY}`,
-        },
-        signal: auditController.signal,
-        body: JSON.stringify({
-          model: GROQ_MODEL,
-          temperature: auditTemperature,
-          max_tokens: 4500,
-          messages: [
-            { role: 'system', content: auditSystemPrompt },
-            { role: 'user',   content: auditUserPrompt },
-          ],
-        }),
+      const auditCompletion = await callChatCompletionWithFallback({
+        temperature: auditTemperature,
+        maxTokens: 4500,
+        timeoutMs: 45000,
+        messages: [
+          { role: 'system', content: auditSystemPrompt },
+          { role: 'user',   content: auditUserPrompt },
+        ],
       });
 
-      if (auditResponse.ok) {
-        const auditData = await auditResponse.json();
-        const auditedText = auditData?.choices?.[0]?.message?.content;
-        const finalizedAudit = tailor.finalizeTailoredCV(auditedText, {
-          cvData,
-          jdData,
-          matchMap,
-          confirmedSkills,
-        });
-        if (finalizedAudit?.trim()) tailoredCvText = finalizedAudit;
-      } else {
-        const text = await auditResponse.text().catch(() => '');
-        console.warn(`[DraftApply] Tailored CV audit skipped (${auditResponse.status}):`, text.slice(0, 300));
-      }
+      const auditData = await auditCompletion.response.json();
+      const auditedText = auditData?.choices?.[0]?.message?.content;
+      const finalizedAudit = tailor.finalizeTailoredCV(auditedText, {
+        cvData,
+        jdData,
+        matchMap,
+        confirmedSkills,
+      });
+      if (finalizedAudit?.trim()) tailoredCvText = finalizedAudit;
     } catch (e) {
-      console.warn('[DraftApply] Tailored CV audit skipped:', e.message);
-    } finally {
-      clearTimeout(auditTimeout);
+      const detail = e instanceof LLMProviderError ? `${e.provider} ${e.status}` : e.message;
+      console.warn('[DraftApply] Tailored CV audit skipped:', detail);
     }
 
     const warnings        = [
@@ -705,10 +743,17 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
     if (e?.name === 'AbortError') {
       return res.status(504).json({ error: 'AI service timed out. Please try again.' });
     }
+    if (e instanceof LLMProviderError) {
+      console.error(`[DraftApply] ${e.provider} tailor error ${e.status}:`, String(e.detail || '').slice(0, 400));
+      const status = e.status === 429 ? 429 : 502;
+      return res.status(status).json({
+        error: status === 429
+          ? 'Rate limit reached — please try again shortly.'
+          : 'Service temporarily unavailable.'
+      });
+    }
     console.error('[DraftApply] Tailor error:', e.message);
     return res.status(500).json({ error: 'Failed to tailor CV.' });
-  } finally {
-    clearTimeout(timeout);
   }
 });
 
