@@ -273,15 +273,29 @@ ${jdText}`;
   mergeWithLLMAnalysis(regexParsed, llmJson) {
     if (!llmJson || typeof llmJson !== 'object') return regexParsed;
 
-    const pick = (llm, regex) =>
-      Array.isArray(llm) && llm.length > 0 ? llm : (regex || []);
+    const normalizeList = (items) => Array.isArray(items)
+      ? items
+          .map(item => (typeof item === 'string' || typeof item === 'number') ? String(item).trim() : '')
+          .filter(Boolean)
+      : [];
+    const pick = (llm, regex) => {
+      const normalized = normalizeList(llm);
+      return normalized.length > 0 ? normalized : (regex || []);
+    };
+    const skillCategories = Array.isArray(llmJson.skillCategories)
+      ? llmJson.skillCategories
+          .map(cat => ({
+            label: typeof cat?.label === 'string' ? cat.label.trim() : '',
+            skills: normalizeList(cat?.skills),
+          }))
+          .filter(cat => cat.label && cat.skills.length > 0)
+      : null;
 
     return {
       ...regexParsed,
-      domain:            typeof llmJson.domain === 'string' ? llmJson.domain : null,
-      targetPositioning: typeof llmJson.targetPositioning === 'string' ? llmJson.targetPositioning : null,
-      skillCategories:   Array.isArray(llmJson.skillCategories) && llmJson.skillCategories.length > 0
-                           ? llmJson.skillCategories : null,
+      domain:            typeof llmJson.domain === 'string' ? llmJson.domain.trim() : null,
+      targetPositioning: typeof llmJson.targetPositioning === 'string' ? llmJson.targetPositioning.trim() : null,
+      skillCategories:   skillCategories?.length ? skillCategories : null,
       requiredSkills:    pick(llmJson.requiredSkills,  regexParsed.requiredSkills),
       preferredSkills:   pick(llmJson.preferredSkills, regexParsed.preferredSkills),
       tools:             pick(llmJson.tools,            regexParsed.tools),

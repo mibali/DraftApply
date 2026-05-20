@@ -425,13 +425,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   async function restoreTailorDraft(options = {}) {
     try {
-      const [draftResult, stored] = await Promise.all([
+      const [draftResult, jobResult] = await Promise.all([
         chrome.runtime.sendMessage({ type: 'GET_TAILOR_DRAFT_FOR_ACTIVE_PAGE' }).catch(() => null),
-        chrome.storage.local.get(TAILOR_JOB_KEY),
+        chrome.runtime.sendMessage({ type: 'GET_TAILOR_JOB_FOR_ACTIVE_PAGE' }).catch(() => null),
       ]);
       const draft = draftResult?.draft;
       if (draftResult?.snapshot) activeTabSnapshot = draftResult.snapshot;
-      const job = stored?.[TAILOR_JOB_KEY];
+      if (jobResult?.snapshot) activeTabSnapshot = jobResult.snapshot;
+      const job = jobResult?.job;
 
       if (draft) {
         elements.tailorJd.value = draft.jobDescription || '';
@@ -531,18 +532,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         updatedAt: new Date().toISOString(),
       };
 
-      if (activeTabSnapshot) {
-        draft.sourceTabId = activeTabSnapshot.tabId;
-        draft.sourceUrl = activeTabSnapshot.url || '';
-        draft.sourceHost = (() => {
-          try { return new URL(activeTabSnapshot.url || '').hostname.replace(/^www\./, '').toLowerCase(); }
-          catch { return ''; }
-        })();
-        draft.sourcePageTitle = activeTabSnapshot.title || '';
-        draft.sourceJobTitle = activeTabSnapshot.pageContext?.jobTitle || '';
-        draft.sourceCompany = activeTabSnapshot.pageContext?.company || '';
-        draft.sourceSavedAt = draft.updatedAt;
-      }
+      Object.assign(draft, buildTailorSourceMetadata(draft.updatedAt));
 
       const hasContent = draft.jobDescription.trim() || draft.jobTitle.trim() || draft.company.trim();
       if (hasContent) {
@@ -553,6 +543,22 @@ document.addEventListener('DOMContentLoaded', async () => {
     } catch (e) {
       // Keep typing responsive even if storage is unavailable.
     }
+  }
+
+  function buildTailorSourceMetadata(savedAt = new Date().toISOString()) {
+    if (!activeTabSnapshot) return {};
+    return {
+      sourceTabId: activeTabSnapshot.tabId,
+      sourceUrl: activeTabSnapshot.url || '',
+      sourceHost: (() => {
+        try { return new URL(activeTabSnapshot.url || '').hostname.replace(/^www\./, '').toLowerCase(); }
+        catch { return ''; }
+      })(),
+      sourcePageTitle: activeTabSnapshot.title || '',
+      sourceJobTitle: activeTabSnapshot.pageContext?.jobTitle || '',
+      sourceCompany: activeTabSnapshot.pageContext?.company || '',
+      sourceSavedAt: savedAt,
+    };
   }
 
   function resetTailorReview() {
@@ -679,12 +685,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     const myToken = tailorToken;
 
     try {
+      if (!activeTabSnapshot) {
+        const snapshotResult = await chrome.runtime.sendMessage({ type: 'GET_ACTIVE_TAB_SNAPSHOT' }).catch(() => null);
+        activeTabSnapshot = snapshotResult?.snapshot || null;
+      }
+      const sourceSavedAt = new Date().toISOString();
       const result = await chrome.runtime.sendMessage({
         type: 'TAILOR_CV',
         jobDescription: jd,
         jobTitle: elements.tailorJobTitle.value.trim(),
         company:  elements.tailorCompany.value.trim(),
         confirmedSkills,
+        source: buildTailorSourceMetadata(sourceSavedAt),
       });
 
       if (myToken !== tailorToken) return;

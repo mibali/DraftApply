@@ -220,6 +220,11 @@ function isTailorDraftRelevant(draft, { pageContext = {}, url = '', tabId = null
   return false;
 }
 
+function isTailorJobRelevant(job, context = {}) {
+  if (!job || !['running', 'done', 'error'].includes(job.status)) return false;
+  return isTailorDraftRelevant(job, context);
+}
+
 async function getActiveTabSnapshot() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) return null;
@@ -427,6 +432,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         jobTitle: message.jobTitle || '',
         company: message.company || '',
         confirmedSkills: message.confirmedSkills || [],
+        sourceTabId: message.source?.sourceTabId ?? null,
+        sourceUrl: message.source?.sourceUrl || '',
+        sourceHost: message.source?.sourceHost || '',
+        sourcePageTitle: message.source?.sourcePageTitle || '',
+        sourceJobTitle: message.source?.sourceJobTitle || '',
+        sourceCompany: message.source?.sourceCompany || '',
+        sourceSavedAt: message.source?.sourceSavedAt || new Date().toISOString(),
       };
       try {
         const { cvText } = await chrome.storage.local.get('cvText');
@@ -626,6 +638,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
       sendResponse({ draft: relevant ? tailorCvDraft : null, snapshot });
     })().catch(error => sendResponse({ draft: null, error: error.message }));
+    return true;
+  }
+
+  if (message.type === 'GET_TAILOR_JOB_FOR_ACTIVE_PAGE') {
+    (async () => {
+      const snapshot = await getActiveTabSnapshot();
+      const { tailorCvJob } = await chrome.storage.local.get(TAILOR_JOB_KEY);
+      const relevant = snapshot && isTailorJobRelevant(tailorCvJob, {
+        pageContext: snapshot.pageContext || {},
+        url: snapshot.url,
+        tabId: snapshot.tabId,
+      });
+      if (tailorCvJob && !relevant) {
+        await chrome.storage.local.remove(TAILOR_JOB_KEY);
+      }
+      sendResponse({ job: relevant ? tailorCvJob : null, snapshot });
+    })().catch(error => sendResponse({ job: null, error: error.message }));
     return true;
   }
 

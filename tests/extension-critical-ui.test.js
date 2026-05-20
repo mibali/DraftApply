@@ -46,8 +46,9 @@ describe('extension critical modal behavior', () => {
 
   it('scopes Tailor JD fallback to the active job page instead of using a global stale draft', () => {
     expect(popupJs).toContain("GET_TAILOR_DRAFT_FOR_ACTIVE_PAGE");
-    expect(popupJs).toContain('draft.sourceUrl');
-    expect(popupJs).toContain('draft.sourceTabId');
+    expect(popupJs).toContain('buildTailorSourceMetadata');
+    expect(popupJs).toContain('sourceUrl: activeTabSnapshot.url');
+    expect(popupJs).toContain('sourceTabId: activeTabSnapshot.tabId');
     expect(contentJs).toContain("GET_TAILOR_DRAFT_FOR_PAGE");
     expect(contentJs).not.toContain("chrome.storage.local.get('tailorCvDraft')");
     expect(backgroundJs).toContain('function isTailorDraftRelevant');
@@ -56,5 +57,15 @@ describe('extension critical modal behavior', () => {
     expect(backgroundJs).toContain('movedToDifferentHost');
     expect(backgroundJs).toContain('Same host alone is deliberately not enough');
     expect(backgroundJs).toContain('Legacy drafts did not store source metadata');
+  });
+
+  it('scopes restored Tailor CV jobs to the active job page', () => {
+    expect(popupJs).toContain('GET_TAILOR_JOB_FOR_ACTIVE_PAGE');
+    expect(popupJs).toContain('buildTailorSourceMetadata');
+    expect(popupJs).toContain('source: buildTailorSourceMetadata');
+    expect(backgroundJs).toContain('function isTailorJobRelevant');
+    expect(backgroundJs).toContain('isTailorDraftRelevant(job, context)');
+    expect(backgroundJs).toContain("message.type === 'GET_TAILOR_JOB_FOR_ACTIVE_PAGE'");
+    expect(backgroundJs).toContain('await chrome.storage.local.remove(TAILOR_JOB_KEY)');
   });
 });

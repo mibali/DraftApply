@@ -362,3 +362,62 @@ describe('parse (integration)', () => {
     expect(result.seniority).toBe('mid-level');
   });
 });
+
+describe('mergeWithLLMAnalysis', () => {
+  it('sanitizes LLM-provided arrays and skill categories before merging', () => {
+    const regexParsed = parser.parse('Role requires Python and teamwork.', 'Engineer', 'Acme');
+    const merged = parser.mergeWithLLMAnalysis(regexParsed, {
+      domain: ' solution_engineering ',
+      targetPositioning: ' Position for customer-facing technical demos. ',
+      skillCategories: [
+        { label: ' Demo Leadership ', skills: [' POC ', '', null, { value: 'drop object' }, 'Technical demos'] },
+        { skills: ['No label should be dropped'] },
+        { label: 'Empty Skills', skills: [] },
+      ],
+      requiredSkills: [' Python ', null, ''],
+      preferredSkills: [],
+      tools: [' Gong '],
+      responsibilities: [' Lead demos '],
+      softSkills: [' Communication '],
+      atsKeywords: [' demo '],
+    });
+
+    expect(merged.domain).toBe('solution_engineering');
+    expect(merged.targetPositioning).toBe('Position for customer-facing technical demos.');
+    expect(merged.skillCategories).toEqual([
+      { label: 'Demo Leadership', skills: ['POC', 'Technical demos'] },
+    ]);
+    expect(merged.requiredSkills).toEqual(['Python']);
+    expect(merged.tools).toEqual(['Gong']);
+    expect(merged.responsibilities).toEqual(['Lead demos']);
+    expect(merged.softSkills).toEqual(['Communication']);
+    expect(merged.atsKeywords).toEqual(['demo']);
+  });
+
+  it('falls back to regex-parsed lists when LLM lists sanitize to empty', () => {
+    const regexParsed = {
+      requiredSkills: ['Python'],
+      preferredSkills: ['AWS'],
+      tools: ['Docker'],
+      responsibilities: ['Build APIs'],
+      softSkills: ['Communication'],
+      atsKeywords: ['automation'],
+    };
+
+    const merged = parser.mergeWithLLMAnalysis(regexParsed, {
+      requiredSkills: ['', null, { text: 'Python' }],
+      preferredSkills: [],
+      tools: [false],
+      responsibilities: null,
+      softSkills: [{ skill: 'Leadership' }],
+      atsKeywords: [''],
+    });
+
+    expect(merged.requiredSkills).toEqual(['Python']);
+    expect(merged.preferredSkills).toEqual(['AWS']);
+    expect(merged.tools).toEqual(['Docker']);
+    expect(merged.responsibilities).toEqual(['Build APIs']);
+    expect(merged.softSkills).toEqual(['Communication']);
+    expect(merged.atsKeywords).toEqual(['automation']);
+  });
+});
