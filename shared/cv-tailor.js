@@ -108,7 +108,7 @@ export class CVTailor {
     });
 
     const reqList = deduped.map((r, i) => `${i + 1}. [${r.type}] ${r.req}`).join('\n');
-    const cvText  = (cvData.rawText || '').slice(0, 6000);
+    const cvText  = (cvData.rawText || '').slice(0, 8000);
     const confirmedList = confirmed.length
       ? confirmed.map(s => `  - ${s}`).join('\n')
       : '  (none)';

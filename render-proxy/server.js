@@ -660,7 +660,7 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
       body: JSON.stringify({
         model: GROQ_MODEL,
         temperature: 0.1,
-        max_tokens: 5000,
+        max_tokens: 6000,
         messages: [
           { role: 'system', content: smSysPrompt },
           { role: 'user',   content: smUserPrompt },

@@ -461,7 +461,7 @@ app.post('/api/cv/tailor', async (req, res) => {
       const smResult = await generate(PROVIDER_NAME, PROVIDER_CONFIG, [
         { role: 'system', content: smSysPrompt },
         { role: 'user',   content: smUserPrompt },
-      ], { temperature: 0.1, max_tokens: 5000 });
+      ], { temperature: 0.1, max_tokens: 6000 });
       const smRaw = smResult.answer
         .replace(/^```(?:json)?\s*/i, '')
         .replace(/\s*```\s*$/, '')
