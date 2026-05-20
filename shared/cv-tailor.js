@@ -226,6 +226,7 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
       frontend: 'frontend engineering, product delivery, UI quality, and modern web tooling',
       backend: 'backend engineering, APIs, distributed systems, and service reliability',
       cloud: 'cloud architecture, infrastructure automation, security, and reliability',
+      solution_engineering: 'customer-facing technical leadership, enterprise SaaS solution delivery, POC/POV execution, and pre-sales technical engagement',
     }[domain] || `${jdData.jobTitle || 'the target role'} responsibilities, supported technologies, and relevant achievements`;
 
     const supportedKeywords = this._rankSupportedKeywords(matchMap, jdData).slice(0, 18);
@@ -611,6 +612,21 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
 
     const categories = [
       {
+        label: 'pre-sales technical engagement and POC/POV delivery',
+        evidence: /\b(poc|pov|proof of concept|proof of value|demo|technical selling|pre-sales|champion|value engineering|rfp|rfi|business value)\b/,
+        target: /\b(poc|pov|demo|pre-sales|solution engineer|technical sales|enterprise saas|business value|champion|selling)\b/,
+      },
+      {
+        label: 'customer-facing technical leadership and enterprise SaaS delivery',
+        evidence: /\b(customer.facing|technical support|enterprise support|customer success|escalation|tier [34]|complex platform|issue resolution|saas deployment|enterprise)\b/,
+        target: /\b(customer.facing|technical leadership|enterprise|customer success|solution engineer|account|saas|enterprise saas)\b/,
+      },
+      {
+        label: 'solution architecture and systems integration',
+        evidence: /\b(solution architect|architecture|api integration|systems? integration|platform integration|cicd integration|pipeline|security scanning)\b/,
+        target: /\b(solution architect|integration|architecture|api|platform|cicd|security|compliance|systems?)\b/,
+      },
+      {
         label: 'MLOps and AI platform enablement',
         evidence: /\b(mlops|machine learning| ai | llm|model|cody|langchain|openai|ai-powered|security scanning)\b/,
         target: /\b(mlops|machine learning| ai | llm|model|vertex|mlflow|pytorch|tensorflow|agent|data science)\b/,
@@ -880,7 +896,7 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
     const text = String(item || '').trim();
     if (!text || text.length < 2 || text.length > 140) return false;
     if (this._isJdRequirementProse(text)) return false;
-    if (/^\(?\d+\s*(?:year|yr|month)/i.test(text)) return false;
+    if (/^\(?\+?\d*\+?\s*(?:year|yr|month)/i.test(text)) return false;
     if (/:\s*\(?\d+\s*(?:year|yr|month)/i.test(text)) return false;
     if (/\b(?:bachelor|master|degree|related field|advanced degree|certification[s]?\s+in)\b/i.test(text)) return false;
     return /[A-Za-z]/.test(text);
@@ -890,7 +906,12 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
     const text = String(item || '').trim();
     return text.length > 160
       || /\b\d+\+?\s+years?\s+of\s+experience\b/i.test(text)
+      || /\b\d+\+?\s+years?\s+(in|of|with|at)\b/i.test(text)
+      || /^\+\s*years?\s+(in|of|with|at)\b/i.test(text)
       || /\bat least\s+\d+\s+years?\b/i.test(text)
+      || /\bwillingness\s+to\b/i.test(text)
+      || /\btrack\s+record\s+of\b/i.test(text)
+      || /\b(?:based\s+in|able\s+to\s+commute|commute\s+to|days?\s+per\s+week|willing(?:ness)?\s+to\s+(?:travel|commute|relocate))\b/i.test(text)
       || /\b(highly preferred|required|minimum qualifications?|preferred qualifications?|related field|equivalent practical experience)\b/i.test(text)
       || /\bdeploying and managing\b/i.test(text)
       || /\bor other relevant standards\b/i.test(text)
@@ -901,7 +922,9 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
     const text = String(item || '').trim();
     if (!text) return true;
     if (/^(?:years?|experience|ability|minimum qualifications?|preferred qualifications?)\b/i.test(text)) return true;
-    if (/^(?:developing|architecting|designing|utilizing|ensuring|prioritizing|fostering|managing)\b/i.test(text)) return true;
+    if (/^(?:developing|architecting|designing|utilizing|ensuring|prioritizing|fostering|managing|selling|closing|negotiating|sourcing|delivering)\b/i.test(text)) return true;
+    if (/^(?:willingness|track\s+record|commitment|based\s+in|able\s+to|and\s+world[- ]?class)\b/i.test(text)) return true;
+    if (/\b(?:commute|days?\s+per\s+week|or\s+similar)\b/i.test(text)) return true;
     if (/\b(?:with experience in|technical customer-facing role)\b/i.test(text)) return true;
     if (/\b(?:bachelor|master|phd|degree|science, technology, engineering, mathematics)\b/i.test(text)) return true;
     if (text.split(/\s+/).length > 12 && !/:/.test(text)) return true;
@@ -909,7 +932,17 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
   }
 
   _buildGroupedSkills(items = [], jdData = {}) {
-    const buckets = [
+    const isSolutionEngineering = this._detectDomain(jdData) === 'solution_engineering';
+    const buckets = isSolutionEngineering ? [
+      { label: 'Pre-Sales & Solution Engineering', terms: ['POC', 'POV', 'proof of concept', 'proof of value', 'technical demo', 'demo', 'RFP', 'RFI', 'solution selling', 'technical selling', 'pre-sales', 'value engineering', 'business value'] },
+      { label: 'Customer Engagement & Success', terms: ['customer success', 'customer-facing', 'enterprise SaaS', 'stakeholder alignment', 'executive engagement', 'champion building', 'account management', 'customer onboarding', 'renewal', 'expansion'] },
+      { label: 'Technical Architecture & Integration', terms: ['solution architecture', 'systems integration', 'API integration', 'REST APIs', 'cloud architecture', 'Docker', 'Kubernetes', 'CI/CD', 'GitHub Actions', 'security scanning'] },
+      { label: 'Cloud & Platform Engineering', terms: ['AWS', 'Azure', 'GCP', 'cloud infrastructure', 'Infrastructure as Code', 'Terraform', 'platform reliability'] },
+      { label: 'Programming & Automation', terms: ['Python', 'Go', 'automation', 'scripting', 'tooling', 'Bash'] },
+      { label: 'CI/CD & DevOps', terms: ['GitLab CI', 'Jenkins', 'CircleCI', 'Buildkite', 'Azure DevOps', 'pipeline', 'deployment'] },
+      { label: 'Leadership & Stakeholder Management', terms: ['technical leadership', 'stakeholder management', 'cross-functional collaboration', 'willingness to travel', 'sales partnership', 'team leadership', 'mentorship', 'executive communication'] },
+      { label: 'Additional Relevant Skills', terms: [] },
+    ] : [
       { label: 'AI & GenAI Systems', terms: ['Generative AI', 'AI solutions', 'RAG systems', 'multi-agent workflows', 'agentic systems', 'ReAct', 'tool-calling', 'context engineering', 'explainability', 'transparency'] },
       { label: 'Cloud & Platform Engineering', terms: ['Google Cloud', 'GCP', 'Vertex AI', 'AWS', 'Azure', 'cloud infrastructure', 'platform reliability', 'production reliability', 'engineering enablement'] },
       { label: 'Programming & Automation', terms: ['Python', 'Go', 'Bash', 'PowerShell', 'automation', 'scripting', 'FastAPI', 'Flask'] },
@@ -979,8 +1012,12 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
       'MLOps & ML Lifecycle': /\b(mlops|mlflow|dvc|model registry|experiment|artifact|training workflow)\b/,
       'Model Serving & Infrastructure': /\b(kserve|sagemaker|bentoml|docker|kubernetes|kubeflow|serving)\b/,
       'CI/CD & Delivery': /\b(ci cd|github actions|gitlab|jenkins|circleci|azure devops|argocd|argo|prefect|delivery)\b/,
+      'CI/CD & DevOps': /\b(ci cd|github actions|gitlab|jenkins|circleci|azure devops|buildkite|pipeline|deployment)\b/,
       'Observability & Reliability': /\b(prometheus|grafana|logging|tracing|incident|rca|runbook|on call|observability)\b/,
-      'Leadership & Stakeholder Management': /\b(people management|mentorship|hiring|stakeholder|sales|leadership|technical lead|customer facing|team)\b/,
+      'Leadership & Stakeholder Management': /\b(people management|mentorship|hiring|stakeholder|sales|leadership|technical lead|customer facing|team|travel|executive|communication)\b/,
+      'Pre-Sales & Solution Engineering': /\b(poc|pov|proof of concept|proof of value|demo|rfp|rfi|pre.?sales|value engineering|solution selling|technical selling|business value|champion)\b/,
+      'Customer Engagement & Success': /\b(customer success|customer.facing|enterprise saas|stakeholder|account management|onboarding|renewal|expansion|executive engagement)\b/,
+      'Technical Architecture & Integration': /\b(solution architecture|systems? integration|api integration|rest api|cloud architecture|docker|kubernetes|ci cd|security scanning)\b/,
     };
     return patterns[bucketLabel]?.test(text) || false;
   }
@@ -1077,8 +1114,13 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
     if (/\b(backend|back-end|api\s+engineer|server[- ]?side|microservices)\b/.test(combined))
       return 'backend';
 
-    if (/\b(cloud\s+architect|solutions\s+architect|aws\s+architect|gcp\s+architect)\b/.test(combined))
+    if (/\b(cloud\s+architect|solutions?\s+architect|aws\s+architect|gcp\s+architect)\b/.test(combined) &&
+        !/\b(solutions?\s+engineer|pre[- ]?sales|sales\s+engineer|technical\s+account)\b/.test(combined))
       return 'cloud';
+
+    if (/\b(solutions?\s+engineer|pre[- ]?sales|sales\s+engineer|technical\s+account\s+manager|tam|customer\s+success\s+engineer|field\s+engineer|value\s+engineer|solution\s+consultant|technical\s+sales|solutions?\s+architect)\b/.test(combined) ||
+        /\b(poc|pov|proof\s+of\s+concept|proof\s+of\s+value|technical\s+selling|enterprise\s+saas|demo|champion|stakeholder\s+alignment)\b/.test(combined))
+      return 'solution_engineering';
 
     return null;
   }
@@ -1121,6 +1163,11 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
         'AWS CDK', 'Terraform', 'Pulumi', 'CloudFormation', 'Ansible',
         'Datadog', 'Prometheus', 'Grafana', 'OpenTelemetry', 'Istio',
         'ArgoCD', 'Helm', 'Karpenter', 'KEDA', 'Vault', 'Crossplane',
+      ],
+      solution_engineering: [
+        'Salesforce', 'Gong', 'Outreach', 'Loom', 'Notion', 'Confluence',
+        'Miro', 'Slack', 'Zoom', 'Chorus', 'HubSpot', 'Jira',
+        'Docker', 'Kubernetes', 'GitHub Actions', 'CI/CD', 'REST APIs',
       ],
     };
     return MAP[domain] || [];

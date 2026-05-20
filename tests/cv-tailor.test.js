@@ -643,6 +643,46 @@ TechCorp`;
     expect(result).not.toMatch(/Generative AI solutions utilizing AI tools/i);
     expect(result).not.toMatch(/^Python$/m);
   });
+
+  it('removes solution-engineering JD requirement prose from grouped skills', () => {
+    const tailored = `John Doe
+
+TECHNICAL SKILLS
+Observability & Reliability: Logging, Incident Response, RCA
+Leadership & Stakeholder Management: + years in technical sales or solutions engineering, structured sales methodologies MEDDPICC, Technical Leadership, Customer-Facing Support
+Additional Relevant Skills: selling complex enterprise SaaS, Track record of leading POCs, POVs, and world-class demos, CoM, or similar, Strong technical and business communication skills, Based in or able to commute to London 1-2 days per week
+
+PROFESSIONAL EXPERIENCE
+TechCorp`;
+
+    const jdData = {
+      jobTitle: 'Solutions Engineer',
+      requiredSkills: ['technical sales', 'solutions engineering', 'POC', 'POV', 'enterprise SaaS'],
+      tools: [],
+      responsibilities: ['Lead POCs and technical demos for enterprise SaaS customers'],
+      atsKeywords: ['MEDDPICC', 'technical leadership', 'customer-facing support'],
+    };
+    const matchMap = [
+      { requirement: 'Incident Response', allowedToMention: true },
+      { requirement: 'RCA', allowedToMention: true },
+      { requirement: 'Technical Leadership', allowedToMention: true },
+      { requirement: 'Customer-Facing Support', allowedToMention: true },
+      { requirement: 'POC', allowedToMention: true },
+      { requirement: 'POV', allowedToMention: true },
+      { requirement: 'MEDDPICC', allowedToMention: true },
+    ];
+
+    const result = tailor.cleanSkillsSection(tailored, matchMap, [], jdData);
+
+    expect(result).toContain('Pre-Sales & Solution Engineering:');
+    expect(result).toContain('Leadership & Stakeholder Management:');
+    expect(result).not.toMatch(/\+ years in technical sales/i);
+    expect(result).not.toMatch(/selling complex enterprise SaaS/i);
+    expect(result).not.toMatch(/Track record of leading/i);
+    expect(result).not.toMatch(/world-class demos/i);
+    expect(result).not.toMatch(/CoM, or similar/i);
+    expect(result).not.toMatch(/commute to London/i);
+  });
 });
 
 // ── buildTailoringPrompt ──────────────────────────────────────────────────────
