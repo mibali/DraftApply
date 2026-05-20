@@ -677,59 +677,61 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
   const jdParser = new JDParser();
   let jdData    = jdParser.parse(jobDescription, jobTitle, company);
 
-  // LLM JD analysis — enriches domain, targetPositioning, skillCategories so any
-  // role type (SE, finance, ops, etc.) gets correct CV positioning. Falls back to
-  // regex silently on any failure or rate limit.
-  try {
-    const { systemPrompt: jdSysPrompt, userPrompt: jdUserPrompt } =
-      jdParser.buildLLMAnalysisPrompt(jobDescription);
-    const jdAnalysis = await callChatCompletionWithFallback({
-      temperature: 0.1,
-      maxTokens: 1500,
-      timeoutMs: 15000,
-      messages: [
-        { role: 'system', content: jdSysPrompt },
-        { role: 'user',   content: jdUserPrompt },
-      ],
-    });
-    const jdAnalysisData = await jdAnalysis.response.json();
-    const rawJson = (jdAnalysisData?.choices?.[0]?.message?.content || '')
-      .replace(/^```(?:json)?\s*/i, '')
-      .replace(/\s*```\s*$/, '')
-      .trim();
-    jdData = jdParser.mergeWithLLMAnalysis(jdData, JSON.parse(rawJson));
-  } catch (e) {
-    console.warn('[DraftApply] JD analysis failed, using regex fallback:', e.message);
-  }
-
   const tailor = new CVTailor();
   let matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
 
-  // Semantic match — replaces lexical token matching with LLM equivalence detection
-  // (e.g. "stakeholder workshops" ↔ "pre-sales engagement"). Falls back to lexical.
-  try {
-    const { systemPrompt: smSysPrompt, userPrompt: smUserPrompt } =
-      tailor.buildSemanticMatchPrompt(cvData, jdData, confirmedSkills);
-    const smCompletion = await callChatCompletionWithFallback({
-      temperature: 0.1,
-      maxTokens: 6000,
-      timeoutMs: 30000,
-      messages: [
-        { role: 'system', content: smSysPrompt },
-        { role: 'user',   content: smUserPrompt },
-      ],
-    });
-    const smData = await smCompletion.response.json();
-    const smRaw = (smData?.choices?.[0]?.message?.content || '')
-      .replace(/^```(?:json)?\s*/i, '')
-      .replace(/\s*```\s*$/, '')
-      .trim();
-    const semanticMatchMap = tailor.mergeSemanticMatchResult(
-      JSON.parse(smRaw), jdData, confirmedSkills
-    );
-    if (semanticMatchMap) matchMap = semanticMatchMap;
-  } catch (e) {
-    console.warn('[DraftApply] Semantic match failed, using lexical fallback:', e.message);
+  // Run JD analysis and semantic match in parallel — both use the regex-parsed
+  // jdData (LLM enrichment fields are not needed by semantic match). This keeps
+  // the pre-flight budget to ~15s instead of 15+20=35s sequential.
+  const [jdAnalysisSettled, smSettled] = await Promise.allSettled([
+    // JD analysis — enriches domain, targetPositioning, skillCategories
+    (async () => {
+      const { systemPrompt: jdSysPrompt, userPrompt: jdUserPrompt } =
+        jdParser.buildLLMAnalysisPrompt(jobDescription);
+      const jdRes = await callChatCompletionWithFallback({
+        temperature: 0.1,
+        maxTokens: 1500,
+        timeoutMs: 15000,
+        messages: [
+          { role: 'system', content: jdSysPrompt },
+          { role: 'user',   content: jdUserPrompt },
+        ],
+      });
+      const jdData2 = await jdRes.response.json();
+      const rawJson = (jdData2?.choices?.[0]?.message?.content || '')
+        .replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
+      return jdParser.mergeWithLLMAnalysis(jdData, JSON.parse(rawJson));
+    })(),
+
+    // Semantic match — compact JSON, 2500 tokens is sufficient
+    (async () => {
+      const { systemPrompt: smSysPrompt, userPrompt: smUserPrompt } =
+        tailor.buildSemanticMatchPrompt(cvData, jdData, confirmedSkills);
+      const smRes = await callChatCompletionWithFallback({
+        temperature: 0.1,
+        maxTokens: 2500,
+        timeoutMs: 20000,
+        messages: [
+          { role: 'system', content: smSysPrompt },
+          { role: 'user',   content: smUserPrompt },
+        ],
+      });
+      const smData = await smRes.response.json();
+      const smRaw = (smData?.choices?.[0]?.message?.content || '')
+        .replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
+      return tailor.mergeSemanticMatchResult(JSON.parse(smRaw), jdData, confirmedSkills);
+    })(),
+  ]);
+
+  if (jdAnalysisSettled.status === 'fulfilled') {
+    jdData = jdAnalysisSettled.value;
+  } else {
+    console.warn('[DraftApply] JD analysis failed, using regex fallback:', jdAnalysisSettled.reason?.message);
+  }
+  if (smSettled.status === 'fulfilled' && smSettled.value) {
+    matchMap = smSettled.value;
+  } else {
+    console.warn('[DraftApply] Semantic match failed, using lexical fallback:', smSettled.reason?.message);
   }
 
   const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(cvData, jdData, matchMap);

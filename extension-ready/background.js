@@ -449,7 +449,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         let token = await ensureInstallToken(proxyUrl);
 
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 90000);
+        const timeout = setTimeout(() => controller.abort(), 150000);
         const keepAlive = setInterval(() => chrome.storage.local.get('_sw_keepalive'), 20000);
 
         try {
