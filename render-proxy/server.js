@@ -569,7 +569,7 @@ async function fetchLLMDomainSuggestions(jobTitle, jdTools) {
   try {
     const { response } = await callChatCompletionWithFallback({
       temperature: 0.2,
-      maxTokens: 200,
+      maxTokens: 300,
       timeoutMs: 8000,
       messages: [
         {
@@ -578,7 +578,7 @@ async function fetchLLMDomainSuggestions(jobTitle, jdTools) {
         },
         {
           role: 'user',
-          content: `Job title: ${jobTitle}\nTechnologies already in the job description: ${toolList}\n\nList up to 10 additional tools, frameworks, or technologies that are commonly expected or genuinely valued for this exact role type but are NOT in the list above. Focus on what a hiring manager for this role would realistically look for.\n\nOutput a JSON array of strings only, e.g.: ["Tool1", "Tool2"]`,
+          content: `Job title: ${jobTitle}\nTechnologies already in the job description: ${toolList}\n\nList up to 15 additional tools, frameworks, or technologies that are commonly expected or genuinely valued for this exact role type but are NOT in the list above. Focus on what a hiring manager for this role would realistically look for.\n\nOutput a JSON array of strings only, e.g.: ["Tool1", "Tool2"]`,
         },
       ],
     });
@@ -597,7 +597,7 @@ async function fetchLLMDomainSuggestions(jobTitle, jdTools) {
     return parsed
       .filter(t => typeof t === 'string' && t.trim().length > 0)
       .map(t => t.trim())
-      .slice(0, 10);
+      .slice(0, 15);
   } catch {
     return null;
   }
