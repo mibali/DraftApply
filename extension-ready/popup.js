@@ -93,6 +93,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   let statsResetTimer = null;
   let messageTimer = null;
   let tailorMessageTimer = null;
+  let activeTabSnapshot = null;
 
   // ── Event listeners ──────────────────────────────────────────────────────
 
@@ -424,8 +425,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   async function restoreTailorDraft(options = {}) {
     try {
-      const stored = await chrome.storage.local.get([TAILOR_DRAFT_KEY, TAILOR_JOB_KEY]);
-      const draft = stored?.[TAILOR_DRAFT_KEY];
+      const [draftResult, stored] = await Promise.all([
+        chrome.runtime.sendMessage({ type: 'GET_TAILOR_DRAFT_FOR_ACTIVE_PAGE' }).catch(() => null),
+        chrome.storage.local.get(TAILOR_JOB_KEY),
+      ]);
+      const draft = draftResult?.draft;
+      if (draftResult?.snapshot) activeTabSnapshot = draftResult.snapshot;
       const job = stored?.[TAILOR_JOB_KEY];
 
       if (draft) {
@@ -512,12 +517,32 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   async function saveTailorDraft() {
     try {
+      if (!activeTabSnapshot) {
+        try {
+          const result = await chrome.runtime.sendMessage({ type: 'GET_ACTIVE_TAB_SNAPSHOT' });
+          activeTabSnapshot = result?.snapshot || null;
+        } catch (_) {}
+      }
+
       const draft = {
         jobDescription: elements.tailorJd.value,
         jobTitle: elements.tailorJobTitle.value,
         company: elements.tailorCompany.value,
         updatedAt: new Date().toISOString(),
       };
+
+      if (activeTabSnapshot) {
+        draft.sourceTabId = activeTabSnapshot.tabId;
+        draft.sourceUrl = activeTabSnapshot.url || '';
+        draft.sourceHost = (() => {
+          try { return new URL(activeTabSnapshot.url || '').hostname.replace(/^www\./, '').toLowerCase(); }
+          catch { return ''; }
+        })();
+        draft.sourcePageTitle = activeTabSnapshot.title || '';
+        draft.sourceJobTitle = activeTabSnapshot.pageContext?.jobTitle || '';
+        draft.sourceCompany = activeTabSnapshot.pageContext?.company || '';
+        draft.sourceSavedAt = draft.updatedAt;
+      }
 
       const hasContent = draft.jobDescription.trim() || draft.jobTitle.trim() || draft.company.trim();
       if (hasContent) {

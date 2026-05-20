@@ -145,6 +145,86 @@ const ATS_URL_PATTERNS = [
   /\/apply\//i,             // Apply pages
 ];
 
+function normalizeDraftMatchText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\b(ltd|limited|inc|llc|plc|corp|corporation|company|co)\b/g, '')
+    .trim();
+}
+
+function urlHost(value) {
+  try {
+    return new URL(value).hostname.replace(/^www\./, '').toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function hasSameJobIdentity(draft = {}, pageContext = {}) {
+  const draftTitle = normalizeDraftMatchText(draft.jobTitle);
+  const pageTitle = normalizeDraftMatchText(pageContext.jobTitle);
+  const draftCompany = normalizeDraftMatchText(draft.company);
+  const pageCompany = normalizeDraftMatchText(pageContext.company);
+
+  const titleMatches = draftTitle && pageTitle && (draftTitle.includes(pageTitle) || pageTitle.includes(draftTitle));
+  const companyMatches = draftCompany && pageCompany && (draftCompany.includes(pageCompany) || pageCompany.includes(draftCompany));
+
+  if (draftTitle && pageTitle && !titleMatches) return false;
+  if (draftCompany && pageCompany && !companyMatches) return false;
+
+  // Company alone is too broad: one employer can have many open roles.
+  // Use it only as a mismatch guard above; a positive identity match needs
+  // the role title, source host, or fresh same-tab navigation fallback.
+  return Boolean(titleMatches);
+}
+
+function isFreshDraft(draft = {}, maxAgeMs = 30 * 60 * 1000) {
+  const updated = Date.parse(draft.updatedAt || '');
+  return Number.isFinite(updated) && Date.now() - updated <= maxAgeMs;
+}
+
+function isTailorDraftRelevant(draft, { pageContext = {}, url = '', tabId = null } = {}) {
+  if (!draft?.jobDescription?.trim()) return false;
+
+  const pageHasIdentity = Boolean(pageContext.jobTitle || pageContext.company);
+  if (pageHasIdentity) return hasSameJobIdentity(draft, pageContext);
+
+  const currentHost = urlHost(url || pageContext.url);
+  const sourceHost = urlHost(draft.sourceUrl);
+  if (currentHost && sourceHost && currentHost === sourceHost) return true;
+
+  // Preserve the common flow: paste JD on the source page, click through in
+  // the same tab to an ATS form where title/company/JD are no longer visible.
+  if (draft.sourceTabId != null && tabId != null && draft.sourceTabId === tabId && isFreshDraft(draft)) {
+    return true;
+  }
+
+  // Legacy drafts did not store source metadata; only use them when identity
+  // matched above, never as a blind global fallback.
+  return false;
+}
+
+async function getActiveTabSnapshot() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) return null;
+
+  let pageContext = null;
+  try {
+    pageContext = await chrome.tabs.sendMessage(tab.id, { type: 'GET_PAGE_CONTEXT' }, { frameId: 0 });
+  } catch {
+    // Content script may not be active on the page yet; URL metadata is enough
+    // to scope newly saved drafts to the page where the popup was opened.
+  }
+
+  return {
+    tabId: tab.id,
+    url: tab.url || pageContext?.url || '',
+    title: tab.title || '',
+    pageContext,
+  };
+}
+
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (changeInfo.status !== 'complete' || !tab.url) return;
   // Skip if it's already a known ATS domain (content script auto-injects)
@@ -510,6 +590,40 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     checkProxy()
       .then(sendResponse)
       .catch(error => sendResponse({ available: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === 'GET_ACTIVE_TAB_SNAPSHOT') {
+    getActiveTabSnapshot()
+      .then(snapshot => sendResponse({ snapshot }))
+      .catch(error => sendResponse({ snapshot: null, error: error.message }));
+    return true;
+  }
+
+  if (message.type === 'GET_TAILOR_DRAFT_FOR_ACTIVE_PAGE') {
+    (async () => {
+      const snapshot = await getActiveTabSnapshot();
+      const { tailorCvDraft } = await chrome.storage.local.get('tailorCvDraft');
+      const relevant = snapshot && isTailorDraftRelevant(tailorCvDraft, {
+        pageContext: snapshot.pageContext || {},
+        url: snapshot.url,
+        tabId: snapshot.tabId,
+      });
+      sendResponse({ draft: relevant ? tailorCvDraft : null, snapshot });
+    })().catch(error => sendResponse({ draft: null, error: error.message }));
+    return true;
+  }
+
+  if (message.type === 'GET_TAILOR_DRAFT_FOR_PAGE') {
+    (async () => {
+      const { tailorCvDraft } = await chrome.storage.local.get('tailorCvDraft');
+      const relevant = isTailorDraftRelevant(tailorCvDraft, {
+        pageContext: message.pageContext || {},
+        url: message.url || sender.url || '',
+        tabId: sender.tab?.id ?? null,
+      });
+      sendResponse({ draft: relevant ? tailorCvDraft : null });
+    })().catch(error => sendResponse({ draft: null, error: error.message }));
     return true;
   }
 

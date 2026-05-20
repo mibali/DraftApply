@@ -994,7 +994,11 @@ class DraftApplyExtension {
     }
 
     try {
-      const { tailorCvDraft } = await chrome.storage.local.get('tailorCvDraft');
+      const { draft: tailorCvDraft } = await chrome.runtime.sendMessage({
+        type: 'GET_TAILOR_DRAFT_FOR_PAGE',
+        pageContext: ctx,
+        url: window.location.href,
+      });
       const draftJobDescription = tailorCvDraft?.jobDescription?.trim();
       if (!draftJobDescription) {
         return {
