@@ -161,6 +161,16 @@ function urlHost(value) {
   }
 }
 
+function urlWithoutHash(value) {
+  try {
+    const url = new URL(value);
+    url.hash = '';
+    return url.href;
+  } catch {
+    return '';
+  }
+}
+
 function hasSameJobIdentity(draft = {}, pageContext = {}) {
   const draftTitle = normalizeDraftMatchText(draft.jobTitle);
   const pageTitle = normalizeDraftMatchText(pageContext.jobTitle);
@@ -190,13 +200,18 @@ function isTailorDraftRelevant(draft, { pageContext = {}, url = '', tabId = null
   const pageHasIdentity = Boolean(pageContext.jobTitle || pageContext.company);
   if (pageHasIdentity) return hasSameJobIdentity(draft, pageContext);
 
-  const currentHost = urlHost(url || pageContext.url);
-  const sourceHost = urlHost(draft.sourceUrl);
-  if (currentHost && sourceHost && currentHost === sourceHost) return true;
+  const currentUrl = urlWithoutHash(url || pageContext.url);
+  const sourceUrl = urlWithoutHash(draft.sourceUrl);
+  if (currentUrl && sourceUrl && currentUrl === sourceUrl) return true;
 
   // Preserve the common flow: paste JD on the source page, click through in
   // the same tab to an ATS form where title/company/JD are no longer visible.
-  if (draft.sourceTabId != null && tabId != null && draft.sourceTabId === tabId && isFreshDraft(draft)) {
+  // Same host alone is deliberately not enough: refreshing or moving between
+  // different jobs on the same ATS/company site must not inherit stale context.
+  const currentHost = urlHost(url || pageContext.url);
+  const sourceHost = urlHost(draft.sourceUrl);
+  const movedToDifferentHost = currentHost && sourceHost && currentHost !== sourceHost;
+  if (movedToDifferentHost && draft.sourceTabId != null && tabId != null && draft.sourceTabId === tabId && isFreshDraft(draft)) {
     return true;
   }
 

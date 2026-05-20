@@ -52,6 +52,9 @@ describe('extension critical modal behavior', () => {
     expect(contentJs).not.toContain("chrome.storage.local.get('tailorCvDraft')");
     expect(backgroundJs).toContain('function isTailorDraftRelevant');
     expect(backgroundJs).toContain('hasSameJobIdentity');
+    expect(backgroundJs).toContain('currentUrl && sourceUrl && currentUrl === sourceUrl');
+    expect(backgroundJs).toContain('movedToDifferentHost');
+    expect(backgroundJs).toContain('Same host alone is deliberately not enough');
     expect(backgroundJs).toContain('Legacy drafts did not store source metadata');
   });
 });

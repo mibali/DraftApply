@@ -881,6 +881,11 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
       .replace(/\bexperience\s+with\s+/gi, '')
       .replace(/\bpython\s+and\s+scripting\s+for\s+automation\b/gi, 'Python, automation')
       .replace(/\bcontainerization\s+with\s+Docker\s+and\s+orchestration\s+with\s+Kubernetes\b/gi, 'Docker, Kubernetes')
+      .replace(/\bstructured\s+sales\s+methodolog(?:y|ies)\s+(MEDDPICC|MEDDICC|MEDDIC)\b/gi, '$1')
+      .replace(/\bworld[- ]class\s+demos\b/gi, 'technical demos')
+      .replace(/^(?:and|or)\s+/i, '')
+      .replace(/^POCs$/i, 'POC')
+      .replace(/^POVs$/i, 'POV')
       .replace(/^(?:minimum|preferred)\s+qualifications?\s*:\s*/i, '')
       .replace(/^(?:technical\s+stack|programming\s*&\s*scripting|security\s+mindset|ethical\s+ai\s+knowledge|education|experience)\s*:\s*/i, '')
       .replace(/^[A-Z][A-Za-z0-9/& -]{2,56}:\s*/, '')
@@ -896,6 +901,8 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
     const text = String(item || '').trim();
     if (!text || text.length < 2 || text.length > 140) return false;
     if (this._isJdRequirementProse(text)) return false;
+    if (/^(?:strong|solid|excellent|deep)\s+(?:technical|business|communication)\b/i.test(text)) return false;
+    if (/^(?:co?m|similar|or\s+similar)$/i.test(text)) return false;
     if (/^\(?\+?\d*\+?\s*(?:year|yr|month)/i.test(text)) return false;
     if (/:\s*\(?\d+\s*(?:year|yr|month)/i.test(text)) return false;
     if (/\b(?:bachelor|master|degree|related field|advanced degree|certification[s]?\s+in)\b/i.test(text)) return false;
@@ -911,6 +918,7 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
       || /\bat least\s+\d+\s+years?\b/i.test(text)
       || /\bwillingness\s+to\b/i.test(text)
       || /\btrack\s+record\s+of\b/i.test(text)
+      || /\bselling\s+complex\s+enterprise\s+saas\b/i.test(text)
       || /\b(?:based\s+in|able\s+to\s+commute|commute\s+to|days?\s+per\s+week|willing(?:ness)?\s+to\s+(?:travel|commute|relocate))\b/i.test(text)
       || /\b(highly preferred|required|minimum qualifications?|preferred qualifications?|related field|equivalent practical experience)\b/i.test(text)
       || /\bdeploying and managing\b/i.test(text)
@@ -924,6 +932,8 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
     if (/^(?:years?|experience|ability|minimum qualifications?|preferred qualifications?)\b/i.test(text)) return true;
     if (/^(?:developing|architecting|designing|utilizing|ensuring|prioritizing|fostering|managing|selling|closing|negotiating|sourcing|delivering)\b/i.test(text)) return true;
     if (/^(?:willingness|track\s+record|commitment|based\s+in|able\s+to|and\s+world[- ]?class)\b/i.test(text)) return true;
+    if (/^(?:strong|solid|excellent|deep)\s+(?:technical|business|communication)\b/i.test(text)) return true;
+    if (/^(?:co?m|similar|or\s+similar)$/i.test(text)) return true;
     if (/\b(?:commute|days?\s+per\s+week|or\s+similar)\b/i.test(text)) return true;
     if (/\b(?:with experience in|technical customer-facing role)\b/i.test(text)) return true;
     if (/\b(?:bachelor|master|phd|degree|science, technology, engineering, mathematics)\b/i.test(text)) return true;
