@@ -740,7 +740,7 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
     const completion = await callChatCompletionWithFallback({
       temperature: 0.3,
       maxTokens: 4000,
-      timeoutMs: 90000,
+      timeoutMs: 60000,
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user',   content: userPrompt   }
@@ -764,8 +764,8 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
         tailor.buildTailoredCvAuditPrompt(cvData, jdData, matchMap, tailoredCvText, confirmedSkills);
       const auditCompletion = await callChatCompletionWithFallback({
         temperature: auditTemperature,
-        maxTokens: 4500,
-        timeoutMs: 45000,
+        maxTokens: 3500,
+        timeoutMs: 25000,
         messages: [
           { role: 'system', content: auditSystemPrompt },
           { role: 'user',   content: auditUserPrompt },
