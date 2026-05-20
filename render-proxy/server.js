@@ -16,7 +16,7 @@ const PORT = Number(process.env.PORT || 10000);
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'openrouter/owl-alpha';
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct';
 const OPENROUTER_SITE_URL = process.env.OPENROUTER_SITE_URL || 'https://draftapply.com';
 const OPENROUTER_APP_NAME = process.env.OPENROUTER_APP_NAME || 'DraftApply';
 const TOKEN_SECRET = process.env.TOKEN_SECRET;
@@ -756,6 +756,7 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
       confirmedSkills,
     });
     if (!tailoredCvText?.trim()) {
+      console.error(`[DraftApply] ${tailorProvider} returned empty tailor content`);
       return res.status(502).json({ error: 'No output from provider' });
     }
 
