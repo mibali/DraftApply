@@ -334,9 +334,12 @@ HARVARD FORMAT — apply this structure exactly:
   [summary paragraph]
   [blank line]
   CORE COMPETENCIES
-  Category Label: Skill A, Skill B, Skill C
-  Category Label: Skill D, Skill E
-  (each category on its own line, no bullet characters, no "Additional Relevant Skills" catch-all)
+  Pre-Sales Execution: POC/POV Delivery, Technical Demos, RFP/RFI Response, MEDDPICC
+  Cloud & Architecture: AWS, Azure, GCP, Solution Architecture, API Integration
+  DevOps & Delivery: CI/CD, GitHub Actions, Docker, Kubernetes, Terraform
+  Programming & Automation: Python, Bash, REST APIs, Scripting
+  Stakeholder Engagement: Executive Communication, Cross-functional Collaboration, Change Management
+  (5–7 categories, each on its own line, no bullet prefix — this is the required format)
   [blank line]
   PROFESSIONAL EXPERIENCE
   Company Name                  Month Year – Month Year
@@ -350,7 +353,7 @@ HARVARD FORMAT — apply this structure exactly:
 INSTRUCTION
 1. HEADER: Job title on line 2 immediately below the candidate name, before any contact lines.
 2. Rewrite the professional summary so it clearly positions the candidate for this exact role and domain without saying it was tailored for a company or application. It must mention only supported evidence from the CV.
-3. CORE COMPETENCIES: Use 5–7 named categories relevant to the target role. Each category on its own line, format: "Category Label: Skill A, Skill B, Skill C, Skill D" — aim for 3–6 skills per category, no bullet prefix. Do NOT include an "Additional Relevant Skills" or "Additional Skills" section — place every skill in a named category or omit it. No duplicate skills across categories. Senior roles must have at least 5 populated categories.
+3. CORE COMPETENCIES: MANDATORY — output exactly 5–7 named categories (never fewer than 5 for senior roles). Each category on its own line, NO bullet prefix, NO dash, format exactly: "Category Label: Skill A, Skill B, Skill C, Skill D" — aim for 3–6 skills per category. Cover both technical and business domains appropriate to the role (e.g. for a Solution Architect: Pre-Sales Execution, Cloud & Architecture, Integration & APIs, DevOps & Delivery, Sales Methodology, Stakeholder Engagement, Programming & Scripting). Do NOT use an "Additional Relevant Skills" or "Additional Skills" section. No duplicate skills across categories.
 4. For each relevant role: preserve the official job title exactly, then add one short "Focus:" line below it when the original responsibilities support the target role.
 5. For each role: rewrite relevant bullets with JD vocabulary (same meaning, aligned language), reorder bullets so the strongest target-role evidence comes first.
 6. Include every user-confirmed addition in the skills/core competencies section as concise skill names. You may also use them in the summary when natural, but do not attach them to a specific employer, project, metric, certification, or achievement unless that context exists in the original CV.
@@ -461,7 +464,7 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
   }
 
   finalizeTailoredCV(rawText, { cvData, jdData, matchMap = [], confirmedSkills = [] } = {}) {
-    return this.cleanSkillsSection(
+    const cleaned = this.cleanSkillsSection(
       this.ensureRoleFocusLines(
         this.ensureConfirmedSkillsIncluded(
           this.removeTailoringMetaPhrases(
@@ -478,6 +481,50 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
       confirmedSkills,
       jdData
     );
+    return this.restoreLockedExperienceDates(cleaned, cvData);
+  }
+
+  restoreLockedExperienceDates(tailoredText, cvData = {}) {
+    if (!tailoredText || !Array.isArray(cvData.experience)) return tailoredText;
+
+    const lines = String(tailoredText).split('\n');
+    let searchFrom = 0;
+
+    for (const exp of cvData.experience) {
+      const company = String(exp.company || '').trim();
+      const title = String(exp.title || '').trim();
+      const dates = String(exp.dates || '').trim();
+      if (!company || !title || !dates) continue;
+
+      const companyIdx = this._findLineIndexContaining(lines, company, searchFrom);
+      if (companyIdx === -1) continue;
+
+      const titleIdx = this._findLineIndexContaining(lines, title, companyIdx + 1, companyIdx + 8);
+      if (titleIdx === -1) {
+        searchFrom = companyIdx + 1;
+        continue;
+      }
+
+      // Keep model output in the parser/exporter's expected Harvard shape:
+      // company line, exact original dates on the next line, exact job title below.
+      const between = lines.slice(companyIdx + 1, titleIdx);
+      const cleanedBetween = between.filter(line => {
+        const trimmed = String(line || '').trim();
+        return trimmed && !this._looksLikeDateLine(trimmed);
+      });
+
+      lines.splice(
+        companyIdx,
+        titleIdx - companyIdx + 1,
+        company,
+        dates,
+        title,
+        ...cleanedBetween
+      );
+      searchFrom = companyIdx + 3;
+    }
+
+    return lines.join('\n');
   }
 
   enforceTargetHeadline(tailoredText, jobTitle) {
@@ -584,9 +631,21 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
       const titleIdx = this._findTitleLineIndex(lines, exp.title, searchFrom);
       if (titleIdx === -1) continue;
 
-      const nextMeaningfulIdx = this._nextMeaningfulLineIndex(lines, titleIdx + 1);
-      if (nextMeaningfulIdx !== -1 && /^focus\s*:/i.test(lines[nextMeaningfulIdx].trim())) {
-        searchFrom = nextMeaningfulIdx + 1;
+      // Check if a Focus: line already exists anywhere within the next ~10 lines of this role
+      // (not just immediately after title) — prevents duplicates when LLM placed it after bullets.
+      const roleWindowEnd = Math.min(lines.length, titleIdx + 12);
+      const existingFocusIdx = lines
+        .slice(titleIdx + 1, roleWindowEnd)
+        .findIndex(l => /^focus\s*:/i.test(String(l || '').trim()));
+      if (existingFocusIdx !== -1) {
+        // Move Focus: to immediately after the title if it's not already there
+        const absIdx = titleIdx + 1 + existingFocusIdx;
+        const nextMeaningful = this._nextMeaningfulLineIndex(lines, titleIdx + 1);
+        if (absIdx !== nextMeaningful) {
+          const focusLine = lines.splice(absIdx, 1)[0];
+          lines.splice(titleIdx + 1, 0, focusLine);
+        }
+        searchFrom = titleIdx + 2;
         continue;
       }
 
@@ -945,6 +1004,25 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
     return -1;
   }
 
+  _findLineIndexContaining(lines, value, start = 0, end = lines.length) {
+    const key = this._normaliseText(value);
+    if (!key) return -1;
+    for (let i = Math.max(0, start); i < Math.min(lines.length, end); i++) {
+      const line = this._normaliseText(lines[i]);
+      if (!line) continue;
+      if (line === key || line.includes(key)) return i;
+    }
+    return -1;
+  }
+
+  _looksLikeDateLine(line) {
+    const text = String(line || '').trim();
+    if (!text) return false;
+    const month = '(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)';
+    return new RegExp(`\\b(?:${month}\\s+)?(?:19|20)\\d{2}\\b`, 'i').test(text) ||
+      /\b(?:present|current)\b/i.test(text);
+  }
+
   _nextMeaningfulLineIndex(lines, start = 0) {
     for (let i = Math.max(0, start); i < lines.length; i++) {
       if (String(lines[i] || '').trim()) return i;
@@ -1163,16 +1241,19 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
   }
 
   _buildGroupedSkills(items = [], jdData = {}) {
-    // When the LLM has provided skill categories for this specific role, use them
-    // directly instead of the hardcoded tech-only buckets.
-    if (Array.isArray(jdData.skillCategories) && jdData.skillCategories.length > 0) {
-      return this._buildGroupedSkillsFromLLMCategories(items, jdData.skillCategories);
+    // When the LLM has provided skill categories for this specific role, use them.
+    // Require ≥ 4 LLM categories AND ≥ 4 populated result lines — otherwise the LLM
+    // analysis was too narrow (e.g. only 3 generic categories) and domain buckets
+    // produce better coverage.
+    if (Array.isArray(jdData.skillCategories) && jdData.skillCategories.length >= 4) {
+      const llmLines = this._buildGroupedSkillsFromLLMCategories(items, jdData.skillCategories);
+      if (llmLines.length >= 4) return llmLines;
     }
 
     const domain = jdData.domain || this._detectDomain(jdData);
     const isSolutionEngineering = domain === 'solution_engineering';
     const buckets = isSolutionEngineering ? [
-      { label: 'Pre-Sales & Solution Engineering', terms: ['POC', 'POV', 'proof of concept', 'proof of value', 'technical demo', 'demo', 'RFP', 'RFI', 'solution selling', 'technical selling', 'pre-sales', 'value engineering', 'business value'] },
+      { label: 'Pre-Sales & Solution Engineering', terms: ['POC', 'POV', 'proof of concept', 'proof of value', 'technical demo', 'demo', 'RFP', 'RFI', 'solution selling', 'technical selling', 'pre-sales', 'value engineering', 'business value', 'MEDDPICC', 'MEDDICC', 'MEDDIC', 'solution consulting', 'enterprise SaaS sales'] },
       { label: 'Customer Engagement & Success', terms: ['customer success', 'customer-facing', 'enterprise SaaS', 'stakeholder alignment', 'executive engagement', 'champion building', 'account management', 'customer onboarding', 'renewal', 'expansion'] },
       { label: 'Technical Architecture & Integration', terms: ['solution architecture', 'systems integration', 'API integration', 'REST APIs', 'cloud architecture', 'Docker', 'Kubernetes', 'CI/CD', 'GitHub Actions', 'security scanning'] },
       { label: 'Cloud & Platform Engineering', terms: ['AWS', 'Azure', 'GCP', 'cloud infrastructure', 'Infrastructure as Code', 'Terraform', 'platform reliability'] },
@@ -1292,7 +1373,7 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
       'CI/CD & DevOps': /\b(ci.?cd|github actions|gitlab|jenkins|circleci|azure devops|buildkite|pipeline|deployment|devops|release|change management)\b/,
       'Observability & Reliability': /\b(prometheus|grafana|log|tracing|incident|rca|runbook|on.?call|observability|monitoring|performance|diagnostic|alert)\b/,
       'Leadership & Stakeholder Management': /\b(people management|mentorship|hiring|stakeholder|sales|leadership|technical lead|customer.?facing|team|travel|executive|communication|change management)\b/,
-      'Pre-Sales & Solution Engineering': /\b(poc|pov|proof of concept|proof of value|demo|rfp|rfi|pre.?sales|value engineering|solution selling|technical selling|business value|champion)\b/,
+      'Pre-Sales & Solution Engineering': /\b(poc|pov|proof of concept|proof of value|demo|rfp|rfi|pre.?sales|value engineering|solution selling|technical selling|business value|champion|meddpicc|meddicc|meddic|solution consult|enterprise.?saas.?sales)\b/,
       'Customer Engagement & Success': /\b(customer success|customer.?facing|enterprise saas|stakeholder|account management|onboarding|renewal|expansion|executive engagement)\b/,
       'Technical Architecture & Integration': /\b(solution architecture|systems? integration|api.?integration|rest api|cloud architecture|docker|kubernetes|k8s|ci.?cd|security scanning)\b/,
     };

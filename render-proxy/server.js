@@ -19,6 +19,7 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct';
 const OPENROUTER_SITE_URL = process.env.OPENROUTER_SITE_URL || 'https://draftapply.com';
 const OPENROUTER_APP_NAME = process.env.OPENROUTER_APP_NAME || 'DraftApply';
+const OPENROUTER_TAILOR_FALLBACK = !/^false$/i.test(process.env.OPENROUTER_TAILOR_FALLBACK || '');
 const TOKEN_SECRET = process.env.TOKEN_SECRET;
 
 // Recipe module – default is the bundled open-source recipe. Set RECIPE_PATH to override.
@@ -178,14 +179,20 @@ async function callProviderChat(provider, {
 
 async function callChatCompletionWithFallback(options) {
   const primary = GROQ_API_KEY ? 'groq' : 'openrouter';
+  const callStart = Date.now();
   try {
     return await callProviderChat(primary, options);
   } catch (error) {
-    const canFallback = primary === 'groq' && OPENROUTER_API_KEY && isRetryableLLMError(error);
+    const canFallback = options.allowFallback !== false && primary === 'groq' && OPENROUTER_API_KEY && isRetryableLLMError(error);
     if (!canFallback) throw error;
 
     console.warn(`[DraftApply] Groq ${error.status || error.name || 'error'}; falling back to OpenRouter.`);
-    return callProviderChat('openrouter', options);
+    // Give the fallback only the time remaining from the original budget — prevents
+    // AbortError scenarios from doubling the wall-clock time (Groq 60s + OR 60s = 120s).
+    // For fast Groq failures (429), elapsed ≈ 0 so OpenRouter gets the full budget.
+    const elapsed = Date.now() - callStart;
+    const fallbackTimeout = Math.max(8000, (options.timeoutMs || 60000) - elapsed);
+    return callProviderChat('openrouter', { ...options, timeoutMs: fallbackTimeout });
   }
 }
 
@@ -675,64 +682,10 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
 
   const cvData  = new CVParser().parse(cvText);
   const jdParser = new JDParser();
-  let jdData    = jdParser.parse(jobDescription, jobTitle, company);
+  const jdData   = jdParser.parse(jobDescription, jobTitle, company);
 
-  const tailor = new CVTailor();
-  let matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
-
-  // Run JD analysis and semantic match in parallel — both use the regex-parsed
-  // jdData (LLM enrichment fields are not needed by semantic match). This keeps
-  // the pre-flight budget to ~15s instead of 15+20=35s sequential.
-  const [jdAnalysisSettled, smSettled] = await Promise.allSettled([
-    // JD analysis — enriches domain, targetPositioning, skillCategories
-    (async () => {
-      const { systemPrompt: jdSysPrompt, userPrompt: jdUserPrompt } =
-        jdParser.buildLLMAnalysisPrompt(jobDescription);
-      const jdRes = await callChatCompletionWithFallback({
-        temperature: 0.1,
-        maxTokens: 1500,
-        timeoutMs: 15000,
-        messages: [
-          { role: 'system', content: jdSysPrompt },
-          { role: 'user',   content: jdUserPrompt },
-        ],
-      });
-      const jdData2 = await jdRes.response.json();
-      const rawJson = (jdData2?.choices?.[0]?.message?.content || '')
-        .replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
-      return jdParser.mergeWithLLMAnalysis(jdData, JSON.parse(rawJson));
-    })(),
-
-    // Semantic match — compact JSON, 2500 tokens is sufficient
-    (async () => {
-      const { systemPrompt: smSysPrompt, userPrompt: smUserPrompt } =
-        tailor.buildSemanticMatchPrompt(cvData, jdData, confirmedSkills);
-      const smRes = await callChatCompletionWithFallback({
-        temperature: 0.1,
-        maxTokens: 2500,
-        timeoutMs: 20000,
-        messages: [
-          { role: 'system', content: smSysPrompt },
-          { role: 'user',   content: smUserPrompt },
-        ],
-      });
-      const smData = await smRes.response.json();
-      const smRaw = (smData?.choices?.[0]?.message?.content || '')
-        .replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
-      return tailor.mergeSemanticMatchResult(JSON.parse(smRaw), jdData, confirmedSkills);
-    })(),
-  ]);
-
-  if (jdAnalysisSettled.status === 'fulfilled') {
-    jdData = jdAnalysisSettled.value;
-  } else {
-    console.warn('[DraftApply] JD analysis failed, using regex fallback:', jdAnalysisSettled.reason?.message);
-  }
-  if (smSettled.status === 'fulfilled' && smSettled.value) {
-    matchMap = smSettled.value;
-  } else {
-    console.warn('[DraftApply] Semantic match failed, using lexical fallback:', smSettled.reason?.message);
-  }
+  const tailor  = new CVTailor();
+  const matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
 
   const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(cvData, jdData, matchMap);
 
@@ -741,6 +694,7 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
       temperature: 0.3,
       maxTokens: 4000,
       timeoutMs: 60000,
+      allowFallback: OPENROUTER_TAILOR_FALLBACK,
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user',   content: userPrompt   }
@@ -767,6 +721,7 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
         temperature: auditTemperature,
         maxTokens: 3500,
         timeoutMs: 25000,
+        allowFallback: OPENROUTER_TAILOR_FALLBACK,
         messages: [
           { role: 'system', content: auditSystemPrompt },
           { role: 'user',   content: auditUserPrompt },
