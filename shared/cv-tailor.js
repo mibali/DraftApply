@@ -84,6 +84,130 @@ export class CVTailor {
     });
   }
 
+  /**
+   * Build prompts for a Groq semantic match call.
+   * The LLM finds CV evidence for each JD requirement using semantic equivalence,
+   * not just lexical overlap. Falls back to buildMatchMap() on any failure.
+   */
+  buildSemanticMatchPrompt(cvData, jdData, confirmedSkills = []) {
+    const confirmed = (Array.isArray(confirmedSkills) ? confirmedSkills : [])
+      .map(s => String(s || '').trim()).filter(Boolean);
+
+    const reqs = [
+      ...(jdData.requiredSkills  || []).slice(0, 20).map(r => ({ req: r, type: 'required' })),
+      ...(jdData.preferredSkills || []).slice(0, 15).map(r => ({ req: r, type: 'preferred' })),
+      ...(jdData.tools           || []).slice(0, 20).map(r => ({ req: r, type: 'tool' })),
+      ...(jdData.softSkills      || []).slice(0, 10).map(r => ({ req: r, type: 'soft' })),
+    ];
+    const seen = new Set();
+    const deduped = reqs.filter(({ req }) => {
+      const k = this._normaliseText(req);
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+
+    const reqList = deduped.map((r, i) => `${i + 1}. [${r.type}] ${r.req}`).join('\n');
+    const cvText  = (cvData.rawText || '').slice(0, 6000);
+    const confirmedList = confirmed.length
+      ? confirmed.map(s => `  - ${s}`).join('\n')
+      : '  (none)';
+
+    const systemPrompt = `You are a CV evidence analyst. Match job description requirements to CV content using semantic understanding — not just keyword matching. Return ONLY valid JSON, no preamble, no markdown fences.`;
+
+    const userPrompt = `For each numbered JD requirement, find the strongest supporting evidence in the CV text. Use semantic equivalence: "stakeholder workshops" supports "pre-sales engagement"; "customer success" supports "client-facing communication"; "CI/CD pipelines" supports "deployment automation". Be strict — do not invent evidence that is not in the CV.
+
+JD REQUIREMENTS:
+${reqList || '(none)'}
+
+USER-CONFIRMED SKILLS (candidate attests to these — include regardless of CV text):
+${confirmedList}
+
+CV TEXT:
+${cvText}
+
+Return a JSON array. Each item must have exactly these fields:
+{
+  "requirement": "<exact text from numbered list above>",
+  "type": "required" | "preferred" | "tool" | "soft",
+  "status": "strong_match" | "partial_match" | "missing",
+  "evidence": ["<direct quote or close paraphrase from CV, max 120 chars, max 3 items>"],
+  "allowedToMention": true | false,
+  "confirmedByUser": false
+}
+
+Status rules:
+- strong_match: clear direct or semantic evidence in 2+ CV passages
+- partial_match: indirect/semantic evidence, or 1 supporting CV passage
+- missing: no evidence in CV — do not guess
+- allowedToMention: true when status is strong_match or partial_match, false when missing
+
+Also append one item per user-confirmed skill: status "user_confirmed", allowedToMention true, confirmedByUser true, evidence ["Confirmed by user during missing skills review"], type "user_confirmed".`;
+
+    return { systemPrompt, userPrompt };
+  }
+
+  /**
+   * Parse and validate the LLM's semantic match JSON.
+   * Ensures all user-confirmed skills are present.
+   * Returns null if the result is unusable (caller falls back to lexical matchMap).
+   */
+  mergeSemanticMatchResult(llmJson, jdData, confirmedSkills = []) {
+    if (!Array.isArray(llmJson) || llmJson.length === 0) return null;
+
+    const confirmed = (Array.isArray(confirmedSkills) ? confirmedSkills : [])
+      .map(s => String(s || '').trim()).filter(Boolean);
+    const confirmedKeys = new Set(confirmed.map(s => this._normaliseText(s)));
+    const VALID_STATUSES = new Set(['strong_match', 'partial_match', 'missing', 'user_confirmed']);
+
+    const result = [];
+    const seenReqs = new Set();
+
+    for (const item of llmJson) {
+      if (!item || typeof item.requirement !== 'string' || !item.requirement.trim()) continue;
+      const key = this._normaliseText(item.requirement);
+      if (seenReqs.has(key)) continue;
+      seenReqs.add(key);
+
+      const confirmedByUser = Boolean(item.confirmedByUser) || confirmedKeys.has(key);
+      const rawStatus = VALID_STATUSES.has(item.status) ? item.status : 'missing';
+      const status = confirmedByUser ? 'user_confirmed' : rawStatus;
+      const allowedToMention = status !== 'missing';
+      const evidence = confirmedByUser
+        ? ['Confirmed by user during missing skills review']
+        : (Array.isArray(item.evidence)
+            ? item.evidence.filter(e => typeof e === 'string' && e.trim()).slice(0, 3)
+            : []);
+
+      result.push({
+        requirement:     item.requirement.trim(),
+        type:            typeof item.type === 'string' ? item.type : 'required',
+        status,
+        evidence,
+        allowedToMention,
+        confirmedByUser,
+      });
+    }
+
+    // Ensure every user-confirmed skill appears even if the LLM omitted it
+    for (const skill of confirmed) {
+      const key = this._normaliseText(skill);
+      if (!seenReqs.has(key)) {
+        result.push({
+          requirement:     skill,
+          type:            'user_confirmed',
+          status:          'user_confirmed',
+          evidence:        ['Confirmed by user during missing skills review'],
+          allowedToMention: true,
+          confirmedByUser:  true,
+        });
+        seenReqs.add(key);
+      }
+    }
+
+    return result.length > 0 ? result : null;
+  }
+
   /** Returns a summary score and categorised lists. */
   buildMatchSummary(matchMap) {
     const required = matchMap.filter(m => m.type === 'required');

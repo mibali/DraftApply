@@ -640,8 +640,50 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
     clearTimeout(jdAnalysisTimeout);
   }
 
-  const tailor   = new CVTailor();
-  const matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
+  const tailor = new CVTailor();
+  let matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
+
+  // Replace lexical matchMap with a Groq semantic match — catches equivalences
+  // like "stakeholder workshops" ↔ "pre-sales engagement" that token matching misses.
+  const smController = new AbortController();
+  const smTimeout = setTimeout(() => smController.abort(), 30000);
+  try {
+    const { systemPrompt: smSysPrompt, userPrompt: smUserPrompt } =
+      tailor.buildSemanticMatchPrompt(cvData, jdData, confirmedSkills);
+    const smResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${GROQ_API_KEY}`,
+      },
+      signal: smController.signal,
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        temperature: 0.1,
+        max_tokens: 5000,
+        messages: [
+          { role: 'system', content: smSysPrompt },
+          { role: 'user',   content: smUserPrompt },
+        ],
+      }),
+    });
+    if (smResponse.ok) {
+      const smData = await smResponse.json();
+      const smRaw = (smData?.choices?.[0]?.message?.content || '')
+        .replace(/^```(?:json)?\s*/i, '')
+        .replace(/\s*```\s*$/, '')
+        .trim();
+      const semanticMatchMap = tailor.mergeSemanticMatchResult(
+        JSON.parse(smRaw), jdData, confirmedSkills
+      );
+      if (semanticMatchMap) matchMap = semanticMatchMap;
+    }
+  } catch (e) {
+    console.warn('[DraftApply] Semantic match failed, using lexical fallback:', e.message);
+  } finally {
+    clearTimeout(smTimeout);
+  }
+
   const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(cvData, jdData, matchMap);
 
   const controller = new AbortController();

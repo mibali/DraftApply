@@ -450,8 +450,30 @@ app.post('/api/cv/tailor', async (req, res) => {
       console.warn('[JD analysis] LLM enrichment failed, using regex fallback:', e.message);
     }
 
-    const tailor   = new CVTailor();
-    const matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
+    const tailor = new CVTailor();
+    let matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
+
+    // Replace lexical matchMap with a Groq semantic match — catches equivalences
+    // like "stakeholder workshops" ↔ "pre-sales engagement" that token matching misses.
+    try {
+      const { systemPrompt: smSysPrompt, userPrompt: smUserPrompt } =
+        tailor.buildSemanticMatchPrompt(cvData, jdData, confirmedSkills);
+      const smResult = await generate(PROVIDER_NAME, PROVIDER_CONFIG, [
+        { role: 'system', content: smSysPrompt },
+        { role: 'user',   content: smUserPrompt },
+      ], { temperature: 0.1, max_tokens: 5000 });
+      const smRaw = smResult.answer
+        .replace(/^```(?:json)?\s*/i, '')
+        .replace(/\s*```\s*$/, '')
+        .trim();
+      const semanticMatchMap = tailor.mergeSemanticMatchResult(
+        JSON.parse(smRaw), jdData, confirmedSkills
+      );
+      if (semanticMatchMap) matchMap = semanticMatchMap;
+    } catch (e) {
+      console.warn('[Semantic match] failed, using lexical fallback:', e.message);
+    }
+
     const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(cvData, jdData, matchMap);
 
     const messages = [
