@@ -597,8 +597,49 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
     return res.status(400).json({ error: 'jobDescription must be at least 50 characters' });
   }
 
-  const cvData   = new CVParser().parse(cvText);
-  const jdData   = new JDParser().parse(jobDescription, jobTitle, company);
+  const cvData  = new CVParser().parse(cvText);
+  const jdParser = new JDParser();
+  let jdData    = jdParser.parse(jobDescription, jobTitle, company);
+
+  // Enrich jdData with a fast Groq analysis call so domain detection, skill
+  // grouping, and CV positioning work for any role type — not just tech roles.
+  // Falls back to regex-parsed jdData silently on any failure.
+  const jdAnalysisController = new AbortController();
+  const jdAnalysisTimeout = setTimeout(() => jdAnalysisController.abort(), 15000);
+  try {
+    const { systemPrompt: jdSysPrompt, userPrompt: jdUserPrompt } =
+      jdParser.buildLLMAnalysisPrompt(jobDescription);
+    const jdAnalysisResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${GROQ_API_KEY}`,
+      },
+      signal: jdAnalysisController.signal,
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        temperature: 0.1,
+        max_tokens: 1500,
+        messages: [
+          { role: 'system', content: jdSysPrompt },
+          { role: 'user',   content: jdUserPrompt },
+        ],
+      }),
+    });
+    if (jdAnalysisResponse.ok) {
+      const jdAnalysisData = await jdAnalysisResponse.json();
+      const rawJson = (jdAnalysisData?.choices?.[0]?.message?.content || '')
+        .replace(/^```(?:json)?\s*/i, '')
+        .replace(/\s*```\s*$/, '')
+        .trim();
+      jdData = jdParser.mergeWithLLMAnalysis(jdData, JSON.parse(rawJson));
+    }
+  } catch (e) {
+    console.warn('[DraftApply] JD analysis failed, using regex fallback:', e.message);
+  } finally {
+    clearTimeout(jdAnalysisTimeout);
+  }
+
   const tailor   = new CVTailor();
   const matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
   const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(cvData, jdData, matchMap);
@@ -637,7 +678,7 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
     }
 
     const data = await response.json();
-    const tailoredCvText = tailor.finalizeTailoredCV(data?.choices?.[0]?.message?.content, {
+    let tailoredCvText = tailor.finalizeTailoredCV(data?.choices?.[0]?.message?.content, {
       cvData,
       jdData,
       matchMap,
@@ -645,6 +686,49 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
     });
     if (!tailoredCvText?.trim()) {
       return res.status(502).json({ error: 'No output from provider' });
+    }
+
+    const auditController = new AbortController();
+    const auditTimeout = setTimeout(() => auditController.abort(), 45000);
+    try {
+      const { systemPrompt: auditSystemPrompt, userPrompt: auditUserPrompt, temperature: auditTemperature } =
+        tailor.buildTailoredCvAuditPrompt(cvData, jdData, matchMap, tailoredCvText, confirmedSkills);
+      const auditResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${GROQ_API_KEY}`,
+        },
+        signal: auditController.signal,
+        body: JSON.stringify({
+          model: GROQ_MODEL,
+          temperature: auditTemperature,
+          max_tokens: 4500,
+          messages: [
+            { role: 'system', content: auditSystemPrompt },
+            { role: 'user',   content: auditUserPrompt },
+          ],
+        }),
+      });
+
+      if (auditResponse.ok) {
+        const auditData = await auditResponse.json();
+        const auditedText = auditData?.choices?.[0]?.message?.content;
+        const finalizedAudit = tailor.finalizeTailoredCV(auditedText, {
+          cvData,
+          jdData,
+          matchMap,
+          confirmedSkills,
+        });
+        if (finalizedAudit?.trim()) tailoredCvText = finalizedAudit;
+      } else {
+        const text = await auditResponse.text().catch(() => '');
+        console.warn(`[DraftApply] Tailored CV audit skipped (${auditResponse.status}):`, text.slice(0, 300));
+      }
+    } catch (e) {
+      console.warn('[DraftApply] Tailored CV audit skipped:', e.message);
+    } finally {
+      clearTimeout(auditTimeout);
     }
 
     const warnings        = [

@@ -770,4 +770,43 @@ describe('buildTailoringPrompt', () => {
     expect(temperature).toBeGreaterThanOrEqual(0);
     expect(temperature).toBeLessThanOrEqual(1);
   });
+
+  it('builds a strict post-generation audit prompt for unsupported tailored CV claims', () => {
+    const matchMap = [
+      {
+        requirement: 'React',
+        allowedToMention: true,
+        evidence: ['Built React dashboards used by support engineers.'],
+      },
+      {
+        requirement: 'Track record of leading POCs and world-class demos',
+        allowedToMention: false,
+        evidence: [],
+      },
+    ];
+    const tailoredText = `${CV.rawText}
+
+Core Competencies
+React, Track record of leading POCs and world-class demos`;
+
+    const { systemPrompt, userPrompt, temperature } = tailor.buildTailoredCvAuditPrompt(
+      CV,
+      JD,
+      matchMap,
+      tailoredText,
+      ['Grafana']
+    );
+
+    expect(systemPrompt).toContain('strict CV truth-auditor');
+    expect(systemPrompt).toContain('Every skill, claim, achievement, tool, methodology, domain phrase, and focus line');
+    expect(systemPrompt).toContain('If a phrase only appears in the JD or target role and has no support, remove it');
+    expect(userPrompt).toContain('ORIGINAL CV');
+    expect(userPrompt).toContain(CV.rawText);
+    expect(userPrompt).toContain('TAILORED CV TO AUDIT');
+    expect(userPrompt).toContain('✓ React');
+    expect(userPrompt).toContain('Evidence: "Built React dashboards used by support engineers."');
+    expect(userPrompt).toContain('✗ Track record of leading POCs and world-class demos');
+    expect(userPrompt).toContain('+ Grafana');
+    expect(temperature).toBe(0.1);
+  });
 });

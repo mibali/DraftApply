@@ -427,8 +427,29 @@ app.post('/api/cv/tailor', async (req, res) => {
       return res.status(400).json({ error: 'jobDescription must be at least 50 characters' });
     }
 
-    const cvData   = new CVParser().parse(cvText);
-    const jdData   = new JDParser().parse(jobDescription, jobTitle, company);
+    const cvData = new CVParser().parse(cvText);
+    const jdParser = new JDParser();
+    let jdData = jdParser.parse(jobDescription, jobTitle, company);
+
+    // Enrich jdData with LLM analysis — generalises domain/skill detection to any role type.
+    // If the call fails, the regex-parsed jdData is used unchanged as fallback.
+    try {
+      const { systemPrompt: jdSysPrompt, userPrompt: jdUserPrompt } =
+        jdParser.buildLLMAnalysisPrompt(jobDescription);
+      const jdAnalysisResult = await generate(PROVIDER_NAME, PROVIDER_CONFIG, [
+        { role: 'system', content: jdSysPrompt },
+        { role: 'user',   content: jdUserPrompt },
+      ], { temperature: 0.1, max_tokens: 1500 });
+      const rawJson = jdAnalysisResult.answer
+        .replace(/^```(?:json)?\s*/i, '')
+        .replace(/\s*```\s*$/, '')
+        .trim();
+      const llmAnalysis = JSON.parse(rawJson);
+      jdData = jdParser.mergeWithLLMAnalysis(jdData, llmAnalysis);
+    } catch (e) {
+      console.warn('[JD analysis] LLM enrichment failed, using regex fallback:', e.message);
+    }
+
     const tailor   = new CVTailor();
     const matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
     const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(cvData, jdData, matchMap);
@@ -443,7 +464,7 @@ app.post('/api/cv/tailor', async (req, res) => {
       max_tokens: 4000
     });
 
-    const tailoredCvText = tailor.finalizeTailoredCV(result.answer, {
+    let tailoredCvText = tailor.finalizeTailoredCV(result.answer, {
       cvData,
       jdData,
       matchMap,
@@ -451,6 +472,24 @@ app.post('/api/cv/tailor', async (req, res) => {
     });
     if (!tailoredCvText?.trim()) {
       return res.status(502).json({ error: 'No output from provider' });
+    }
+
+    try {
+      const { systemPrompt: auditSystemPrompt, userPrompt: auditUserPrompt, temperature: auditTemperature } =
+        tailor.buildTailoredCvAuditPrompt(cvData, jdData, matchMap, tailoredCvText, confirmedSkills);
+      const auditResult = await generate(PROVIDER_NAME, PROVIDER_CONFIG, [
+        { role: 'system', content: auditSystemPrompt },
+        { role: 'user',   content: auditUserPrompt },
+      ], { temperature: auditTemperature, max_tokens: 4500 });
+      const finalizedAudit = tailor.finalizeTailoredCV(auditResult.answer, {
+        cvData,
+        jdData,
+        matchMap,
+        confirmedSkills,
+      });
+      if (finalizedAudit?.trim()) tailoredCvText = finalizedAudit;
+    } catch (e) {
+      console.warn('[Tailored CV audit] LLM verification failed, using deterministic cleanup only:', e.message);
     }
 
     const warnings        = [

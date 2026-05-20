@@ -216,9 +216,72 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
     return { systemPrompt, userPrompt, temperature: 0.3 };
   }
 
+  buildTailoredCvAuditPrompt(cvData, jdData, matchMap = [], tailoredText = '', confirmedSkills = []) {
+    const supported = (matchMap || [])
+      .filter(m => m.allowedToMention)
+      .map(m => ({
+        requirement: m.requirement,
+        evidence: Array.isArray(m.evidence) ? m.evidence.slice(0, 3) : [],
+        confirmedByUser: Boolean(m.confirmedByUser),
+      }));
+    const unsupported = (matchMap || [])
+      .filter(m => !m.allowedToMention)
+      .map(m => m.requirement)
+      .filter(Boolean);
+
+    const systemPrompt = `You are a strict CV truth-auditor.
+
+Your job is to remove unsupported claims from a tailored CV. You are not improving style. You are checking evidence.
+
+Rules:
+- Return the complete corrected CV text only.
+- Preserve locked facts from the original CV: names, employers, job titles, dates, education, certifications, contact details.
+- Every skill, claim, achievement, tool, methodology, domain phrase, and focus line in the corrected CV must be supported by either:
+  1. the ORIGINAL CV text,
+  2. a SUPPORTED REQUIREMENT with evidence,
+  3. a USER-CONFIRMED addition.
+- If a phrase only appears in the JD or target role and has no support, remove it.
+- Never paste JD requirement prose into the skills section.
+- Skills sections must contain short skill phrases only, not sentences, years-of-experience requirements, commute/location requirements, education requirements, or phrases like "track record of...".
+- Do not add new content. Delete or simplify unsupported content.`;
+
+    const supportedLines = supported.map(item => {
+      const evidence = item.confirmedByUser
+        ? 'User-confirmed addition'
+        : (item.evidence.length
+            ? item.evidence.map(e => `"${e}"`).join(' | ')
+            : 'No direct CV citation; keep only if visibly supported by ORIGINAL CV');
+      return `  ✓ ${item.requirement}\n    Evidence: ${evidence}`;
+    });
+
+    const userPrompt = `TARGET ROLE
+  Job title: ${jdData?.jobTitle || 'Not specified'}
+  Company: ${jdData?.company || 'Not specified'}
+
+SUPPORTED REQUIREMENTS / CLAIMS ALLOWED IN THE CV
+${supportedLines.length ? supportedLines.join('\n') : '  (none)'}
+
+USER-CONFIRMED ADDITIONS
+${this._uniqueDisplaySkills(confirmedSkills).length ? this._uniqueDisplaySkills(confirmedSkills).map(s => `  + ${s}`).join('\n') : '  (none)'}
+
+UNSUPPORTED JD REQUIREMENTS / CLAIMS TO REMOVE IF PRESENT
+${unsupported.length ? unsupported.map(s => `  ✗ ${s}`).join('\n') : '  (none)'}
+
+ORIGINAL CV — source of truth
+${cvData?.rawText || ''}
+
+TAILORED CV TO AUDIT
+${tailoredText || ''}
+
+AUDIT INSTRUCTION
+Return a corrected complete CV. Remove any unsupported JD-only skills, methods, responsibilities, tools, metrics, commute/location requirements, years-of-experience requirements, degree requirements, and sales/role requirements that are not evidenced by the original CV or confirmed additions.`;
+
+    return { systemPrompt, userPrompt, temperature: 0.1 };
+  }
+
   buildTailoringPlan(cvData, jdData, matchMap = []) {
-    const domain = this._detectDomain(jdData);
-    const domainLabel = {
+    const domain = jdData.domain || this._detectDomain(jdData);
+    const domainLabel = jdData.targetPositioning || {
       mlops: 'MLOps, AI/ML platform engineering, production reliability, and automation',
       data_engineering: 'data engineering, data pipelines, platform reliability, and automation',
       devops: 'DevOps, cloud infrastructure, platform reliability, and automation',
@@ -230,12 +293,18 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
     }[domain] || `${jdData.jobTitle || 'the target role'} responsibilities, supported technologies, and relevant achievements`;
 
     const supportedKeywords = this._rankSupportedKeywords(matchMap, jdData).slice(0, 18);
-    const roleFocusLines = (cvData.experience || [])
-      .map(exp => {
-        const focus = this._buildRoleFocus(exp, jdData, matchMap);
-        return focus ? { company: exp.company || '', title: exp.title || '', focus } : null;
-      })
-      .filter(Boolean);
+
+    // When Groq has already provided targetPositioning, the regex focus-line
+    // suggestions would mislead the tailoring LLM with hardcoded tech categories.
+    // Let the tailoring LLM derive focus lines from targetPositioning instead.
+    const roleFocusLines = jdData.targetPositioning
+      ? []
+      : (cvData.experience || [])
+          .map(exp => {
+            const focus = this._buildRoleFocus(exp, jdData, matchMap);
+            return focus ? { company: exp.company || '', title: exp.title || '', focus } : null;
+          })
+          .filter(Boolean);
 
     return {
       domain,
@@ -942,7 +1011,14 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
   }
 
   _buildGroupedSkills(items = [], jdData = {}) {
-    const isSolutionEngineering = this._detectDomain(jdData) === 'solution_engineering';
+    // When the LLM has provided skill categories for this specific role, use them
+    // directly instead of the hardcoded tech-only buckets.
+    if (Array.isArray(jdData.skillCategories) && jdData.skillCategories.length > 0) {
+      return this._buildGroupedSkillsFromLLMCategories(items, jdData.skillCategories);
+    }
+
+    const domain = jdData.domain || this._detectDomain(jdData);
+    const isSolutionEngineering = domain === 'solution_engineering';
     const buckets = isSolutionEngineering ? [
       { label: 'Pre-Sales & Solution Engineering', terms: ['POC', 'POV', 'proof of concept', 'proof of value', 'technical demo', 'demo', 'RFP', 'RFI', 'solution selling', 'technical selling', 'pre-sales', 'value engineering', 'business value'] },
       { label: 'Customer Engagement & Success', terms: ['customer success', 'customer-facing', 'enterprise SaaS', 'stakeholder alignment', 'executive engagement', 'champion building', 'account management', 'customer onboarding', 'renewal', 'expansion'] },
@@ -1008,6 +1084,62 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
       .slice(0, 8);
     if (leftovers.length > 0 && lines.length < 8) {
       lines.push(`Additional Relevant Skills: ${leftovers.join(', ')}`);
+    }
+
+    return lines;
+  }
+
+  /**
+   * Build grouped skill lines using LLM-provided categories.
+   * Categories come from jdData.skillCategories: { label, skills }[]
+   * Items are CV-supported skills from the matchMap.
+   */
+  _buildGroupedSkillsFromLLMCategories(items = [], categories = []) {
+    const itemKeys = new Map(
+      this._uniqueDisplaySkills(items).map(item => [this._normaliseText(item), item])
+    );
+    const used = new Set();
+    const lines = [];
+
+    for (const cat of categories) {
+      const catSkills = Array.isArray(cat.skills) ? cat.skills : [];
+      const matched = [];
+
+      // Direct term matches
+      for (const term of catSkills) {
+        const key = this._normaliseText(term);
+        if (itemKeys.has(key) && !used.has(key)) {
+          matched.push(itemKeys.get(key));
+          used.add(key);
+        }
+      }
+
+      // Fuzzy: CV item whose normalized text contains or is contained by a category term
+      for (const [key, item] of itemKeys) {
+        if (used.has(key)) continue;
+        const fits = catSkills.some(term => {
+          const t = this._normaliseText(term);
+          return t.length >= 3 && (key.includes(t) || t.includes(key));
+        });
+        if (fits) {
+          matched.push(item);
+          used.add(key);
+        }
+      }
+
+      const cleaned = this._uniqueDisplaySkills(matched)
+        .filter(item => !this._isRequirementFragment(item))
+        .slice(0, 8);
+      if (cleaned.length > 0) lines.push(`${cat.label}: ${cleaned.join(', ')}`);
+    }
+
+    // Append any CV skills that didn't fit any category
+    const leftovers = this._uniqueDisplaySkills([...itemKeys.values()]
+      .filter(item => !used.has(this._normaliseText(item))))
+      .filter(item => !this._isRequirementFragment(item))
+      .slice(0, 8);
+    if (leftovers.length > 0 && lines.length < 6) {
+      lines.push(`Additional Skills: ${leftovers.join(', ')}`);
     }
 
     return lines;

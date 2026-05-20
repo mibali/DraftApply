@@ -227,6 +227,70 @@ export class JDParser {
     return breakers;
   }
 
+  /**
+   * Build a prompt asking the LLM to analyse the JD and return structured JSON.
+   * Call this before the main CV tailoring LLM call; feed the result into
+   * mergeWithLLMAnalysis() to enrich the regex-parsed jdData.
+   */
+  buildLLMAnalysisPrompt(jdText) {
+    const systemPrompt = `You are a job description analyst. Extract structured information from job descriptions. Return ONLY valid JSON — no preamble, no markdown fences, no explanation.`;
+
+    const userPrompt = `Analyse this job description and return a single JSON object with exactly these fields:
+
+{
+  "domain": "<one of: software_engineering | solution_engineering | product_management | data_science | devops | design | marketing | sales | finance | legal | hr | operations | healthcare | education | other>",
+  "targetPositioning": "<2-sentence description of how a CV should be positioned for this role — what the hiring team is really looking for, written as instructions to a CV editor>",
+  "skillCategories": [
+    { "label": "<category name specific to THIS role type — not generic tech categories>", "skills": ["<skill1>", "<skill2>"] }
+  ],
+  "requiredSkills": ["<short phrase from the requirements/must-have section>"],
+  "preferredSkills": ["<short phrase from the nice-to-have/preferred section>"],
+  "tools": ["<specific named tool, platform, language, or framework>"],
+  "responsibilities": ["<key duty from the role description>"],
+  "softSkills": ["<interpersonal or behavioural skill explicitly mentioned>"],
+  "atsKeywords": ["<high-frequency meaningful keyword from the full JD>"]
+}
+
+Constraints:
+- skillCategories: 3–6 groups. Labels must be role-appropriate. For a marketing role use "Campaign Management", "Analytics & Reporting" — not "CI/CD & Delivery". For a finance role use "Financial Modelling", "Regulatory Compliance" — not "Kubernetes".
+- requiredSkills: max 20, short phrases only, no sentences
+- preferredSkills: max 15
+- tools: max 25, specific named tools only — not generic phrases like "productivity tools"
+- responsibilities: max 10
+- softSkills: max 10
+- atsKeywords: max 20, words or short phrases that appear multiple times in the JD
+
+JOB DESCRIPTION:
+${jdText}`;
+
+    return { systemPrompt, userPrompt };
+  }
+
+  /**
+   * Merge LLM analysis JSON into a regex-parsed jdData object.
+   * LLM values win where they exist; regex values are the fallback.
+   */
+  mergeWithLLMAnalysis(regexParsed, llmJson) {
+    if (!llmJson || typeof llmJson !== 'object') return regexParsed;
+
+    const pick = (llm, regex) =>
+      Array.isArray(llm) && llm.length > 0 ? llm : (regex || []);
+
+    return {
+      ...regexParsed,
+      domain:            typeof llmJson.domain === 'string' ? llmJson.domain : null,
+      targetPositioning: typeof llmJson.targetPositioning === 'string' ? llmJson.targetPositioning : null,
+      skillCategories:   Array.isArray(llmJson.skillCategories) && llmJson.skillCategories.length > 0
+                           ? llmJson.skillCategories : null,
+      requiredSkills:    pick(llmJson.requiredSkills,  regexParsed.requiredSkills),
+      preferredSkills:   pick(llmJson.preferredSkills, regexParsed.preferredSkills),
+      tools:             pick(llmJson.tools,            regexParsed.tools),
+      responsibilities:  pick(llmJson.responsibilities, regexParsed.responsibilities),
+      softSkills:        pick(llmJson.softSkills,       regexParsed.softSkills),
+      atsKeywords:       pick(llmJson.atsKeywords,      regexParsed.atsKeywords),
+    };
+  }
+
   // ── private helpers ───────────────────────────────────────────────────────
 
   /**
