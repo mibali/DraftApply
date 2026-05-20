@@ -325,12 +325,34 @@ ${tailoringPlan.roleFocusLines.length ? tailoringPlan.roleFocusLines.map(r => ` 
 ORIGINAL CV
 ${cvData.rawText}
 
+HARVARD FORMAT — apply this structure exactly:
+  Line 1:  Candidate full name (as-is from original CV)
+  Line 2:  ${jdData.jobTitle || 'Target role title'} (job title, no label prefix)
+  Lines 3+: Contact details one per line (email, phone, LinkedIn, location)
+  [blank line]
+  PROFESSIONAL SUMMARY
+  [summary paragraph]
+  [blank line]
+  CORE COMPETENCIES
+  Category Label: Skill A, Skill B, Skill C
+  Category Label: Skill D, Skill E
+  (each category on its own line, no bullet characters, no "Additional Relevant Skills" catch-all)
+  [blank line]
+  PROFESSIONAL EXPERIENCE
+  Company Name                  Month Year – Month Year
+  Job Title
+  Focus: [one-line positioning, when supported]
+  • Bullet one
+  • Bullet two
+  [blank line]
+  EDUCATION / CERTIFICATIONS (as in original CV)
+
 INSTRUCTION
-1. The professional headline/title line near the top of the CV MUST be exactly: "${jdData.jobTitle || 'the target role'}".
+1. HEADER: Job title on line 2 immediately below the candidate name, before any contact lines.
 2. Rewrite the professional summary so it clearly positions the candidate for this exact role and domain without saying it was tailored for a company or application. It must mention only supported evidence from the CV.
-3. Reorder and rename skills/competencies so supported JD-relevant items appear first, especially supported technologies, methods, domain terms, and operational practices from the JD. The skills/core competencies section must contain short phrases only, never full JD requirement sentences, degree requirements, or years-of-experience requirements.
-4. For each relevant role: preserve the official job title exactly, then add one short "Focus:" line below it when the original responsibilities support the target role. Example: "Focus: MLOps, platform reliability, cloud infrastructure, automation, and production diagnostics".
-5. For each role: rewrite relevant bullets with JD vocabulary (same meaning, aligned language), reorder bullets so the strongest target-role evidence comes first, and make Infra/MLOps/platform evidence obvious when supported.
+3. CORE COMPETENCIES: Use 4–7 named categories (e.g. "Cloud & Platform Engineering: AWS, GCP, Azure"). Each category on its own line with no bullet prefix. Do NOT include an "Additional Relevant Skills" or "Additional Skills" section — place every skill in a named category or omit it. No duplicate skills across categories.
+4. For each relevant role: preserve the official job title exactly, then add one short "Focus:" line below it when the original responsibilities support the target role.
+5. For each role: rewrite relevant bullets with JD vocabulary (same meaning, aligned language), reorder bullets so the strongest target-role evidence comes first.
 6. Include every user-confirmed addition in the skills/core competencies section as concise skill names. You may also use them in the summary when natural, but do not attach them to a specific employer, project, metric, certification, or achievement unless that context exists in the original CV.
 7. Preserve all locked fields exactly — same spelling, capitalisation, and punctuation.
 8. The final CV must read like a polished CV for "${jdData.jobTitle || 'the target role'}", not like a generic CV and not like generated marketing copy.
@@ -466,27 +488,27 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
     const firstTextIdx = lines.findIndex(l => l.trim());
     if (firstTextIdx === -1) return tailoredText;
 
-    let i = firstTextIdx + 1;
-    while (i < lines.length) {
-      const line = lines[i].trim();
-      if (!line || this._isHeaderContactLine(line) || this._isLikelyLocationLine(line)) {
-        i++;
-        continue;
+    // Find end of header block (first section header)
+    let headerEnd = lines.length;
+    for (let j = firstTextIdx + 1; j < lines.length; j++) {
+      if (this._isLikelySectionHeader(lines[j].trim())) { headerEnd = j; break; }
+    }
+
+    const normalise = s => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const titleNorm = normalise(title);
+
+    // Remove any existing title line(s) from the header block (scan backwards to
+    // avoid index shifting issues) so we don't end up with duplicates.
+    for (let j = headerEnd - 1; j > firstTextIdx; j--) {
+      if (normalise(lines[j]) === titleNorm) {
+        lines.splice(j, 1);
+        headerEnd--;
       }
-      break;
     }
 
-    if (i >= lines.length) {
-      lines.push('', title);
-      return lines.join('\n');
-    }
-
-    if (this._isLikelySectionHeader(lines[i])) {
-      lines.splice(i, 0, title, '');
-    } else {
-      lines[i] = title;
-    }
-
+    // Insert the title immediately after the name line so it sits above contact
+    // details — Harvard format: Name → Title → contact info → section headers.
+    lines.splice(firstTextIdx + 1, 0, title);
     return lines.join('\n');
   }
 
@@ -1150,16 +1172,15 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
       { label: 'Cloud & Platform Engineering', terms: ['AWS', 'Azure', 'GCP', 'cloud infrastructure', 'Infrastructure as Code', 'Terraform', 'platform reliability'] },
       { label: 'Programming & Automation', terms: ['Python', 'Go', 'automation', 'scripting', 'tooling', 'Bash'] },
       { label: 'CI/CD & DevOps', terms: ['GitLab CI', 'Jenkins', 'CircleCI', 'Buildkite', 'Azure DevOps', 'pipeline', 'deployment'] },
-      { label: 'Leadership & Stakeholder Management', terms: ['technical leadership', 'stakeholder management', 'cross-functional collaboration', 'willingness to travel', 'sales partnership', 'team leadership', 'mentorship', 'executive communication'] },
-      { label: 'Additional Relevant Skills', terms: [] },
+      { label: 'Leadership & Stakeholder Management', terms: ['technical leadership', 'stakeholder management', 'cross-functional collaboration', 'willingness to travel', 'sales partnership', 'team leadership', 'mentorship', 'executive communication', 'change management', 'release governance', 'compliance'] },
     ] : [
       { label: 'AI & GenAI Systems', terms: ['Generative AI', 'AI solutions', 'RAG systems', 'multi-agent workflows', 'agentic systems', 'ReAct', 'tool-calling', 'context engineering', 'explainability', 'transparency'] },
       { label: 'Cloud & Platform Engineering', terms: ['Google Cloud', 'GCP', 'Vertex AI', 'AWS', 'Azure', 'cloud infrastructure', 'platform reliability', 'production reliability', 'engineering enablement'] },
       { label: 'Programming & Automation', terms: ['Python', 'Go', 'Bash', 'PowerShell', 'automation', 'scripting', 'FastAPI', 'Flask'] },
       { label: 'MLOps & ML Lifecycle', terms: ['MLOps', 'MLflow', 'DVC', 'model registry', 'experiment tracking', 'artifact versioning', 'reproducible training workflows'] },
-      { label: 'Model Serving & Infrastructure', terms: ['KServe', 'SageMaker', 'BentoML', 'Docker', 'Kubernetes', 'Kubeflow Pipelines'] },
-      { label: 'CI/CD & Delivery', terms: ['GitHub Actions', 'GitLab CI', 'Jenkins', 'CircleCI', 'Azure DevOps', 'ArgoCD', 'Argo Workflows', 'Prefect'] },
-      { label: 'Observability & Reliability', terms: ['Prometheus', 'Grafana', 'logging', 'distributed tracing', 'incident response', 'RCA', 'runbooks', 'on-call'] },
+      { label: 'Model Serving & Infrastructure', terms: ['KServe', 'SageMaker', 'BentoML', 'Docker', 'Kubernetes', 'K8s', 'Kubeflow Pipelines', 'container orchestration'] },
+      { label: 'CI/CD & Delivery', terms: ['GitHub Actions', 'GitLab CI', 'Jenkins', 'CircleCI', 'Azure DevOps', 'ArgoCD', 'Argo Workflows', 'Prefect', 'DevOps', 'Release Governance', 'Change Management'] },
+      { label: 'Observability & Reliability', terms: ['Prometheus', 'Grafana', 'logging', 'log analysis', 'distributed tracing', 'incident response', 'RCA', 'runbooks', 'on-call', 'monitoring', 'performance tuning', 'diagnostics', 'alerting'] },
       { label: 'Leadership & Stakeholder Management', terms: ['people management', 'technical mentorship', 'technical hiring', 'stakeholder management', 'sales partnership', 'engineering leadership', 'technical lead', 'team leadership', 'customer-facing technical leadership'] },
     ];
 
@@ -1201,13 +1222,6 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
 
       const cleaned = this._uniqueDisplaySkills(matched).slice(0, 8);
       if (cleaned.length > 0) lines.push(`${bucket.label}: ${cleaned.join(', ')}`);
-    }
-
-    const leftovers = this._uniqueDisplaySkills([...itemKeys.values()].filter(item => !used.has(this._normaliseText(item))))
-      .filter(item => !this._isRequirementFragment(item))
-      .slice(0, 8);
-    if (leftovers.length > 0 && lines.length < 8) {
-      lines.push(`Additional Relevant Skills: ${leftovers.join(', ')}`);
     }
 
     return lines;
@@ -1257,15 +1271,6 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
       if (cleaned.length > 0) lines.push(`${cat.label}: ${cleaned.join(', ')}`);
     }
 
-    // Append any CV skills that didn't fit any category
-    const leftovers = this._uniqueDisplaySkills([...itemKeys.values()]
-      .filter(item => !used.has(this._normaliseText(item))))
-      .filter(item => !this._isRequirementFragment(item))
-      .slice(0, 8);
-    if (leftovers.length > 0 && lines.length < 6) {
-      lines.push(`Additional Skills: ${leftovers.join(', ')}`);
-    }
-
     return lines;
   }
 
@@ -1273,17 +1278,17 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
     const text = this._normaliseText(item);
     const patterns = {
       'AI & GenAI Systems': /\b(genai|generative ai|rag|agent|react|tool calling|context engineering|explainability|ai solutions?)\b/,
-      'Cloud & Platform Engineering': /\b(gcp|google cloud|vertex|aws|azure|cloud|platform|infrastructure|reliability|enablement)\b/,
+      'Cloud & Platform Engineering': /\b(gcp|google cloud|vertex|aws|azure|cloud|platform|infrastructure|reliability|enablement|performance.tun|diagnostic)\b/,
       'Programming & Automation': /\b(python|golang|go|bash|powershell|automation|scripting|fastapi|flask)\b/,
       'MLOps & ML Lifecycle': /\b(mlops|mlflow|dvc|model registry|experiment|artifact|training workflow)\b/,
-      'Model Serving & Infrastructure': /\b(kserve|sagemaker|bentoml|docker|kubernetes|kubeflow|serving)\b/,
-      'CI/CD & Delivery': /\b(ci cd|github actions|gitlab|jenkins|circleci|azure devops|argocd|argo|prefect|delivery)\b/,
-      'CI/CD & DevOps': /\b(ci cd|github actions|gitlab|jenkins|circleci|azure devops|buildkite|pipeline|deployment)\b/,
-      'Observability & Reliability': /\b(prometheus|grafana|logging|tracing|incident|rca|runbook|on call|observability)\b/,
-      'Leadership & Stakeholder Management': /\b(people management|mentorship|hiring|stakeholder|sales|leadership|technical lead|customer facing|team|travel|executive|communication)\b/,
+      'Model Serving & Infrastructure': /\b(kserve|sagemaker|bentoml|docker|kubernetes|k8s|kubeflow|serving|container)\b/,
+      'CI/CD & Delivery': /\b(ci.?cd|github actions|gitlab|jenkins|circleci|azure devops|argocd|argo|prefect|delivery|devops|release|change management|governance|compliance)\b/,
+      'CI/CD & DevOps': /\b(ci.?cd|github actions|gitlab|jenkins|circleci|azure devops|buildkite|pipeline|deployment|devops|release|change management)\b/,
+      'Observability & Reliability': /\b(prometheus|grafana|log|tracing|incident|rca|runbook|on.?call|observability|monitoring|performance|diagnostic|alert)\b/,
+      'Leadership & Stakeholder Management': /\b(people management|mentorship|hiring|stakeholder|sales|leadership|technical lead|customer.?facing|team|travel|executive|communication|change management)\b/,
       'Pre-Sales & Solution Engineering': /\b(poc|pov|proof of concept|proof of value|demo|rfp|rfi|pre.?sales|value engineering|solution selling|technical selling|business value|champion)\b/,
-      'Customer Engagement & Success': /\b(customer success|customer.facing|enterprise saas|stakeholder|account management|onboarding|renewal|expansion|executive engagement)\b/,
-      'Technical Architecture & Integration': /\b(solution architecture|systems? integration|api integration|rest api|cloud architecture|docker|kubernetes|ci cd|security scanning)\b/,
+      'Customer Engagement & Success': /\b(customer success|customer.?facing|enterprise saas|stakeholder|account management|onboarding|renewal|expansion|executive engagement)\b/,
+      'Technical Architecture & Integration': /\b(solution architecture|systems? integration|api.?integration|rest api|cloud architecture|docker|kubernetes|k8s|ci.?cd|security scanning)\b/,
     };
     return patterns[bucketLabel]?.test(text) || false;
   }
