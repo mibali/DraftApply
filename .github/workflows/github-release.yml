@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish, for example v2.4.0'
+        required: true
+        default: 'v2.4.0'
 
 permissions:
   contents: write
@@ -13,8 +18,12 @@ jobs:
   release:
     name: Create GitHub release
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Set up Node
         uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
@@ -26,7 +35,7 @@ jobs:
         run: npm install
 
       - name: Validate release metadata
-        run: npm run release:validate
+        run: npm run release:validate -- --tag="${RELEASE_TAG}"
 
       - name: Run tests
         run: npm test
@@ -35,11 +44,12 @@ jobs:
         run: npm run release:chrome -- --skip-tests --allow-dirty
 
       - name: Validate packaged ZIP
-        run: npm run release:validate -- --require-zip
+        run: npm run release:validate -- --require-zip --tag="${RELEASE_TAG}"
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           draft: false
           prerelease: false
           generate_release_notes: true
