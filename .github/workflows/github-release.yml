@@ -38,7 +38,7 @@ jobs:
         run: npm run release:validate -- --require-zip
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@0c7436c9b3cb1667ca4da9b1f30b1241bce8f6ab # v2.0.8
+        uses: softprops/action-gh-release@v2
         with:
           draft: false
           prerelease: false
