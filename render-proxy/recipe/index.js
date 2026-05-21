@@ -16,6 +16,7 @@
  *     cvData:          object?,
  *     jdData:          object?,
  *     matchMap:        object[]?,
+ *     roleProfile:     object?,
  *     jobTitle:        string?,
  *     company:         string?,
  *     jobDescription:  string?,
@@ -892,6 +893,55 @@ function buildUnsupportedBridge(matchMap, question, qType) {
   return `NOT CONFIRMED BY THE CV OR USER REVIEW:\n${lines.join('\n')}\nIf the question asks about one of these directly, do not claim it. Say "Not directly" and pivot to the closest truthful adjacent experience.\n\n`;
 }
 
+function buildRoleCredibilityBlock(jdData, qType) {
+  const roleProfile = jdData?.roleProfile;
+  if (!roleProfile || ['salary', 'short_factual'].includes(qType)) return '';
+
+  const family = roleProfile.family || 'Target role';
+  const signals = [
+    ...(roleProfile.credibilitySignals || []),
+    ...(jdData.credibilitySignals || []),
+  ].map(item => String(item || '').trim()).filter(Boolean);
+  const transferable = [
+    ...(roleProfile.transferableEvidence || []),
+    ...(jdData.transferableEvidence || []),
+  ].map(item => String(item || '').trim()).filter(Boolean);
+  const risks = [
+    ...(roleProfile.riskClaims || []),
+    ...(jdData.unsupportedClaimRisks || []),
+  ].map(item => String(item || '').trim()).filter(Boolean);
+
+  const unique = values => {
+    const seen = new Set();
+    const result = [];
+    for (const value of values) {
+      const key = value.toLowerCase().replace(/\s+/g, ' ').trim();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      result.push(value);
+    }
+    return result;
+  };
+
+  const uniqueSignals = unique(signals).slice(0, 8);
+  const uniqueTransferable = unique(transferable).slice(0, 5);
+  const uniqueRisks = unique(risks).slice(0, 8);
+  if (uniqueSignals.length === 0 && uniqueTransferable.length === 0 && uniqueRisks.length === 0) return '';
+
+  let block = `ROLE CREDIBILITY RUBRIC:\n  Role family: ${family}\n`;
+  if (uniqueSignals.length > 0) {
+    block += `  What a credible answer should prove: ${uniqueSignals.join(', ')}\n`;
+  }
+  if (uniqueTransferable.length > 0) {
+    block += `  Transferable evidence you may use honestly: ${uniqueTransferable.join('; ')}\n`;
+  }
+  if (uniqueRisks.length > 0) {
+    block += `  Do not claim without direct CV evidence or user confirmation: ${uniqueRisks.join(', ')}\n`;
+  }
+  block += '  Use this rubric to choose evidence, not to stuff keywords. If direct proof is thin, be honest and pivot to adjacent supported experience.\n\n';
+  return block;
+}
+
 /**
  * Inject structured-data hints into a user prompt.
  * Evidence hint goes before MY CV: (guidance on where to look).
@@ -899,13 +949,16 @@ function buildUnsupportedBridge(matchMap, question, qType) {
  * (role signals first, then matched proof points closest to the answer task).
  * If neither insertion point is found the prompt is returned unchanged.
  */
-function injectHints(userPrompt, evidenceHint, jdFocusBlock, bridge, unsupportedBridge = '') {
+function injectHints(userPrompt, evidenceHint, jdFocusBlock, roleCredibilityBlock, bridge, unsupportedBridge = '') {
   let p = userPrompt;
   if (evidenceHint) {
     p = p.replace(/^MY CV:/m, `${evidenceHint}MY CV:`);
   }
   if (jdFocusBlock) {
     p = p.replace(/^(Question:|Write a cover letter)/m, `${jdFocusBlock}$1`);
+  }
+  if (roleCredibilityBlock) {
+    p = p.replace(/^(Question:|Write a cover letter)/m, `${roleCredibilityBlock}$1`);
   }
   if (bridge) {
     p = p.replace(/^(Question:|Write a cover letter)/m, `${bridge}$1`);
@@ -929,6 +982,7 @@ export function buildPrompts(input) {
     cvData,
     jdData,
     matchMap,
+    roleProfile,
     jobTitle,
     company,
     jobDescription,
@@ -942,6 +996,7 @@ export function buildPrompts(input) {
   }
 
   const jobCtx = buildJobContext(jobTitle, company, jobDescription, requirements);
+  const enrichedJdData = jdData || roleProfile ? { ...(jdData || {}), roleProfile: jdData?.roleProfile || roleProfile } : jdData;
   const candidateName = extractCandidateName(cvText);
   const qType = detectQuestionType(question);
 
@@ -997,11 +1052,12 @@ export function buildPrompts(input) {
   ]);
   if (result && HINT_TYPES.has(qType)) {
     const evidenceHint = buildEvidenceHint(cvData, question);
-    const jdFocusBlock = buildJdFocusBlock(jdData, qType);
+    const jdFocusBlock = buildJdFocusBlock(enrichedJdData, qType);
+    const roleCredibilityBlock = buildRoleCredibilityBlock(enrichedJdData, qType);
     const bridge = buildRequirementsBridge(matchMap, question, qType);
     const unsupportedBridge = buildUnsupportedBridge(matchMap, question, qType);
-    if (evidenceHint || jdFocusBlock || bridge || unsupportedBridge) {
-      result = { ...result, userPrompt: injectHints(result.userPrompt, evidenceHint, jdFocusBlock, bridge, unsupportedBridge) };
+    if (evidenceHint || jdFocusBlock || roleCredibilityBlock || bridge || unsupportedBridge) {
+      result = { ...result, userPrompt: injectHints(result.userPrompt, evidenceHint, jdFocusBlock, roleCredibilityBlock, bridge, unsupportedBridge) };
     }
   }
 

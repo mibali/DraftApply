@@ -799,14 +799,88 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function formatTailorWarnings(warnings = []) {
-    const items = warnings
-      .map(w => `<li>${esc(w)}</li>`)
-      .join('');
-    return `
-      <div class="tailor-warning-title">Review before sending</div>
-      <div class="tailor-warning-help">DraftApply found possible CV quality issues. Check these lines in the generated CV and edit anything that is not true or well formatted.</div>
-      <ul class="tailor-warning-list">${items}</ul>
-    `;
+    // Sort warnings into three buckets for display
+    const accuracy = [];   // locked fields changed, fabricated metrics
+    const missing  = [];   // user-confirmed skills the LLM didn't add
+    const quality  = [];   // formatting, unsupported claims, structural issues
+
+    for (const w of warnings) {
+      if (/^(Company name|Job title|Education institution|Email address|Phone number|LinkedIn|GitHub|Website|Twitter|Full name|New metric)/.test(w)) {
+        accuracy.push(w);
+      } else if (w.startsWith('User-confirmed skill was not included')) {
+        const m = w.match(/: "(.+)"$/);
+        missing.push(m ? m[1] : w);
+      } else {
+        quality.push(w);
+      }
+    }
+
+    function humaniseAccuracy(w) {
+      const val = (w.match(/: "(.+)"$/) || [])[1] || '';
+      if (/^Company name/.test(w))        return `Check company name is still present: <strong>${esc(val)}</strong>`;
+      if (/^Job title/.test(w))           return `Check job title is still present: <strong>${esc(val)}</strong>`;
+      if (/^Education institution/.test(w)) return `Check institution name is still present: <strong>${esc(val)}</strong>`;
+      if (/^New metric/.test(w))          return `New figure added — confirm it's accurate: <strong>${esc(val)}</strong>`;
+      if (/^(Email|Phone|LinkedIn|GitHub|Website|Twitter|Full name)/.test(w)) {
+        const label = w.split(' may ')[0];
+        return `Check ${label.toLowerCase()} is still present: <strong>${esc(val)}</strong>`;
+      }
+      return esc(w);
+    }
+
+    function humaniseQuality(w) {
+      if (/^Unsupported JD skill/.test(w)) {
+        const val = (w.match(/: "(.+)"$/) || [])[1] || '';
+        return `Not in your original CV — remove if you don't have this: <strong>${esc(val)}</strong>`;
+      }
+      if (/^Target job title may be missing/.test(w)) {
+        const val = (w.match(/: "(.+)"$/) || [])[1] || '';
+        return `Target role title missing from CV header: <strong>${esc(val)}</strong>`;
+      }
+      if (/^Core Competencies has only/.test(w)) {
+        const n = (w.match(/only (\d+)/) || [])[1] || '';
+        return `Core Competencies has only ${n} ${n === '1' ? 'category' : 'categories'} — aim for 5–7`;
+      }
+      if (/broken or wrapped/.test(w))   return 'Core Competencies has a line that wrapped or broke — edit into "Category: Skill, Skill" format';
+      if (/business communication/.test(w)) return 'Replace "business communication skills" with a concise phrase e.g. Stakeholder Communication';
+      if (/Additional Skills.*catch-all/.test(w)) return 'Remove the "Additional Skills" catch-all — put every skill inside a named category';
+      if (/JD requirement prose/.test(w)) return 'Core Competencies may contain a long JD requirement sentence — replace with short skill phrases';
+      if (/Core Competencies section may be missing/.test(w)) return 'Core Competencies section is missing from the CV';
+      if (/Role focus line may be missing/.test(w)) {
+        const val = (w.match(/"(.+)"$/) || [])[1] || '';
+        return `Missing Focus: line under <strong>${esc(val)}</strong>`;
+      }
+      if (/under-positioned.*headline/.test(w)) return w.replace(/Solution Architect target may be under-positioned in the CV headline: "(.+)"/, 'Headline may not position you as a Solution Architect: <strong>$1</strong>');
+      return esc(w);
+    }
+
+    const sections = [];
+
+    if (accuracy.length > 0) {
+      sections.push(`
+        <div class="tw-group tw-group-accuracy">
+          <div class="tw-group-label">Accuracy — check these are still correct</div>
+          <ul class="tailor-warning-list">${accuracy.map(w => `<li>${humaniseAccuracy(w)}</li>`).join('')}</ul>
+        </div>`);
+    }
+
+    if (missing.length > 0) {
+      sections.push(`
+        <div class="tw-group tw-group-missing">
+          <div class="tw-group-label">Skills not added — add manually if relevant</div>
+          <ul class="tailor-warning-list">${missing.map(s => `<li><strong>${esc(s)}</strong></li>`).join('')}</ul>
+        </div>`);
+    }
+
+    if (quality.length > 0) {
+      sections.push(`
+        <div class="tw-group tw-group-quality">
+          <div class="tw-group-label">Quality checks</div>
+          <ul class="tailor-warning-list">${quality.map(w => `<li>${humaniseQuality(w)}</li>`).join('')}</ul>
+        </div>`);
+    }
+
+    return `<div class="tailor-warning-title">Review before sending</div>${sections.join('')}`;
   }
 
   function displayMatchReport(matchReport, { reviewMode, domainSuggestions = [] } = {}) {

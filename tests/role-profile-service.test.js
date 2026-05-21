@@ -1,0 +1,142 @@
+import { describe, it, expect } from 'vitest';
+import { ROLE_PROFILES, RoleProfileService } from '../shared/role-profile-service.js';
+
+const service = new RoleProfileService();
+const normalise = value => String(value || '').toLowerCase().replace(/[^a-z0-9+#.]+/g, ' ').replace(/\s+/g, ' ').trim();
+
+function duplicates(values) {
+  const seen = new Set();
+  const repeated = new Set();
+  for (const value of values) {
+    const key = normalise(value);
+    if (!key) continue;
+    if (seen.has(key)) repeated.add(value);
+    seen.add(key);
+  }
+  return [...repeated];
+}
+
+describe('RoleProfileService', () => {
+  it('classifies non-tech job titles into standardized role profiles', () => {
+    expect(service.classify({ jobTitle: 'Finance Analyst' })?.id).toBe('finance');
+    expect(service.classify({ jobTitle: 'Digital Marketing Manager' })?.id).toBe('marketing');
+    expect(service.classify({ jobTitle: 'HR Business Partner' })?.id).toBe('hr_people');
+    expect(service.classify({ jobTitle: 'Healthcare Administrator' })?.id).toBe('healthcare_admin');
+  });
+
+  it('enriches parsed JD data with positioning, credibility signals, risks, and skill categories', () => {
+    const enriched = service.enrichJDData({
+      jobTitle: 'Product Manager',
+      responsibilities: ['Own product roadmap and prioritise customer problems'],
+      requiredSkills: ['Roadmap ownership', 'User research'],
+    });
+
+    expect(enriched.roleProfile.id).toBe('product_manager');
+    expect(enriched.domain).toBe('product_management');
+    expect(enriched.targetPositioning).toMatch(/product judgment/i);
+    expect(enriched.credibilitySignals).toContain('roadmap ownership');
+    expect(enriched.unsupportedClaimRisks).toContain('P&L ownership');
+    expect(enriched.skillCategories.some(cat => cat.label === 'Product Strategy')).toBe(true);
+  });
+
+  it('builds role-specific credibility guidance for the tailoring prompt', () => {
+    const guidance = service.buildCredibilityGuidance({ jobTitle: 'Operations Manager' });
+    expect(guidance).toContain('Role family: Operations / Project Management');
+    expect(guidance).toContain('High-risk claims');
+  });
+
+  it('warns when a tailored CV claims a role identity without role-family proof', () => {
+    const warnings = service.validateCredibility({
+      originalCvData: {
+        rawText: `Jane Doe
+Customer Support Specialist
+- Answered customer tickets and maintained help centre articles`,
+      },
+      jdData: service.enrichJDData({ jobTitle: 'Product Manager' }),
+      tailoredText: `Jane Doe
+Product Manager
+
+PROFESSIONAL SUMMARY
+Product leader with ownership of roadmap strategy and market research.
+
+CORE COMPETENCIES
+Product Strategy: Roadmapping, Market Analysis, P&L Ownership
+
+PROFESSIONAL EXPERIENCE
+SupportCo
+Customer Support Specialist
+- Answered customer tickets and maintained help centre articles`,
+    });
+
+    expect(warnings.some(w => /Product Management/i.test(w))).toBe(true);
+    expect(warnings.some(w => /P&L ownership/i.test(w))).toBe(true);
+  });
+
+  it('keeps role profile ids and aliases unique', () => {
+    expect(duplicates(ROLE_PROFILES.map(profile => profile.id))).toEqual([]);
+
+    const aliasOwners = new Map();
+    const duplicateAliases = [];
+    for (const profile of ROLE_PROFILES) {
+      for (const alias of profile.aliases || []) {
+        const key = normalise(alias);
+        if (!key) continue;
+        if (aliasOwners.has(key)) {
+          duplicateAliases.push(`${alias} (${aliasOwners.get(key)} and ${profile.id})`);
+        } else {
+          aliasOwners.set(key, profile.id);
+        }
+      }
+    }
+
+    expect(duplicateAliases).toEqual([]);
+  });
+
+  it('keeps each role profile internally deduplicated', () => {
+    const problems = [];
+
+    for (const profile of ROLE_PROFILES) {
+      for (const field of ['aliases', 'credibilitySignals', 'riskClaims', 'transferableEvidence']) {
+        const repeated = duplicates(profile[field] || []);
+        if (repeated.length > 0) problems.push(`${profile.id}.${field}: ${repeated.join(', ')}`);
+      }
+
+      const categoryLabels = (profile.skillCategories || []).map(cat => cat.label);
+      const repeatedLabels = duplicates(categoryLabels);
+      if (repeatedLabels.length > 0) problems.push(`${profile.id}.skillCategories labels: ${repeatedLabels.join(', ')}`);
+
+      const categorySkills = [];
+      for (const cat of profile.skillCategories || []) {
+        const repeatedWithinCategory = duplicates(cat.skills || []);
+        if (repeatedWithinCategory.length > 0) problems.push(`${profile.id}.${cat.label} skills: ${repeatedWithinCategory.join(', ')}`);
+        for (const skill of cat.skills || []) categorySkills.push(skill);
+      }
+      const repeatedSkillsAcrossCategories = duplicates(categorySkills);
+      if (repeatedSkillsAcrossCategories.length > 0) {
+        problems.push(`${profile.id}.skillCategories duplicate skills: ${repeatedSkillsAcrossCategories.join(', ')}`);
+      }
+    }
+
+    expect(problems).toEqual([]);
+  });
+
+  it('does not let highly specific title aliases compete across profiles', () => {
+    const titleOwners = new Map();
+    const conflicts = [];
+
+    for (const profile of ROLE_PROFILES) {
+      for (const alias of profile.aliases || []) {
+        const key = normalise(alias);
+        const wordCount = key.split(/\s+/).filter(Boolean).length;
+        if (wordCount < 2) continue;
+        if (titleOwners.has(key)) {
+          conflicts.push(`${alias} (${titleOwners.get(key)} and ${profile.id})`);
+        } else {
+          titleOwners.set(key, profile.id);
+        }
+      }
+    }
+
+    expect(conflicts).toEqual([]);
+  });
+});

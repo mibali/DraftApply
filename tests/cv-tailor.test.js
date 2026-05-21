@@ -74,6 +74,47 @@ const JD = {
   dealBreakers:    [],
 };
 
+const SOLUTION_ARCHITECT_JD = {
+  jobTitle: 'Senior Solution Architect',
+  company: 'LaunchDarkly',
+  seniority: 'senior',
+  requiredSkills: ['Solution Architecture', 'POC/POV Delivery', 'Stakeholder Engagement', 'MEDDPICC'],
+  preferredSkills: ['RFP/RFI Response', 'Technical Demos'],
+  tools: ['AWS', 'Docker', 'Kubernetes', 'Python'],
+  softSkills: ['Executive Communication', 'Business Communication'],
+  responsibilities: [
+    'Translate business requirements into technical solution designs',
+    'Lead discovery and architecture workshops with enterprise stakeholders',
+    'Support technical validation through POCs and implementation planning',
+  ],
+  atsKeywords: ['solution architect', 'technical discovery', 'stakeholder alignment', 'enterprise SaaS'],
+  domain: 'solution_engineering',
+  dealBreakers: [],
+};
+
+const PRODUCT_MANAGER_JD = {
+  jobTitle: 'Product Manager',
+  company: 'RoadmapCo',
+  seniority: 'senior',
+  requiredSkills: ['Roadmap ownership', 'Product discovery', 'Prioritisation', 'Product metrics'],
+  preferredSkills: ['Go-to-market alignment'],
+  tools: ['Jira', 'SQL'],
+  softSkills: ['Stakeholder management'],
+  responsibilities: [
+    'Own roadmap prioritisation and product discovery',
+    'Work with engineering, design, and go-to-market teams',
+    'Use product metrics to guide decisions',
+  ],
+  atsKeywords: ['product manager', 'roadmap', 'prioritisation', 'metrics'],
+  domain: 'product_management',
+  roleProfile: {
+    id: 'product_manager',
+    family: 'Product Management',
+    domain: 'product_management',
+  },
+  dealBreakers: [],
+};
+
 // Completely foreign tech stack — nothing in CV
 const JD_NO_MATCH = {
   jobTitle: 'COBOL Developer',
@@ -399,6 +440,68 @@ BSc Computer Science | University of London | 2015–2019`;
     expect(warnings.some(w => /only 2 populated line/i.test(w))).toBe(true);
     expect(warnings.some(w => /Additional Skills/i.test(w))).toBe(true);
     expect(warnings.some(w => /JD requirement prose/i.test(w))).toBe(true);
+  });
+
+  it('flags a keyword-stuffed Solution Architect CV that lacks credible role evidence', () => {
+    const output = `Michael T Bali
+Senior Solutions Engineer
+
+mtbdesigns01@gmail.com
+
+PROFESSIONAL SUMMARY
+Results-driven technical leader with 7+ years of experience in cloud-native platform engineering, DevOps, and MLOps, delivering scalable and reliable solutions for enterprise SaaS platforms.
+
+CORE COMPETENCIES
+Pre-Sales & Solution Engineering: POV, MEDDPICC, POC/POV Delivery, RFP/RFI Response
+Technical Architecture & Integration: Solution Architecture, API Integration, REST APIs, Docker, Kubernetes, CI/CD, GitHub Actions
+Cloud & Platform Engineering: AWS, Azure, GCP, Terraform
+Programming & Automation: Python, Go, Scripting, Bash
+CI/CD & Dev
+Ops: Change Management
+Leadership & Stakeholder Management: Cross-functional Collaboration, Executive Communication, business communication skills
+
+PROFESSIONAL EXPERIENCE
+TechCorp
+Jan 2021 – Present
+Senior Frontend Engineer
+- Built React and TypeScript dashboards used by 200+ internal users`;
+
+    const map = tailor.buildMatchMap(CV, SOLUTION_ARCHITECT_JD);
+    const warnings = tailor.validateTailoringQuality(CV, SOLUTION_ARCHITECT_JD, map, output);
+
+    expect(warnings.some(w => /under-positioned.*Senior Solutions Engineer/i.test(w))).toBe(true);
+    expect(warnings.some(w => /implementation-only/i.test(w))).toBe(true);
+    expect(warnings.some(w => /broken or wrapped category line/i.test(w))).toBe(true);
+    expect(warnings.some(w => /business communication skills/i.test(w))).toBe(true);
+    expect(warnings.some(w => /MEDDPICC/i.test(w))).toBe(true);
+    expect(warnings.some(w => /RFP\/RFI/i.test(w))).toBe(true);
+    expect(warnings.some(w => /skills rather than supported experience evidence/i.test(w))).toBe(true);
+  });
+
+  it('uses role profiles to flag non-tech CVs that are keywords-only for the target role', () => {
+    const output = `John Doe
+Product Manager
+
+PROFESSIONAL SUMMARY
+Product leader with roadmap ownership, market research, P&L ownership, and go-to-market strategy.
+
+CORE COMPETENCIES
+Product Strategy: Roadmapping, Market Analysis, P&L Ownership
+Delivery & Execution: Agile Delivery, Launch Planning
+Customer & User Insight: User Research, Customer Discovery
+Metrics & Analytics: Product Metrics, Experimentation
+Technical Collaboration: Engineering Collaboration
+
+PROFESSIONAL EXPERIENCE
+TechCorp
+Jan 2021 – Present
+Senior Frontend Engineer
+- Built React and TypeScript dashboards used by 200+ internal users`;
+
+    const warnings = tailor.validateTailoringQuality(CV, PRODUCT_MANAGER_JD, [], output);
+
+    expect(warnings.some(w => /Product Management/i.test(w))).toBe(true);
+    expect(warnings.some(w => /P&L ownership/i.test(w))).toBe(true);
   });
 });
 
@@ -737,6 +840,30 @@ TechCorp`;
     expect(result).not.toMatch(/CoM, or similar/i);
     expect(result).not.toMatch(/commute to London/i);
   });
+
+  it('repairs wrapped Core Competencies labels and senior-level communication phrasing', () => {
+    const tailored = `John Doe
+
+CORE COMPETENCIES
+CI/CD & Dev
+Ops: Change Management
+Leadership & Stakeholder Management: business communication skills, Cross-functional Collaboration
+
+PROFESSIONAL EXPERIENCE
+TechCorp`;
+
+    const matchMap = [
+      { requirement: 'Change Management', allowedToMention: true },
+      { requirement: 'Cross-functional Collaboration', allowedToMention: true },
+      { requirement: 'business communication skills', allowedToMention: true },
+    ];
+
+    const result = tailor.cleanSkillsSection(tailored, matchMap, [], SOLUTION_ARCHITECT_JD);
+
+    expect(result).not.toMatch(/CI\/CD & Dev\nOps/i);
+    expect(result).not.toMatch(/business communication skills/i);
+    expect(result).toMatch(/Stakeholder Communication|Leadership & Stakeholder Management/i);
+  });
 });
 
 // ── buildTailoringPrompt ──────────────────────────────────────────────────────
@@ -798,6 +925,21 @@ describe('buildTailoringPrompt', () => {
     expect(userPrompt).toContain('Target positioning:');
     expect(userPrompt).toContain('Suggested role focus lines:');
     expect(userPrompt).toContain('The CV must visibly prioritize the target role');
+  });
+
+  it('adds Solution Architect credibility guidance for architecture targets', () => {
+    const map = tailor.buildMatchMap(CV, SOLUTION_ARCHITECT_JD);
+    const { userPrompt } = tailor.buildTailoringPrompt(CV, SOLUTION_ARCHITECT_JD, map);
+    expect(userPrompt).toContain('ROLE CREDIBILITY CHECK');
+    expect(userPrompt).toContain('architecture/design authority');
+    expect(userPrompt).toContain('High-risk claims requiring direct CV evidence');
+  });
+
+  it('adds role-profile credibility guidance for non-tech roles', () => {
+    const { userPrompt } = tailor.buildTailoringPrompt(CV, PRODUCT_MANAGER_JD, []);
+    expect(userPrompt).toContain('ROLE CREDIBILITY CHECK');
+    expect(userPrompt).toContain('Role family: Product Management');
+    expect(userPrompt).toContain('roadmap ownership');
   });
 
   it('requires every user-confirmed addition to be included in skills', () => {

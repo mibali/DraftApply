@@ -187,12 +187,13 @@ Open `http://localhost:3001`
 Public Chrome users only receive updates after a new Chrome Web Store package is uploaded and reviewed.
 
 ```bash
+npm run release:validate        # verify version/tag/changelog metadata
 npm run release:chrome          # test + package only
 npm run release:chrome:upload   # upload package to Chrome Web Store
 npm run release:chrome:publish  # upload and submit for review
 ```
 
-Before releasing, bump `extension-ready/manifest.json` and commit the change. The release script creates `dist/draftapply-chrome-<version>.zip` from the contents of `extension-ready/`.
+Before releasing, bump both `extension-ready/manifest.json` and `package.json` to the same version, update `CHANGELOG.md`, and commit the change. The release script creates `dist/draftapply-chrome-<version>.zip` from the contents of `extension-ready/`.
 
 For automated releases, set these GitHub Actions secrets:
 
@@ -202,7 +203,10 @@ For automated releases, set these GitHub Actions secrets:
 - `CHROME_EXTENSION_ID`
 - `CHROME_PUBLISHER_ID`
 
-Creating a tag like `v2.0.1` runs `.github/workflows/chrome-web-store-release.yml`, uploads the extension package, and submits it for Chrome Web Store review.
+Creating a tag like `v2.3.1` runs:
+
+- `.github/workflows/github-release.yml` — runs tests, packages the extension, creates a GitHub Release, and attaches the ZIP.
+- `.github/workflows/chrome-web-store-release.yml` — packages the extension and submits it for Chrome Web Store review when Chrome Web Store secrets are configured.
 
 ## Troubleshooting
 

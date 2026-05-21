@@ -72,7 +72,9 @@ describe('popup productivity stats UI', () => {
   it('explains Tailor CV warnings with a review-before-sending action', () => {
     expect(popupJs).toContain('formatTailorWarnings');
     expect(popupJs).toContain('Review before sending');
-    expect(popupJs).toContain('Check these lines in the generated CV');
+    expect(popupJs).toContain('tw-group-accuracy');
+    expect(popupJs).toContain('tw-group-missing');
+    expect(popupJs).toContain('tw-group-quality');
   });
 
   it('offers a manual JD CTA when page context is partial or missing', () => {

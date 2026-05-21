@@ -480,6 +480,7 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
         cvData:         cvData,
         jdData:         jdData,
         matchMap:       matchMap.length > 0 ? matchMap : undefined,
+        roleProfile:    jdData?.roleProfile || undefined,
         jobTitle:       body.jobTitle || undefined,
         company:        body.company || undefined,
         jobDescription: body.jobDescription || undefined,

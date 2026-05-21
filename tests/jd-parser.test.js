@@ -361,6 +361,22 @@ describe('parse (integration)', () => {
     expect(result).toBeTruthy();
     expect(result.seniority).toBe('mid-level');
   });
+
+  it('enriches non-tech roles with standardized career-positioning profiles', () => {
+    const result = parser.parse(`
+Marketing Manager
+
+Responsibilities:
+- Plan multi-channel campaigns and report on conversion metrics
+- Collaborate with sales on messaging and audience targeting
+`, 'Marketing Manager', 'Acme');
+
+    expect(result.roleProfile.id).toBe('marketing');
+    expect(result.domain).toBe('marketing');
+    expect(result.targetPositioning).toMatch(/campaign/i);
+    expect(result.skillCategories.some(cat => cat.label === 'Campaign Management')).toBe(true);
+    expect(result.credibilitySignals).toContain('campaigns');
+  });
 });
 
 describe('mergeWithLLMAnalysis', () => {

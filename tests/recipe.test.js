@@ -181,4 +181,51 @@ Used log analysis to reproduce and isolate customer platform issues.`,
     expect(prompt.userPrompt).toMatch(/Redis/);
     expect(prompt.userPrompt).toMatch(/do not claim it/);
   });
+
+  it('injects role-profile credibility rubrics into generated answers', () => {
+    const prompt = buildPrompts({
+      question: 'Why are you a strong fit for this Product Manager role?',
+      length: 'medium',
+      tone: 'natural',
+      cvText: `${CV}
+
+Built dashboards that helped support teams understand customer pain points.
+Worked with engineering and support stakeholders to prioritise fixes.`,
+      jobTitle: 'Product Manager',
+      jobDescription: 'Own product discovery, roadmap prioritisation, and product metrics.',
+      jdData: {
+        roleProfile: {
+          family: 'Product Management',
+          credibilitySignals: ['roadmap ownership', 'customer discovery', 'product metrics'],
+          transferableEvidence: ['support escalations -> customer pain-point discovery'],
+          riskClaims: ['P&L ownership', 'pricing strategy'],
+        },
+        credibilitySignals: ['cross-functional delivery'],
+        unsupportedClaimRisks: ['revenue ownership'],
+      },
+    });
+
+    expect(prompt.userPrompt).toMatch(/ROLE CREDIBILITY RUBRIC/);
+    expect(prompt.userPrompt).toMatch(/Role family: Product Management/);
+    expect(prompt.userPrompt).toMatch(/roadmap ownership, customer discovery, product metrics/);
+    expect(prompt.userPrompt).toMatch(/support escalations -> customer pain-point discovery/);
+    expect(prompt.userPrompt).toMatch(/Do not claim without direct CV evidence/);
+    expect(prompt.userPrompt).toMatch(/Use this rubric to choose evidence, not to stuff keywords/);
+  });
+
+  it('keeps role-profile rubrics out of salary answers', () => {
+    const prompt = buildPrompts({
+      question: 'What are your salary expectations?',
+      cvText: CV,
+      jdData: {
+        roleProfile: {
+          family: 'Product Management',
+          credibilitySignals: ['roadmap ownership'],
+        },
+      },
+    });
+
+    expect(prompt.userPrompt).not.toMatch(/ROLE CREDIBILITY RUBRIC/);
+    expect(prompt.systemPrompt).toMatch(/SALARY \/ COMPENSATION question/);
+  });
 });

@@ -1,6 +1,12 @@
+import { RoleProfileService } from './role-profile-service.js';
+
 export class JDParser {
+  constructor(roleProfiles = new RoleProfileService()) {
+    this.roleProfiles = roleProfiles;
+  }
+
   parse(text, jobTitle = '', company = '') {
-    return {
+    const parsed = {
       jobTitle:            jobTitle  || this._extractJobTitle(text),
       company:             company   || this._extractCompany(text),
       seniority:           this.extractSeniority(text),
@@ -12,6 +18,7 @@ export class JDParser {
       atsKeywords:         this.extractAtsKeywords(text),
       dealBreakers:        this.extractDealBreakers(text),
     };
+    return this.roleProfiles.enrichJDData(parsed);
   }
 
   _extractJobTitle(text) {
@@ -291,7 +298,7 @@ ${jdText}`;
           .filter(cat => cat.label && cat.skills.length > 0)
       : null;
 
-    return {
+    return this.roleProfiles.enrichJDData({
       ...regexParsed,
       domain:            typeof llmJson.domain === 'string' ? llmJson.domain.trim() : null,
       targetPositioning: typeof llmJson.targetPositioning === 'string' ? llmJson.targetPositioning.trim() : null,
@@ -302,7 +309,7 @@ ${jdText}`;
       responsibilities:  pick(llmJson.responsibilities, regexParsed.responsibilities),
       softSkills:        pick(llmJson.softSkills,       regexParsed.softSkills),
       atsKeywords:       pick(llmJson.atsKeywords,      regexParsed.atsKeywords),
-    };
+    });
   }
 
   // ── private helpers ───────────────────────────────────────────────────────

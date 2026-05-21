@@ -1,4 +1,10 @@
+import { RoleProfileService } from './role-profile-service.js';
+
 export class CVTailor {
+  constructor(roleProfiles = new RoleProfileService()) {
+    this.roleProfiles = roleProfiles;
+  }
+
   /**
    * Build a match map between JD requirements and CV evidence.
    * @returns {{ requirement, type, status, evidence, allowedToMention }[]}
@@ -285,6 +291,7 @@ WHAT YOU MAY DO:
     const topTools = (jdData.tools || []).slice(0, 20);
     const topKeywords = (jdData.atsKeywords || []).slice(0, 20);
     const tailoringPlan = this.buildTailoringPlan(cvData, jdData, matchMap);
+    const roleCredibilityGuidance = this._buildRoleCredibilityGuidance(jdData);
 
     const userPrompt = `TARGET ROLE
   Job title:  ${jdData.jobTitle || 'Not specified'}
@@ -321,6 +328,7 @@ ${tailoringPlan.roleFocusLines.length ? tailoringPlan.roleFocusLines.map(r => ` 
     • The CV must visibly prioritize the target role, not just lightly swap keywords.
     • Summary, skills, focus lines, and the first bullets under each relevant role must all point toward the target role.
     • Unsupported JD tools may appear only in the missing-skills/review context, never as claimed candidate experience.
+${roleCredibilityGuidance ? `\nROLE CREDIBILITY CHECK\n${roleCredibilityGuidance}` : ''}
 
 ORIGINAL CV
 ${cvData.rawText}
@@ -359,6 +367,7 @@ INSTRUCTION
 6. Include every user-confirmed addition in the skills/core competencies section as concise skill names. You may also use them in the summary when natural, but do not attach them to a specific employer, project, metric, certification, or achievement unless that context exists in the original CV.
 7. Preserve all locked fields exactly — same spelling, capitalisation, and punctuation.
 8. The final CV must read like a polished CV for "${jdData.jobTitle || 'the target role'}", not like a generic CV and not like generated marketing copy.
+9. Do not make the CV merely keyword-compatible. If the target role is architectural or customer-facing, the summary and first relevant bullets must show supported design authority, technical discovery, stakeholder alignment, implementation planning, or enterprise customer evidence from the original CV.
 
 Output the complete tailored CV text with no preamble, no commentary, and no markdown code fences. Begin directly with the candidate's name.`;
 
@@ -429,8 +438,9 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
   }
 
   buildTailoringPlan(cvData, jdData, matchMap = []) {
-    const domain = jdData.domain || this._detectDomain(jdData);
-    const domainLabel = jdData.targetPositioning || {
+    const enrichedJd = this.roleProfiles.enrichJDData(jdData || {});
+    const domain = enrichedJd.domain || this._detectDomain(enrichedJd);
+    const domainLabel = enrichedJd.targetPositioning || {
       mlops: 'MLOps, AI/ML platform engineering, production reliability, and automation',
       data_engineering: 'data engineering, data pipelines, platform reliability, and automation',
       devops: 'DevOps, cloud infrastructure, platform reliability, and automation',
@@ -439,18 +449,18 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
       backend: 'backend engineering, APIs, distributed systems, and service reliability',
       cloud: 'cloud architecture, infrastructure automation, security, and reliability',
       solution_engineering: 'customer-facing technical leadership, enterprise SaaS solution delivery, POC/POV execution, and pre-sales technical engagement',
-    }[domain] || `${jdData.jobTitle || 'the target role'} responsibilities, supported technologies, and relevant achievements`;
+    }[domain] || `${enrichedJd.jobTitle || 'the target role'} responsibilities, supported technologies, and relevant achievements`;
 
-    const supportedKeywords = this._rankSupportedKeywords(matchMap, jdData).slice(0, 18);
+    const supportedKeywords = this._rankSupportedKeywords(matchMap, enrichedJd).slice(0, 18);
 
     // When Groq has already provided targetPositioning, the regex focus-line
     // suggestions would mislead the tailoring LLM with hardcoded tech categories.
     // Let the tailoring LLM derive focus lines from targetPositioning instead.
-    const roleFocusLines = jdData.targetPositioning
+    const roleFocusLines = enrichedJd.targetPositioning
       ? []
       : (cvData.experience || [])
           .map(exp => {
-            const focus = this._buildRoleFocus(exp, jdData, matchMap);
+            const focus = this._buildRoleFocus(exp, enrichedJd, matchMap);
             return focus ? { company: exp.company || '', title: exp.title || '', focus } : null;
           })
           .filter(Boolean);
@@ -460,6 +470,7 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
       targetPositioning: domainLabel,
       supportedKeywords,
       roleFocusLines,
+      roleProfile: enrichedJd.roleProfile || null,
     };
   }
 
@@ -695,17 +706,27 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
     const warnings = [];
     const t = tailoredText;
 
-    // Company names
+    // Company names — skip parser artefacts where a job title or bullet ended up
+    // stored as the company (e.g. "Position: X" or a string starting with a bullet).
     for (const exp of (originalCvData.experience || [])) {
-      if (exp.company && !t.includes(exp.company)) {
-        warnings.push(`Company name may have changed or been removed: "${exp.company}"`);
+      const co = exp.company || '';
+      if (!co) continue;
+      if (/^(position|title|role)\s*:/i.test(co)) continue;        // "Position: X" artefact
+      if (/^[•●▪◦\-–—]/.test(co)) continue;                       // bullet artefact
+      if (co.length > 80) continue;                                 // too long to be a company name
+      if (!t.includes(co)) {
+        warnings.push(`Company name may have changed or been removed: "${co}"`);
       }
     }
 
-    // Job titles
+    // Job titles — skip parser artefacts (bullets stored as titles, very long strings)
     for (const exp of (originalCvData.experience || [])) {
-      if (exp.title && !t.includes(exp.title)) {
-        warnings.push(`Job title may have changed or been removed: "${exp.title}"`);
+      const title = exp.title || '';
+      if (!title) continue;
+      if (/^[•●▪◦\-–—]/.test(title)) continue;                    // bullet artefact
+      if (title.length > 80) continue;                              // sentence stored as title
+      if (!t.includes(title)) {
+        warnings.push(`Job title may have changed or been removed: "${title}"`);
       }
     }
 
@@ -752,6 +773,10 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
     }
 
     for (const skill of this._uniqueDisplaySkills(confirmedSkills)) {
+      // Skip JD requirement prose the user confirmed (long sentences, "X years of…", etc.)
+      // — these can't be inserted verbatim into a CV and would only confuse the user.
+      if (this._isJdRequirementProse(skill) || this._isRequirementFragment(skill)) continue;
+      if (skill.length > 55) continue;
       if (!normalisedOutput.includes(this._normaliseText(skill))) {
         warnings.push(`User-confirmed skill was not included in the tailored CV: "${skill}"`);
       }
@@ -774,6 +799,12 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
       if (competencyLines.length < 5) {
         warnings.push(`Core Competencies has only ${competencyLines.length} populated line(s); expected 5–7 concise categories.`);
       }
+      if (this._hasBrokenCompetencyLine(competencyLines)) {
+        warnings.push('Core Competencies contains a broken or wrapped category line; rebuild the skills section into complete "Category: Skill, Skill" lines.');
+      }
+      if (competencyLines.some(line => /\bbusiness communication skills\b/i.test(line))) {
+        warnings.push('Core Competencies contains weak filler phrasing ("business communication skills"); use concise senior-level phrases such as Stakeholder Communication.');
+      }
       if (competencyLines.some(line => /^additional\s+(?:relevant\s+)?skills\s*:/i.test(line))) {
         warnings.push('Core Competencies contains an "Additional Skills" catch-all line; use named categories instead.');
       }
@@ -784,15 +815,30 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
       warnings.push('Core Competencies section may be missing from the tailored CV.');
     }
 
+    // Generic/common words that appear in almost every CV — not meaningful to flag.
+    const GENERIC_SKILL_WORDS = new Set([
+      'communication', 'leadership', 'experience', 'skills', 'ability', 'knowledge',
+      'collaboration', 'teamwork', 'management', 'delivery', 'development', 'support',
+    ]);
     for (const item of (matchMap || []).filter(m => !m.allowedToMention)) {
       for (const candidate of this._extractAtomicSkillCandidates(item.requirement)) {
         const key = this._normaliseText(candidate);
-        if (!key || normalisedOriginal.includes(key)) continue;
+        if (!key || key.length < 4) continue;
+        if (GENERIC_SKILL_WORDS.has(key)) continue;
+        if (normalisedOriginal.includes(key)) continue;
         if (normalisedOutput.includes(key)) {
           warnings.push(`Unsupported JD skill/tool may have been claimed without CV evidence or user confirmation: "${candidate}"`);
         }
       }
     }
+
+    warnings.push(...this._validateRoleCredibility(originalCvData, jdData, matchMap, tailoredText, confirmedSkills));
+    warnings.push(...this.roleProfiles.validateCredibility({
+      originalCvData,
+      jdData,
+      tailoredText,
+      confirmedSkills,
+    }));
 
     return [...new Set(warnings)];
   }
@@ -825,6 +871,136 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
   }
 
   // ── private helpers ──────────────────────────────────────────────────────
+
+  _buildRoleCredibilityGuidance(jdData = {}) {
+    return this.roleProfiles.buildCredibilityGuidance(jdData) || '';
+  }
+
+  _validateRoleCredibility(originalCvData = {}, jdData = {}, matchMap = [], tailoredText = '', confirmedSkills = []) {
+    if (!this._isSolutionArchitectTarget(jdData)) return [];
+
+    const warnings = [];
+    const output = String(tailoredText || '');
+    const outputNorm = this._normaliseText(output);
+    const originalText = String(originalCvData?.rawText || '');
+    const confirmedNorm = this._normaliseText([
+      ...(confirmedSkills || []),
+      ...(matchMap || []).filter(m => m.confirmedByUser).map(m => m.requirement),
+    ].join(' '));
+
+    const headline = this._extractHeadline(output);
+    if (headline && !/\bsolutions?\s+architect\b/i.test(headline)) {
+      warnings.push(`Solution Architect target may be under-positioned in the CV headline: "${headline}"`);
+    }
+
+    const summary = this._extractSectionLines(output, /^professional\s+summary$/i, /^(core\s+competenc(?:y|ies)|professional\s+experience|experience|employment|work\s+history|education|certifications?|skills)$/i).join(' ');
+    const hasArchitecturalPositioning = /\b(architecture|architectural|solution design|technical discovery|requirements?|stakeholder|customer|implementation plan|integration|roadmap|business outcome|technical leadership)\b/i.test(summary);
+    const readsImplementationOnly = /\b(devops|mlops|platform engineering|kubernetes|ci.?cd|container|automation|infrastructure)\b/i.test(summary)
+      && !hasArchitecturalPositioning;
+    if (!summary || readsImplementationOnly || !hasArchitecturalPositioning) {
+      warnings.push('Professional Summary may read as implementation-only; for a Solution Architect role it should show supported architecture, customer, stakeholder, or requirements-to-solution evidence.');
+    }
+
+    const competencyLines = this._extractSectionLines(output, /^core\s+competenc(?:y|ies)$/i, /^(professional\s+experience|experience|employment|work\s+history|education|certifications?|projects?|skills)$/i);
+    const competencyText = competencyLines.join(' ');
+    const highRiskClaims = [
+      { label: 'MEDDPICC', pattern: /\bMEDD?P?ICC\b/i, sourcePattern: /\bMEDD?P?ICC\b/i },
+      { label: 'RFP/RFI response', pattern: /\bRFP\b|\bRFI\b/i, sourcePattern: /\bRFP\b|\bRFI\b/i },
+      { label: 'POC/POV delivery', pattern: /\bPOC\b|\bPOV\b|proof of concept|proof of value/i, sourcePattern: /\bPOC\b|\bPOV\b|proof of concept|proof of value/i },
+      { label: 'technical demos', pattern: /\btechnical demos?\b|\bworld[- ]class demos?\b/i, sourcePattern: /\bdemos?\b|technical demos?/i },
+      { label: 'solution selling', pattern: /\bsolution selling\b|\btechnical selling\b|\bpre[- ]sales\b/i, sourcePattern: /\bsolution selling\b|\btechnical selling\b|\bpre[- ]sales\b/i },
+    ];
+
+    for (const claim of highRiskClaims) {
+      if (!claim.pattern.test(competencyText)) continue;
+      const supportedByOriginal = claim.sourcePattern.test(originalText);
+      const supportedByConfirmation = claim.sourcePattern.test(confirmedNorm);
+      if (!supportedByOriginal && !supportedByConfirmation) {
+        warnings.push(`Core Competencies claims "${claim.label}" without original CV evidence or user confirmation.`);
+      }
+    }
+
+    const architectureEvidenceInExperience = /\b(solution architecture|architecture|architected|designed|technical discovery|requirements?|stakeholder|customer-facing|enterprise|integration|implementation plan|roadmap|poc|pov|proof of concept|proof of value|rfp|rfi)\b/i
+      .test(this._extractExperienceText(output));
+    const architectureEvidenceInOriginal = /\b(solution architecture|architected|technical discovery|requirements?|stakeholder|customer-facing|enterprise|integration|implementation|poc|pov|proof of concept|proof of value|rfp|rfi)\b/i
+      .test(originalText);
+    if (!architectureEvidenceInExperience && architectureEvidenceInOriginal) {
+      warnings.push('Solution Architect evidence from the original CV is not visible in the experience bullets.');
+    }
+    if (!architectureEvidenceInExperience && !architectureEvidenceInOriginal && /\b(solution architecture|pre[- ]sales|rfp|rfi|medd?picc|poc|pov)\b/i.test(outputNorm)) {
+      warnings.push('Tailored CV appears to add Solution Architect/pre-sales positioning mostly as skills rather than supported experience evidence.');
+    }
+
+    return warnings;
+  }
+
+  _isSolutionArchitectTarget(jdData = {}) {
+    const text = [
+      jdData.jobTitle,
+      jdData.domain,
+      jdData.targetPositioning,
+      ...(jdData.requiredSkills || []),
+      ...(jdData.responsibilities || []),
+      ...(jdData.atsKeywords || []),
+    ].join(' ');
+    return /\bsolutions?\s+architect\b/i.test(text);
+  }
+
+  _extractHeadline(text = '') {
+    const lines = String(text || '').split('\n').map(line => line.trim()).filter(Boolean);
+    if (lines.length < 2) return '';
+    for (let i = 1; i < Math.min(lines.length, 8); i++) {
+      const line = lines[i];
+      if (this._isLikelySectionHeader(line)) return '';
+      if (/@|https?:|linkedin|github|\+?\d[\d\s().-]{6,}|,/.test(line)) continue;
+      return line;
+    }
+    return '';
+  }
+
+  _extractExperienceText(text = '') {
+    const lines = String(text || '').split('\n');
+    const start = lines.findIndex(line => /^(professional\s+experience|experience|employment|work\s+history)\s*[:\-]?$/i.test(String(line || '').trim()));
+    if (start === -1) return '';
+
+    const collected = [];
+    for (const line of lines.slice(start + 1)) {
+      const trimmed = String(line || '').trim();
+      if (/^(education|certifications?|projects?|skills|core\s+competenc(?:y|ies))\s*[:\-]?$/i.test(trimmed)) break;
+      if (trimmed) collected.push(trimmed.replace(/^[-•*●▪◦–—]\s*/, ''));
+    }
+    return collected.join(' ');
+  }
+
+  _hasBrokenCompetencyLine(lines = []) {
+    return lines.some((line, idx) => {
+      const current = String(line || '').trim();
+      const next = String(lines[idx + 1] || '').trim();
+      return (current && !/:/.test(current) && /^[A-Za-z/& -]{2,24}\s*:/i.test(next))
+        || /\bdev\s*$/i.test(current)
+        || /^ops\s*:/i.test(current);
+    });
+  }
+
+  _joinWrappedSkillSectionLines(sectionLines = []) {
+    const joined = [];
+    for (let i = 0; i < sectionLines.length; i++) {
+      const current = String(sectionLines[i] || '');
+      const next = String(sectionLines[i + 1] || '');
+      const curTrim = current.trim();
+      const nextTrim = next.trim();
+
+      if (curTrim && !/:/.test(curTrim) && /^[A-Za-z/& -]{2,24}\s*:/i.test(nextTrim)) {
+        const separator = /[A-Za-z]$/.test(curTrim) && /^[A-Za-z]/.test(nextTrim) ? '' : ' ';
+        joined.push(`${curTrim}${separator}${nextTrim}`);
+        i++;
+        continue;
+      }
+
+      joined.push(current);
+    }
+    return joined;
+  }
 
   _extractSectionLines(text, headingRe, stopHeadingRe) {
     const lines = String(text || '').split('\n');
@@ -1128,7 +1304,7 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
 
   _normaliseSkillSectionLines(sectionLines, matchMap = [], confirmedSkills = [], jdData = {}) {
     const rawItems = [];
-    for (const line of sectionLines) {
+    for (const line of this._joinWrappedSkillSectionLines(sectionLines)) {
       const trimmed = String(line || '').trim();
       if (!trimmed) continue;
       const body = trimmed.replace(/^[-•*●▪◦–—]\s*/, '').trim();
@@ -1214,6 +1390,7 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
       .replace(/\bpython\s+and\s+scripting\s+for\s+automation\b/gi, 'Python, automation')
       .replace(/\bcontainerization\s+with\s+Docker\s+and\s+orchestration\s+with\s+Kubernetes\b/gi, 'Docker, Kubernetes')
       .replace(/\bstructured\s+sales\s+methodolog(?:y|ies)\s+(MEDDPICC|MEDDICC|MEDDIC)\b/gi, '$1')
+      .replace(/\bbusiness\s+communication\s+skills\b/gi, 'Stakeholder Communication')
       .replace(/\bworld[- ]class\s+demos\b/gi, 'technical demos')
       .replace(/^(?:and|or)\s+/i, '')
       .replace(/^POCs$/i, 'POC')
@@ -1274,16 +1451,17 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
   }
 
   _buildGroupedSkills(items = [], jdData = {}) {
+    const enrichedJd = this.roleProfiles.enrichJDData(jdData || {});
     // When the LLM has provided skill categories for this specific role, use them.
     // Require ≥ 4 LLM categories AND ≥ 4 populated result lines — otherwise the LLM
     // analysis was too narrow (e.g. only 3 generic categories) and domain buckets
     // produce better coverage.
-    if (Array.isArray(jdData.skillCategories) && jdData.skillCategories.length >= 4) {
-      const llmLines = this._buildGroupedSkillsFromLLMCategories(items, jdData.skillCategories);
+    if (Array.isArray(enrichedJd.skillCategories) && enrichedJd.skillCategories.length >= 4) {
+      const llmLines = this._buildGroupedSkillsFromLLMCategories(items, enrichedJd.skillCategories);
       if (llmLines.length >= 4) return llmLines;
     }
 
-    const domain = jdData.domain || this._detectDomain(jdData);
+    const domain = enrichedJd.domain || this._detectDomain(enrichedJd);
     const isSolutionEngineering = domain === 'solution_engineering';
     const buckets = isSolutionEngineering ? [
       { label: 'Pre-Sales & Solution Engineering', terms: ['POC', 'POV', 'proof of concept', 'proof of value', 'technical demo', 'demo', 'RFP', 'RFI', 'solution selling', 'technical selling', 'pre-sales', 'value engineering', 'business value', 'MEDDPICC', 'MEDDICC', 'MEDDIC', 'solution consulting', 'enterprise SaaS sales'] },
@@ -1306,12 +1484,12 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
 
     const itemKeys = new Map(this._uniqueDisplaySkills(items).map(item => [this._normaliseText(item), item]));
     const jdText = this._normaliseText([
-      jdData.jobTitle,
-      ...(jdData.requiredSkills || []),
-      ...(jdData.preferredSkills || []),
-      ...(jdData.tools || []),
-      ...(jdData.responsibilities || []),
-      ...(jdData.atsKeywords || []),
+      enrichedJd.jobTitle,
+      ...(enrichedJd.requiredSkills || []),
+      ...(enrichedJd.preferredSkills || []),
+      ...(enrichedJd.tools || []),
+      ...(enrichedJd.responsibilities || []),
+      ...(enrichedJd.atsKeywords || []),
     ].join(' '));
 
     const used = new Set();
@@ -1403,7 +1581,7 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
       'MLOps & ML Lifecycle': /\b(mlops|mlflow|dvc|model registry|experiment|artifact|training workflow)\b/,
       'Model Serving & Infrastructure': /\b(kserve|sagemaker|bentoml|docker|kubernetes|k8s|kubeflow|serving|container)\b/,
       'CI/CD & Delivery': /\b(ci.?cd|github actions|gitlab|jenkins|circleci|azure devops|argocd|argo|prefect|delivery|devops|release|change management|governance|compliance)\b/,
-      'CI/CD & DevOps': /\b(ci.?cd|github actions|gitlab|jenkins|circleci|azure devops|buildkite|pipeline|deployment|devops|release|change management)\b/,
+      'CI/CD & DevOps': /\b(ci.?cd|github actions|gitlab|jenkins|circleci|azure devops|buildkite|pipeline|deployment|devops|release)\b/,
       'Observability & Reliability': /\b(prometheus|grafana|log|tracing|incident|rca|runbook|on.?call|observability|monitoring|performance|diagnostic|alert)\b/,
       'Leadership & Stakeholder Management': /\b(people management|mentorship|hiring|stakeholder|sales|leadership|technical lead|customer.?facing|team|travel|executive|communication|change management)\b/,
       'Pre-Sales & Solution Engineering': /\b(poc|pov|proof of concept|proof of value|demo|rfp|rfi|pre.?sales|value engineering|solution selling|technical selling|business value|champion|meddpicc|meddicc|meddic|solution consult|enterprise.?saas.?sales)\b/,

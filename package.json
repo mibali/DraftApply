@@ -1,6 +1,6 @@
 {
   "name": "draftapply",
-  "version": "1.0.0",
+  "version": "2.3.1",
   "description": "DraftApply - Generate authentic job application answers using your CV",
   "type": "module",
   "scripts": {
@@ -11,6 +11,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "release:validate": "node scripts/validate-release.js",
     "release:chrome": "node scripts/chrome-release.js",
     "release:chrome:upload": "node scripts/chrome-release.js --upload",
     "release:chrome:publish": "node scripts/chrome-release.js --publish"

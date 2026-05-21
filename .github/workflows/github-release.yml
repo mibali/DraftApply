@@ -1,0 +1,47 @@
+name: GitHub release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Node
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Validate release metadata
+        run: npm run release:validate
+
+      - name: Run tests
+        run: npm test
+
+      - name: Package extension
+        run: npm run release:chrome -- --skip-tests --allow-dirty
+
+      - name: Validate packaged ZIP
+        run: npm run release:validate -- --require-zip
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@0c7436c9b3cb1667ca4da9b1f30b1241bce8f6ab # v2.0.8
+        with:
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body_path: CHANGELOG.md
+          files: dist/*.zip
