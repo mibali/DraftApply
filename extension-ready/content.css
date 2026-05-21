@@ -5,14 +5,14 @@
   position: fixed;
   bottom: 20px;
   right: 20px;
-  background: linear-gradient(135deg, #2563eb, #7c3aed);
+  background: #1e293b;
   color: white;
   padding: 12px 16px;
-  border-radius: 12px;
+  border-radius: 8px;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   font-size: 14px;
   z-index: 999998;
-  box-shadow: 0 4px 20px rgba(37, 99, 235, 0.4);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18);
   animation: da-slide-in 0.3s ease-out;
 }
 
@@ -80,12 +80,12 @@
 
 .da-modal-content {
   background: white;
-  border-radius: 16px;
+  border-radius: 10px;
   width: 90%;
   max-width: 560px;
   max-height: 85vh;
   overflow: hidden;
-  box-shadow: 0 25px 60px rgba(0, 0, 0, 0.25), 0 10px 20px rgba(0, 0, 0, 0.15);
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.24);
   animation: da-modal-in 0.2s ease-out;
 }
 
@@ -105,15 +105,17 @@
   align-items: center;
   gap: 10px;
   padding: 14px 18px;
-  background: linear-gradient(135deg, #2563eb, #7c3aed);
-  color: white;
+  background: #ffffff;
+  color: #111827;
+  border-bottom: 1px solid #e2e8f0;
 }
 
 .da-modal-logo {
   width: 24px;
   height: 24px;
   object-fit: contain;
-  background: rgba(255, 255, 255, 0.18);
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
   border-radius: 7px;
   padding: 3px;
   flex-shrink: 0;
@@ -128,17 +130,20 @@
 .da-context-badge {
   font-size: 12px;
   padding: 4px 8px;
-  background: rgba(255, 255, 255, 0.2);
-  border-radius: 12px;
+  background: #f1f5f9;
+  color: #475569;
+  border-radius: 8px;
   font-weight: 500;
 }
 
 .da-context-badge.da-badge-success {
-  background: rgba(34, 197, 94, 0.3);
+  background: #f0fdf4;
+  color: #166534;
 }
 
 .da-context-badge.da-badge-warning {
-  background: rgba(234, 179, 8, 0.3);
+  background: #fffbeb;
+  color: #92400e;
 }
 
 .da-modal-close {
@@ -149,10 +154,10 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: rgba(255, 255, 255, 0.08);
-  border: none;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
   border-radius: 8px;
-  color: white;
+  color: #475569;
   font-size: 24px;
   cursor: pointer;
   padding: 0;
@@ -164,7 +169,7 @@
 }
 
 .da-modal-close:hover {
-  background: rgba(255, 255, 255, 0.16);
+  background: #f1f5f9;
   opacity: 1;
 }
 
@@ -409,7 +414,7 @@
 
 .da-tone-pill.da-pill-active {
   background: white;
-  color: #7c3aed;
+  color: #2563eb;
   font-weight: 600;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
 }
@@ -489,15 +494,16 @@
 }
 
 .da-btn-insert {
-  background: linear-gradient(135deg, #2563eb, #7c3aed);
+  background: #2563eb;
   color: white;
   flex: 1;
 }
 
 .da-btn-insert:hover {
-  opacity: 0.92;
+  background: #1d4ed8;
+  opacity: 1;
   transform: translateY(-1px);
-  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
+  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.22);
 }
 
 .da-btn-insert:active {
@@ -527,7 +533,7 @@
   gap: 14px;
   color: #475569;
   font-size: 13.5px;
-  border-radius: 16px;
+  border-radius: 10px;
 }
 
 .da-loading[hidden] {
@@ -539,7 +545,7 @@
   height: 36px;
   border: 3px solid #e2e8f0;
   border-top-color: #2563eb;
-  border-right-color: #7c3aed;
+  border-right-color: #93c5fd;
   border-radius: 50%;
   animation: da-spin 0.75s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }
@@ -553,8 +559,8 @@
   position: fixed;
   width: 36px;
   height: 36px;
-  border-radius: 10px;
-  border: 2px solid rgba(124, 58, 237, 0.9);
+  border-radius: 8px;
+  border: 1px solid rgba(37, 99, 235, 0.55);
   background: rgba(255, 255, 255, 0.97);
   cursor: pointer;
   opacity: 0;
@@ -564,7 +570,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15), 0 2px 6px rgba(124, 58, 237, 0.2);
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.16);
   padding: 0;
 }
 
@@ -585,9 +591,9 @@
 }
 
 .da-field-btn-overlay:hover {
-  transform: scale(1.08);
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.18), 0 4px 10px rgba(124, 58, 237, 0.22);
-  transition: opacity 0.15s ease, transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.18s ease;
+  transform: translateY(-1px);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.18);
+  transition: opacity 0.15s ease, transform 0.18s ease, box-shadow 0.18s ease;
 }
 
 /* Notification */
@@ -599,11 +605,11 @@
   padding: 12px 24px;
   background: #1e293b;
   color: white;
-  border-radius: 10px;
+  border-radius: 8px;
   font-size: 14px;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   z-index: 1000000;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.22);
   animation: da-slide-in 0.3s ease-out;
 }
 
@@ -679,12 +685,12 @@
 }
 
 .da-btn-jd-use {
-  background: linear-gradient(135deg, #2563eb, #7c3aed);
+  background: #2563eb;
   color: white;
 }
 
 .da-btn-jd-use:hover {
-  opacity: 0.9;
+  background: #1d4ed8;
 }
 
 .da-btn-jd-cancel {

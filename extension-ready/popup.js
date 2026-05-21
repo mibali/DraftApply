@@ -12,6 +12,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
   const TAILOR_DRAFT_KEY = 'tailorCvDraft';
   const TAILOR_JOB_KEY = 'tailorCvJob';
+  const TAILOR_JOB_POLL_INTERVAL_MS = 1500;
+  const TAILOR_JOB_MAX_POLL_MS = 3 * 60 * 1000;
 
   const elements = {
     cvStatusDot:     document.getElementById('cv-status-dot'),
@@ -90,6 +92,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   let tailorToken = 0;
   let savingDraftTimer = null;
   let tailorJobPollTimer = null;
+  let tailorJobPollStartedAt = 0;
   let statsResetTimer = null;
   let messageTimer = null;
   let tailorMessageTimer = null;
@@ -309,13 +312,36 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.saveCvBtn.disabled = true;
     elements.saveCvBtn.textContent = 'Saving…';
     try {
+      const previous = await chrome.runtime.sendMessage({ type: 'GET_CV' }).catch(() => ({}));
+      const cvChanged = Boolean(previous?.cvText && previous.cvText !== text);
       await chrome.runtime.sendMessage({ type: 'SAVE_CV', cvText: text });
+      if (cvChanged) await resetTailorStateForCvChange();
       showCVLoaded(text);
-      showMessage('CV saved successfully');
+      showMessage(cvChanged ? 'CV saved. Re-analyze any saved JD before generating a new tailored CV.' : 'CV saved successfully');
     } finally {
       elements.saveCvBtn.disabled = false;
       elements.saveCvBtn.textContent = 'Save CV';
     }
+  }
+
+  async function resetTailorStateForCvChange() {
+    analyzeToken++;
+    tailorToken++;
+    stopTailorJobPolling();
+    await chrome.storage.local.remove(TAILOR_JOB_KEY).catch?.(() => {});
+    elements.tailorOutput.value = '';
+    elements.tailorOutputWrap.hidden = true;
+    elements.tailorActionRow.hidden = true;
+    elements.tailorWarningsBox.hidden = true;
+    elements.tailorResults.hidden = true;
+    elements.tailorAnalyzeBtn.hidden = false;
+    elements.tailorAnalyzeBtn.disabled = false;
+    elements.tailorAnalyzeBtn.textContent = 'Analyze JD';
+    elements.tailorReanalyzeBtn.style.display = 'none';
+    elements.tailorGenerateBtn.hidden = true;
+    elements.tailorGenerateBtn.disabled = false;
+    elements.tailorGenerateBtn.textContent = 'Generate Tailored CV';
+    setStep('paste');
   }
 
   function showCVLoaded(text) {
@@ -487,8 +513,20 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   function startTailorJobPolling(jobId) {
     stopTailorJobPolling();
+    tailorJobPollStartedAt = Date.now();
     tailorJobPollTimer = setInterval(async () => {
       try {
+        if (Date.now() - tailorJobPollStartedAt > TAILOR_JOB_MAX_POLL_MS) {
+          stopTailorJobPolling();
+          await chrome.storage.local.remove(TAILOR_JOB_KEY).catch?.(() => {});
+          elements.tailorLoading.hidden = true;
+          elements.tailorGenerateBtn.hidden = false;
+          elements.tailorGenerateBtn.disabled = false;
+          elements.tailorGenerateBtn.textContent = 'Generate Tailored CV';
+          showTailorMessage('CV generation is taking longer than expected. Please try again; no CV was changed.', 'error');
+          setStep('generate');
+          return;
+        }
         const stored = await chrome.storage.local.get(TAILOR_JOB_KEY);
         const job = stored?.[TAILOR_JOB_KEY];
         if (!job || (jobId && job.id !== jobId)) return;
@@ -498,12 +536,13 @@ document.addEventListener('DOMContentLoaded', async () => {
       } catch (e) {
         // Polling is best-effort; the user can reopen the popup to restore.
       }
-    }, 1500);
+    }, TAILOR_JOB_POLL_INTERVAL_MS);
   }
 
   function stopTailorJobPolling() {
     if (tailorJobPollTimer) clearInterval(tailorJobPollTimer);
     tailorJobPollTimer = null;
+    tailorJobPollStartedAt = 0;
   }
 
   function handleTailorDraftInput() {
@@ -724,13 +763,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function displayTailorResults(result) {
-    const { tailoredCvText, matchReport, warnings, provider } = result;
+    const { tailoredCvText, matchReport, warnings, provider, fallbackFrom } = result;
     displayMatchReport(matchReport, { reviewMode: false, domainSuggestions: [] });
 
     const badge = document.getElementById('tailor-provider-badge');
     if (badge) {
       if (provider) {
-        badge.textContent = provider === 'openrouter' ? 'OpenRouter' : 'Groq';
+        badge.textContent = fallbackFrom
+          ? `${provider === 'openrouter' ? 'OpenRouter' : provider} fallback from ${fallbackFrom === 'groq' ? 'Groq' : fallbackFrom}`
+          : (provider === 'openrouter' ? 'OpenRouter' : 'Groq');
         badge.style.background = provider === 'openrouter' ? '#fef3c7' : '#d1fae5';
         badge.style.color = provider === 'openrouter' ? '#92400e' : '#065f46';
         badge.style.display = 'inline-block';
@@ -740,9 +781,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     if (warnings?.length > 0) {
-      elements.tailorWarningsBox.textContent = warnings.map(w => `⚠ ${w}`).join('\n');
+      elements.tailorWarningsBox.innerHTML = formatTailorWarnings(warnings);
       elements.tailorWarningsBox.hidden = false;
     } else {
+      elements.tailorWarningsBox.textContent = '';
       elements.tailorWarningsBox.hidden = true;
     }
 
@@ -754,6 +796,17 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     elements.tailorResults.scrollIntoView({ behavior: 'smooth', block: 'start' });
     setStep('export');
+  }
+
+  function formatTailorWarnings(warnings = []) {
+    const items = warnings
+      .map(w => `<li>${esc(w)}</li>`)
+      .join('');
+    return `
+      <div class="tailor-warning-title">Review before sending</div>
+      <div class="tailor-warning-help">DraftApply found possible CV quality issues. Check these lines in the generated CV and edit anything that is not true or well formatted.</div>
+      <ul class="tailor-warning-list">${items}</ul>
+    `;
   }
 
   function displayMatchReport(matchReport, { reviewMode, domainSuggestions = [] } = {}) {

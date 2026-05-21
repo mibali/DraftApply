@@ -159,4 +159,26 @@ Used log analysis to reproduce and isolate customer platform issues.`,
     expect(prompt.userPrompt).toMatch(/JD REQUIREMENTS YOUR BACKGROUND COVERS/);
     expect(prompt.userPrompt).toMatch(/Kubernetes platform operations/);
   });
+
+  it('surfaces unsupported directly-asked requirements so the answer does not overclaim', () => {
+    const prompt = buildPrompts({
+      question: 'Do you have experience with Redis?',
+      length: 'short',
+      tone: 'natural',
+      cvText: 'Jane Smith\nPlatform Engineer\nBuilt Python automation and Kubernetes deployment pipelines.',
+      cvData: {
+        experience: [
+          { title: 'Platform Engineer', company: 'Acme', responsibilities: ['Built Python automation and Kubernetes deployment pipelines.'] },
+        ],
+      },
+      matchMap: [
+        { requirement: 'Redis', allowedToMention: false, evidence: [] },
+        { requirement: 'Kubernetes', allowedToMention: true, evidence: ['Built Kubernetes deployment pipelines.'] },
+      ],
+    });
+
+    expect(prompt.userPrompt).toMatch(/NOT CONFIRMED BY THE CV OR USER REVIEW/);
+    expect(prompt.userPrompt).toMatch(/Redis/);
+    expect(prompt.userPrompt).toMatch(/do not claim it/);
+  });
 });

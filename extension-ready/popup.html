@@ -9,8 +9,8 @@
 
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      width: 376px;
-      background: #f6f8fb;
+      width: 384px;
+      background: #f8fafc;
       color: #172033;
       -webkit-font-smoothing: antialiased;
       text-rendering: optimizeLegibility;
@@ -18,20 +18,19 @@
 
     /* ── Header ── */
     .da-header {
-      background:
-        linear-gradient(135deg, rgba(37, 99, 235, 0.96) 0%, rgba(124, 58, 237, 0.96) 100%);
-      padding: 15px 16px;
+      background: #ffffff;
+      padding: 14px 16px;
       display: flex;
       align-items: center;
       gap: 11px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.16);
+      border-bottom: 1px solid #e2e8f0;
     }
 
     .da-header-logo {
       width: 34px;
       height: 34px;
-      background: rgba(255, 255, 255, 0.16);
-      border: 1px solid rgba(255, 255, 255, 0.18);
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
       border-radius: 8px;
       display: flex;
       align-items: center;
@@ -51,14 +50,14 @@
     .da-header-title {
       font-size: 15.5px;
       font-weight: 700;
-      color: white;
+      color: #111827;
       letter-spacing: 0;
       line-height: 1.2;
     }
 
     .da-header-sub {
       font-size: 11.5px;
-      color: rgba(255, 255, 255, 0.78);
+      color: #64748b;
       margin-top: 2px;
     }
 
@@ -229,14 +228,14 @@
     }
 
     .btn-primary {
-      background: linear-gradient(135deg, #2563eb, #7c3aed);
+      background: #2563eb;
       color: white;
       box-shadow: 0 1px 2px rgba(30, 41, 59, 0.12);
     }
 
     .btn-primary:hover {
-      transform: translateY(-1px);
-      box-shadow: 0 7px 18px rgba(37, 99, 235, 0.24);
+      background: #1d4ed8;
+      box-shadow: 0 3px 10px rgba(37, 99, 235, 0.18);
     }
 
     .btn-primary:active {
@@ -507,7 +506,7 @@
       height: 30px;
       border: 3px solid #e2e8f0;
       border-top-color: #2563eb;
-      border-right-color: #7c3aed;
+      border-right-color: #93c5fd;
       border-radius: 50%;
       animation: tailor-spin 0.75s cubic-bezier(0.4, 0, 0.2, 1) infinite;
       margin: 0 auto;
@@ -595,9 +594,9 @@
     .match-chip-strong  { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
     .match-chip-confirmed { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
     .match-chip-missing { background: #f8fafc; color: #475569; border: 1px solid #e2e8f0; }
-    .match-chip-domain  { background: #f5f3ff; color: #6d28d9; border: 1px solid #ddd6fe; }
+    .match-chip-domain  { background: #f8fafc; color: #334155; border: 1px solid #cbd5e1; }
 
-    .match-label-purple { color: #7c3aed; }
+    .match-label-purple { color: #475569; }
 
     .missing-skill-check {
       display: inline-flex;
@@ -655,8 +654,25 @@
       font-size: 12px;
       color: #92400e;
       line-height: 1.5;
-      white-space: pre-line;
     }
+
+    .tailor-warning-title {
+      font-weight: 700;
+      color: #78350f;
+      margin-bottom: 5px;
+    }
+
+    .tailor-warning-help {
+      color: #92400e;
+      margin-bottom: 7px;
+    }
+
+    .tailor-warning-list {
+      margin: 0;
+      padding-left: 17px;
+    }
+
+    .tailor-warning-list li { margin: 4px 0; }
 
     .tailor-output-ta {
       min-height: 160px;
@@ -708,7 +724,7 @@
       border: 1px solid #dbe3ee;
       color: #40506a;
     }
-    #tailor-open-btn:hover { background: #f8fafc; border-color: #7c3aed; color: #7c3aed; }
+    #tailor-open-btn:hover { background: #f8fafc; border-color: #2563eb; color: #1d4ed8; }
 
     /* ── Step progress indicator ── */
     .tailor-steps {
@@ -956,7 +972,7 @@
       <button class="btn btn-primary" id="activate-btn" hidden>Activate on this page</button>
 
       <!-- Tailor CV trigger (shown when CV is loaded) -->
-      <button class="btn" id="tailor-open-btn" hidden>✦ Tailor CV for this job</button>
+      <button class="btn" id="tailor-open-btn" hidden>Tailor CV for this job</button>
     </div>
 
   </div>
@@ -970,7 +986,7 @@
   <!-- ═══════════════ TAILOR VIEW ═══════════════ -->
   <div id="tailor-view" hidden>
 
-    <!-- Reuse the same header gradient -->
+    <!-- Reuse the same product header -->
     <div class="da-header">
       <div class="da-header-logo">
         <img src="icons/icon128.png" alt="" class="da-popup-logo-img">
@@ -1077,7 +1093,7 @@
           <button class="btn btn-primary" id="tailor-pdf-btn">Download PDF</button>
           <div class="tailor-action-secondary">
             <button class="btn btn-copy" id="tailor-copy-btn">Copy to clipboard</button>
-            <button class="btn btn-redo" id="tailor-redo-btn" title="Regenerate">↺ Regenerate</button>
+            <button class="btn btn-redo" id="tailor-redo-btn" title="Regenerate">Regenerate</button>
           </div>
         </div>
       </div>

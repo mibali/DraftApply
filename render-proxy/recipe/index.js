@@ -868,6 +868,30 @@ function buildRequirementsBridge(matchMap, question, qType) {
   return `JD REQUIREMENTS YOUR BACKGROUND COVERS (use these as your proof points):\n${lines.join('\n')}\n\n`;
 }
 
+function buildUnsupportedBridge(matchMap, question, qType) {
+  if (!Array.isArray(matchMap) || matchMap.length === 0) return '';
+  if (!['yes_no', 'general', 'brief'].includes(qType)) return '';
+
+  const qWords = significantWords(question);
+  if (qWords.length === 0) return '';
+
+  const candidates = matchMap
+    .filter(m => !m.allowedToMention)
+    .map(m => {
+      const reqTokens = significantWords(m.requirement);
+      const overlap = qWords.filter(w => reqTokens.includes(w)).length;
+      return { requirement: m.requirement, overlap };
+    })
+    .filter(m => m.overlap > 0)
+    .sort((a, b) => b.overlap - a.overlap)
+    .slice(0, 3);
+
+  if (candidates.length === 0) return '';
+
+  const lines = candidates.map(c => `  - ${c.requirement}`);
+  return `NOT CONFIRMED BY THE CV OR USER REVIEW:\n${lines.join('\n')}\nIf the question asks about one of these directly, do not claim it. Say "Not directly" and pivot to the closest truthful adjacent experience.\n\n`;
+}
+
 /**
  * Inject structured-data hints into a user prompt.
  * Evidence hint goes before MY CV: (guidance on where to look).
@@ -875,7 +899,7 @@ function buildRequirementsBridge(matchMap, question, qType) {
  * (role signals first, then matched proof points closest to the answer task).
  * If neither insertion point is found the prompt is returned unchanged.
  */
-function injectHints(userPrompt, evidenceHint, jdFocusBlock, bridge) {
+function injectHints(userPrompt, evidenceHint, jdFocusBlock, bridge, unsupportedBridge = '') {
   let p = userPrompt;
   if (evidenceHint) {
     p = p.replace(/^MY CV:/m, `${evidenceHint}MY CV:`);
@@ -885,6 +909,9 @@ function injectHints(userPrompt, evidenceHint, jdFocusBlock, bridge) {
   }
   if (bridge) {
     p = p.replace(/^(Question:|Write a cover letter)/m, `${bridge}$1`);
+  }
+  if (unsupportedBridge) {
+    p = p.replace(/^(Question:|Write a cover letter)/m, `${unsupportedBridge}$1`);
   }
   return p;
 }
@@ -966,14 +993,15 @@ export function buildPrompts(input) {
   // that don't draw on CV stories (salary, short_factual, extraction, brief).
   const HINT_TYPES = new Set([
     'behavioral', 'troubleshooting', 'strength_weakness',
-    'motivation', 'why_company', 'cover_letter', 'general', 'yes_no',
+    'motivation', 'why_company', 'cover_letter', 'general', 'yes_no', 'brief',
   ]);
   if (result && HINT_TYPES.has(qType)) {
     const evidenceHint = buildEvidenceHint(cvData, question);
     const jdFocusBlock = buildJdFocusBlock(jdData, qType);
     const bridge = buildRequirementsBridge(matchMap, question, qType);
-    if (evidenceHint || jdFocusBlock || bridge) {
-      result = { ...result, userPrompt: injectHints(result.userPrompt, evidenceHint, jdFocusBlock, bridge) };
+    const unsupportedBridge = buildUnsupportedBridge(matchMap, question, qType);
+    if (evidenceHint || jdFocusBlock || bridge || unsupportedBridge) {
+      result = { ...result, userPrompt: injectHints(result.userPrompt, evidenceHint, jdFocusBlock, bridge, unsupportedBridge) };
     }
   }
 

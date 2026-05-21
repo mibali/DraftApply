@@ -11,7 +11,23 @@
     "tabs"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "https://draftapply.onrender.com/*",
+    "https://*.indeed.com/*",
+    "https://*.otta.com/*",
+    "https://*.hiringcafe.com/*",
+    "https://*.greenhouse.io/*",
+    "https://*.lever.co/*",
+    "https://*.workable.com/*",
+    "https://*.linkedin.com/*",
+    "https://*.ashbyhq.com/*",
+    "https://*.breezy.hr/*",
+    "https://*.smartrecruiters.com/*",
+    "https://*.icims.com/*",
+    "https://*.myworkdayjobs.com/*",
+    "https://*.taleo.net/*",
+    "https://*.jobvite.com/*",
+    "https://*.glassdoor.com/*",
+    "https://*.glassdoor.co.uk/*"
   ],
   "background": {
     "service_worker": "background.js",
@@ -64,7 +80,7 @@
         "icons/*.png"
       ],
       "matches": [
-        "<all_urls>"
+        "https://*/*"
       ]
     }
   ],

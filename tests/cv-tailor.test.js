@@ -376,6 +376,30 @@ describe('validateTailoringQuality', () => {
     const warnings = tailor.validateTailoringQuality(CV, JD, map, output, ['GraphQL']);
     expect(warnings.some(w => /GraphQL/.test(w))).toBe(false);
   });
+
+  it('warns when Core Competencies collapses into too few categories or catch-all prose', () => {
+    const map = tailor.buildMatchMap(CV, JD);
+    const output = `John Doe
+john@example.com | +44 7700 900000 | linkedin.com/in/johndoe | github.com/johndoe
+
+Senior Software Engineer
+
+CORE COMPETENCIES
+Frontend Engineering: React, TypeScript
+Additional Relevant Skills: 3+ years of experience in modern JavaScript frameworks and ability to work cross-functionally
+
+EXPERIENCE
+Senior Frontend Engineer | TechCorp | Jan 2021 – Present
+- Built React and TypeScript dashboards used by 200+ internal users
+
+EDUCATION
+BSc Computer Science | University of London | 2015–2019`;
+
+    const warnings = tailor.validateTailoringQuality(CV, JD, map, output);
+    expect(warnings.some(w => /only 2 populated line/i.test(w))).toBe(true);
+    expect(warnings.some(w => /Additional Skills/i.test(w))).toBe(true);
+    expect(warnings.some(w => /JD requirement prose/i.test(w))).toBe(true);
+  });
 });
 
 

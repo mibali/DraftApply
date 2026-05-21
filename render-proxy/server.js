@@ -96,19 +96,112 @@ function getBearerToken(req) {
 }
 
 class LLMProviderError extends Error {
-  constructor(provider, status, detail = '') {
+  constructor(provider, status, detail = '', retryAfterMs = null) {
     super(`${provider} request failed${status ? ` (${status})` : ''}`);
     this.name = 'LLMProviderError';
     this.provider = provider;
     this.status = status;
     this.detail = detail;
+    this.retryAfterMs = retryAfterMs;
   }
+}
+
+function formatRetryAfter(ms) {
+  const value = Number(ms);
+  if (!Number.isFinite(value) || value <= 0) return '';
+
+  const totalSeconds = Math.max(1, Math.ceil(value / 1000));
+  if (totalSeconds < 60) return `${totalSeconds} second${totalSeconds === 1 ? '' : 's'}`;
+
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) {
+    return seconds > 0
+      ? `${minutes} minute${minutes === 1 ? '' : 's'} ${seconds} second${seconds === 1 ? '' : 's'}`
+      : `${minutes} minute${minutes === 1 ? '' : 's'}`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  const remainderMinutes = minutes % 60;
+  return remainderMinutes > 0
+    ? `${hours} hour${hours === 1 ? '' : 's'} ${remainderMinutes} minute${remainderMinutes === 1 ? '' : 's'}`
+    : `${hours} hour${hours === 1 ? '' : 's'}`;
+}
+
+function parseRetryAfterMs(value) {
+  if (!value) return null;
+  const raw = String(value).trim();
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+
+  const dateMs = Date.parse(raw);
+  if (Number.isFinite(dateMs)) return Math.max(0, dateMs - Date.now());
+
+  return null;
+}
+
+function retryAfterMsFromHeaders(headers) {
+  const retryAfter = parseRetryAfterMs(headers?.get?.('Retry-After') || headers?.get?.('retry-after'));
+  if (retryAfter != null) return retryAfter;
+
+  const reset = headers?.get?.('RateLimit-Reset') || headers?.get?.('X-RateLimit-Reset') || headers?.get?.('x-ratelimit-reset');
+  if (!reset) return null;
+  const resetNumber = Number(reset);
+  if (!Number.isFinite(resetNumber)) return null;
+
+  // Some providers send seconds-until-reset; others send Unix seconds.
+  return resetNumber > 1e9
+    ? Math.max(0, resetNumber * 1000 - Date.now())
+    : Math.max(0, resetNumber * 1000);
+}
+
+function retryAfterMsFromProviderDetail(detail = '') {
+  const text = String(detail || '');
+  const match = text.match(/try again in\s+((?:(\d+(?:\.\d+)?)\s*h(?:ours?)?\s*)?(?:(\d+(?:\.\d+)?)\s*m(?:in(?:ute)?s?)?\s*)?(?:(\d+(?:\.\d+)?)\s*s(?:ec(?:ond)?s?)?)?)/i);
+  if (!match) return null;
+
+  const hours = Number(match[2] || 0);
+  const minutes = Number(match[3] || 0);
+  const seconds = Number(match[4] || 0);
+  const ms = ((hours * 60 * 60) + (minutes * 60) + seconds) * 1000;
+  return ms > 0 ? ms : null;
 }
 
 function isRetryableLLMError(error) {
   if (error?.name === 'AbortError') return true;
   const status = Number(error?.status);
   return status === 429 || status === 408 || status >= 500;
+}
+
+function llmErrorResponse(error, context = {}) {
+  const provider = error?.provider || 'provider';
+  const status = Number(error?.status);
+  const fallbackDisabled = context.allowFallback === false && provider === 'groq' && OPENROUTER_API_KEY;
+  const retryAfter = formatRetryAfter(error?.retryAfterMs);
+  const retryText = retryAfter ? ` Try again in ${retryAfter}.` : ' Try again shortly.';
+
+  if (status === 429) {
+    return {
+      status: 429,
+      body: {
+        error: fallbackDisabled
+          ? `Groq rate limit reached. OpenRouter fallback is disabled for Tailor CV to protect CV quality.${retryText} You can enable OPENROUTER_TAILOR_FALLBACK=true if you want Tailor CV to use OpenRouter as a backup.`
+          : `${provider === 'openrouter' ? 'OpenRouter' : 'Groq'} rate limit reached.${retryText}`,
+        provider,
+        retryAfterMs: Number.isFinite(Number(error?.retryAfterMs)) ? Number(error.retryAfterMs) : undefined,
+      },
+    };
+  }
+
+  return {
+    status: 502,
+    body: {
+      error: fallbackDisabled
+        ? `Groq is temporarily unavailable. OpenRouter fallback is disabled for Tailor CV to protect CV quality.${retryText} You can enable OPENROUTER_TAILOR_FALLBACK=true if you want Tailor CV to use OpenRouter as a backup.`
+        : `${provider === 'openrouter' ? 'OpenRouter' : 'Groq'} is temporarily unavailable.`,
+      provider,
+    },
+  };
 }
 
 function llmProviderConfig(provider) {
@@ -168,7 +261,8 @@ async function callProviderChat(provider, {
 
     if (!response.ok) {
       const text = await response.text().catch(() => '');
-      throw new LLMProviderError(provider, response.status, text.slice(0, 500));
+      const retryAfterMs = retryAfterMsFromHeaders(response.headers) ?? retryAfterMsFromProviderDetail(text);
+      throw new LLMProviderError(provider, response.status, text.slice(0, 500), retryAfterMs);
     }
 
     return { response, provider: config.provider, model: config.model };
@@ -181,7 +275,7 @@ async function callChatCompletionWithFallback(options) {
   const primary = GROQ_API_KEY ? 'groq' : 'openrouter';
   const callStart = Date.now();
   try {
-    return await callProviderChat(primary, options);
+    return { ...(await callProviderChat(primary, options)), fallbackFrom: null };
   } catch (error) {
     const canFallback = options.allowFallback !== false && primary === 'groq' && OPENROUTER_API_KEY && isRetryableLLMError(error);
     if (!canFallback) throw error;
@@ -192,7 +286,7 @@ async function callChatCompletionWithFallback(options) {
     // For fast Groq failures (429), elapsed ≈ 0 so OpenRouter gets the full budget.
     const elapsed = Date.now() - callStart;
     const fallbackTimeout = Math.max(8000, (options.timeoutMs || 60000) - elapsed);
-    return callProviderChat('openrouter', { ...options, timeoutMs: fallbackTimeout });
+    return { ...(await callProviderChat('openrouter', { ...options, timeoutMs: fallbackTimeout })), fallbackFrom: primary };
   }
 }
 
@@ -463,15 +557,15 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
     const answer = data?.choices?.[0]?.message?.content;
     if (!answer?.trim()) return res.status(502).json({ error: 'No answer from provider' });
 
-    res.json({ answer, provider: completion.provider, model: completion.model });
+    res.json({ answer, provider: completion.provider, model: completion.model, fallbackFrom: completion.fallbackFrom || undefined });
   } catch (e) {
     if (e?.name === 'AbortError') {
       return res.status(504).json({ error: 'AI service timed out. Please try again.' });
     }
     if (e instanceof LLMProviderError) {
       console.error(`[DraftApply] ${e.provider} generate error ${e.status}:`, String(e.detail || '').slice(0, 400));
-      const status = e.status === 429 ? 429 : 502;
-      return res.status(status).json({ error: status === 429 ? 'Rate limit reached — please try again shortly.' : 'Service temporarily unavailable.' });
+      const { status, body } = llmErrorResponse(e);
+      return res.status(status).json(body);
     }
     console.error('[DraftApply] Generate error:', e.message);
     return res.status(500).json({ error: 'Failed to generate answer.' });
@@ -558,6 +652,73 @@ app.post('/api/cv/upload', authRequired, generateLimiter, upload.single('cv'), a
     });
   } catch (e) {
     res.status(500).json({ error: 'Failed to process CV file' });
+  }
+});
+
+/**
+ * Job Description Extraction endpoint
+ * Strips company blurbs, benefits, EEO boilerplate, and application copy from
+ * long pasted postings before CV/JD analysis. The popup falls back to raw text
+ * if this fails, but production should still provide the route it calls.
+ */
+app.post('/api/jd/extract', authRequired, generateLimiter, async (req, res) => {
+  try {
+    const { text } = req.body || {};
+
+    if (!text || String(text).trim().length < 100) {
+      return res.status(400).json({ error: 'text must be at least 100 characters' });
+    }
+
+    const normalizedText = String(text).trim();
+    if (normalizedText.length > 60000) {
+      return res.status(413).json({ error: 'Job posting is too large. Please paste a shorter posting.' });
+    }
+
+    const systemPrompt = `You are a job posting parser. Extract only the job-relevant content from a full job posting.
+
+Return ONLY these sections when present:
+- Responsibilities / What you will do
+- Required qualifications / Minimum requirements
+- Preferred qualifications / Nice to have
+- Required technical skills and tools
+
+Remove completely:
+- Company descriptions, mission statements, values, culture blurbs
+- Benefits, compensation, equity, perks
+- Equal opportunity / EEO statements
+- Application instructions or "how to apply" sections
+- "About us" or "Who we are" sections
+
+Preserve the original bullet point structure and section headings. Output only the extracted content with no preamble, no commentary, and no markdown code fences.`;
+
+    const completion = await callChatCompletionWithFallback({
+      temperature: 0.1,
+      maxTokens: 2000,
+      timeoutMs: 30000,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: `Extract the job requirements from this posting:\n\n${normalizedText}` },
+      ],
+    });
+
+    const data = await completion.response.json();
+    const extractedText = data?.choices?.[0]?.message?.content?.trim();
+    if (!extractedText) {
+      return res.status(502).json({ error: 'No output from provider' });
+    }
+
+    res.json({ extractedText, provider: completion.provider, fallbackFrom: completion.fallbackFrom || undefined });
+  } catch (e) {
+    if (e?.name === 'AbortError') {
+      return res.status(504).json({ error: 'Job description extraction timed out. Please try again.' });
+    }
+    if (e instanceof LLMProviderError) {
+      console.error(`[DraftApply] ${e.provider} JD extract error ${e.status}:`, String(e.detail || '').slice(0, 400));
+      const { status, body } = llmErrorResponse(e);
+      return res.status(status).json(body);
+    }
+    console.error('[DraftApply] JD extract error:', e.message);
+    return res.status(500).json({ error: 'Failed to extract job description.' });
   }
 });
 
@@ -749,19 +910,15 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
     const changedSections = tailor.detectChangedSections(cvText, tailoredCvText);
     const matchReport     = tailor.buildMatchSummary(matchMap);
 
-    res.json({ tailoredCvText, matchReport, warnings, changedSections, provider: tailorProvider });
+    res.json({ tailoredCvText, matchReport, warnings, changedSections, provider: tailorProvider, fallbackFrom: completion.fallbackFrom || undefined });
   } catch (e) {
     if (e?.name === 'AbortError') {
       return res.status(504).json({ error: 'AI service timed out. Please try again.' });
     }
     if (e instanceof LLMProviderError) {
       console.error(`[DraftApply] ${e.provider} tailor error ${e.status}:`, String(e.detail || '').slice(0, 400));
-      const status = e.status === 429 ? 429 : 502;
-      return res.status(status).json({
-        error: status === 429
-          ? 'Rate limit reached — please try again shortly.'
-          : 'Service temporarily unavailable.'
-      });
+      const { status, body } = llmErrorResponse(e, { allowFallback: OPENROUTER_TAILOR_FALLBACK });
+      return res.status(status).json(body);
     }
     console.error('[DraftApply] Tailor error:', e.message);
     return res.status(500).json({ error: 'Failed to tailor CV.' });

@@ -46,6 +46,35 @@ describe('popup productivity stats UI', () => {
     expect(popupJs).toContain('if (myToken !== tailorToken) return');
   });
 
+  it('stops polling stuck Tailor CV jobs and clears stale job state', () => {
+    expect(popupJs).toContain('const TAILOR_JOB_MAX_POLL_MS = 3 * 60 * 1000');
+    expect(popupJs).toContain('Date.now() - tailorJobPollStartedAt > TAILOR_JOB_MAX_POLL_MS');
+    expect(popupJs).toContain('await chrome.storage.local.remove(TAILOR_JOB_KEY)');
+    expect(popupJs).toContain('CV generation is taking longer than expected');
+  });
+
+  it('resets generated Tailor results when the saved CV changes but keeps the draft JD available', () => {
+    const resetStart = popupJs.indexOf('async function resetTailorStateForCvChange');
+    const resetEnd = popupJs.indexOf('\n  function showCVLoaded', resetStart);
+    const resetFn = popupJs.slice(resetStart, resetEnd);
+
+    expect(popupJs).toContain('resetTailorStateForCvChange');
+    expect(popupJs).toContain('const cvChanged = Boolean(previous?.cvText && previous.cvText !== text)');
+    expect(popupJs).toContain('Re-analyze any saved JD');
+    expect(resetFn).not.toContain('TAILOR_DRAFT_KEY');
+  });
+
+  it('labels OpenRouter Tailor output as a fallback when Groq failed over', () => {
+    expect(popupJs).toContain('fallbackFrom');
+    expect(popupJs).toContain('fallback from');
+  });
+
+  it('explains Tailor CV warnings with a review-before-sending action', () => {
+    expect(popupJs).toContain('formatTailorWarnings');
+    expect(popupJs).toContain('Review before sending');
+    expect(popupJs).toContain('Check these lines in the generated CV');
+  });
+
   it('offers a manual JD CTA when page context is partial or missing', () => {
     expect(contentJs).toContain('Paste JD');
     expect(contentJs).toContain('paste JD manually');

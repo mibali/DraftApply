@@ -15,6 +15,11 @@
 const pendingRequests = new Map(); // requestId -> AbortController
 
 function rateLimitError(response) {
+  const retryAfter = parseRetryDelay(response.headers.get('Retry-After'));
+  if (retryAfter) {
+    return `Rate limit reached — you can try again in ${retryAfter}.`;
+  }
+
   const resetHeader = response.headers.get('RateLimit-Reset') || response.headers.get('X-RateLimit-Reset');
   if (resetHeader) {
     const resetSec = Number(resetHeader);
@@ -24,8 +29,49 @@ function rateLimitError(response) {
       const mm = resetTime.getMinutes().toString().padStart(2, '0');
       return `Rate limit reached — you can try again at ${hh}:${mm}.`;
     }
+    if (!isNaN(resetSec) && resetSec > 0) {
+      return `Rate limit reached — you can try again in ${formatRetryDelay(resetSec * 1000)}.`;
+    }
   }
   return 'Rate limit reached — please try again in up to 60 minutes.';
+}
+
+function parseRetryDelay(value) {
+  if (!value) return '';
+  const raw = String(value).trim();
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) return formatRetryDelay(seconds * 1000);
+
+  const dateMs = Date.parse(raw);
+  if (Number.isFinite(dateMs)) return formatRetryDelay(Math.max(0, dateMs - Date.now()));
+
+  return '';
+}
+
+function formatRetryDelay(ms) {
+  const totalSeconds = Math.max(1, Math.ceil(Number(ms || 0) / 1000));
+  if (totalSeconds < 60) return `${totalSeconds} second${totalSeconds === 1 ? '' : 's'}`;
+
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) {
+    return seconds > 0
+      ? `${minutes} minute${minutes === 1 ? '' : 's'} ${seconds} second${seconds === 1 ? '' : 's'}`
+      : `${minutes} minute${minutes === 1 ? '' : 's'}`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  const remainderMinutes = minutes % 60;
+  return remainderMinutes > 0
+    ? `${hours} hour${hours === 1 ? '' : 's'} ${remainderMinutes} minute${remainderMinutes === 1 ? '' : 's'}`
+    : `${hours} hour${hours === 1 ? '' : 's'}`;
+}
+
+async function responseErrorMessage(response, fallback = `Error ${response?.status || ''}`.trim()) {
+  const body = await response.clone().json().catch(() => ({}));
+  if (body?.error) return body.error;
+  if (response.status === 429) return rateLimitError(response);
+  return fallback;
 }
 
 const DEFAULT_PROXY_URL = 'https://draftapply.onrender.com';
@@ -483,10 +529,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             });
           }
 
-          if (response.status === 429) throw new Error(rateLimitError(response));
           if (!response.ok) {
-            const err = await response.json().catch(() => ({}));
-            throw new Error(err.error || `Error ${response.status}`);
+            throw new Error(await responseErrorMessage(response));
           }
 
           const data = await response.json();
@@ -538,8 +582,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             response = await doRequest();
           }
           if (!response.ok) {
-            const err = await response.json().catch(() => ({}));
-            throw new Error(err.error || `Error ${response.status}`);
+            throw new Error(await responseErrorMessage(response));
           }
           const data = await response.json();
           sendResponse({ success: true, extractedText: data.extractedText });
@@ -593,10 +636,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             });
           }
 
-          if (response.status === 429) throw new Error(rateLimitError(response));
           if (!response.ok) {
-            const err = await response.json().catch(() => ({}));
-            throw new Error(err.error || `Error ${response.status}`);
+            throw new Error(await responseErrorMessage(response));
           }
 
           const data = await response.json();
@@ -830,10 +871,8 @@ async function handleStreamingAPICall(payload, requestId, tabId, frameId) {
       response = await doRequest();
     }
 
-    if (response.status === 429) throw new Error(rateLimitError(response));
     if (!response.ok) {
-      const err = await response.json().catch(() => ({}));
-      throw new Error(err.error || `Proxy error: ${response.status}`);
+      throw new Error(await responseErrorMessage(response, `Proxy error: ${response.status}`));
     }
 
     const reader = response.body.getReader();
@@ -936,11 +975,8 @@ async function handleAPICall(payload, requestId) {
       response = await doRequest();
     }
 
-    if (response.status === 429) throw new Error(rateLimitError(response));
     if (!response.ok) {
-      const error = await response.json().catch(() => ({}));
-      const msg = error.error || `Proxy error: ${response.status}`;
-      throw new Error(msg);
+      throw new Error(await responseErrorMessage(response, `Proxy error: ${response.status}`));
     }
 
     return await response.json();

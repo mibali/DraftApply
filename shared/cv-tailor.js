@@ -769,6 +769,21 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
       }
     }
 
+    const competencyLines = this._extractSectionLines(tailoredText, /^core\s+competenc(?:y|ies)$/i, /^(professional\s+experience|experience|employment|work\s+history|education|certifications?|projects?|skills)$/i);
+    if (competencyLines.length > 0) {
+      if (competencyLines.length < 5) {
+        warnings.push(`Core Competencies has only ${competencyLines.length} populated line(s); expected 5–7 concise categories.`);
+      }
+      if (competencyLines.some(line => /^additional\s+(?:relevant\s+)?skills\s*:/i.test(line))) {
+        warnings.push('Core Competencies contains an "Additional Skills" catch-all line; use named categories instead.');
+      }
+      if (competencyLines.some(line => this._isJdRequirementProse(line) || this._isRequirementFragment(line))) {
+        warnings.push('Core Competencies may contain pasted JD requirement prose instead of concise skill phrases.');
+      }
+    } else {
+      warnings.push('Core Competencies section may be missing from the tailored CV.');
+    }
+
     for (const item of (matchMap || []).filter(m => !m.allowedToMention)) {
       for (const candidate of this._extractAtomicSkillCandidates(item.requirement)) {
         const key = this._normaliseText(candidate);
@@ -810,6 +825,24 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
   }
 
   // ── private helpers ──────────────────────────────────────────────────────
+
+  _extractSectionLines(text, headingRe, stopHeadingRe) {
+    const lines = String(text || '').split('\n');
+    const start = lines.findIndex(line => headingRe.test(String(line || '').trim()));
+    if (start === -1) return [];
+
+    const collected = [];
+    for (const line of lines.slice(start + 1)) {
+      const trimmed = String(line || '').trim();
+      if (!trimmed) {
+        if (collected.length > 0) break;
+        continue;
+      }
+      if (stopHeadingRe.test(trimmed)) break;
+      collected.push(trimmed.replace(/^[-•*●▪◦–—]\s*/, ''));
+    }
+    return collected;
+  }
 
   _getLockedContactFields(contactInfo = {}) {
     const fields = [

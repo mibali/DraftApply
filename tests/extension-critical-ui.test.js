@@ -68,4 +68,22 @@ describe('extension critical modal behavior', () => {
     expect(backgroundJs).toContain("message.type === 'GET_TAILOR_JOB_FOR_ACTIVE_PAGE'");
     expect(backgroundJs).toContain('await chrome.storage.local.remove(TAILOR_JOB_KEY)');
   });
+
+  it('preserves specific proxy/provider error messages instead of replacing all 429s', () => {
+    expect(backgroundJs).toContain('async function responseErrorMessage');
+    expect(backgroundJs).toContain('if (body?.error) return body.error');
+    expect(backgroundJs).toContain('if (response.status === 429) return rateLimitError(response)');
+    expect(backgroundJs).toContain("response.headers.get('Retry-After')");
+    expect(backgroundJs).toContain('function formatRetryDelay');
+    expect(backgroundJs).toContain('you can try again in ${formatRetryDelay');
+    expect(backgroundJs).not.toContain('if (response.status === 429) throw new Error(rateLimitError(response))');
+  });
+
+  it('buffers SSE stream fragments across network chunk boundaries', () => {
+    expect(backgroundJs).toContain("let buffer = ''");
+    expect(backgroundJs).toContain("buffer += decoder.decode(value, { stream: true })");
+    expect(backgroundJs).toContain("const lines = buffer.split('\\n')");
+    expect(backgroundJs).toContain('buffer = lines.pop()');
+    expect(backgroundJs).toContain('json.choices?.[0]?.delta?.content');
+  });
 });

@@ -63,7 +63,7 @@ class DraftApplyExtension {
       rect.setAttribute('width', '32');
       rect.setAttribute('height', '32');
       rect.setAttribute('rx', '6');
-      rect.setAttribute('fill', '#7c3aed');
+      rect.setAttribute('fill', '#2563eb');
       const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
       text.setAttribute('x', '16');
       text.setAttribute('y', '22');
@@ -311,8 +311,8 @@ class DraftApplyExtension {
             <input type="hidden" id="da-length-select" value="medium">
             <input type="hidden" id="da-tone-select" value="natural">
             <div class="da-modal-actions-row">
-              <button class="da-btn da-btn-regenerate" id="da-btn-regenerate">↺ Regenerate</button>
-              <button class="da-btn da-btn-copy" id="da-btn-copy">⎘ Copy</button>
+              <button class="da-btn da-btn-regenerate" id="da-btn-regenerate">Regenerate</button>
+              <button class="da-btn da-btn-copy" id="da-btn-copy">Copy</button>
               <button class="da-btn da-btn-insert" id="da-btn-insert">Insert Answer</button>
             </div>
           </div>
