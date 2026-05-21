@@ -492,7 +492,10 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
       confirmedSkills,
       jdData
     );
-    return this.restoreLockedExperienceDates(cleaned, cvData);
+    return this.normaliseRoleFocusPlacement(
+      this.restoreLockedExperienceDates(cleaned, cvData),
+      cvData
+    );
   }
 
   restoreLockedExperienceDates(tailoredText, cvData = {}) {
@@ -533,6 +536,50 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
         ...cleanedBetween
       );
       searchFrom = companyIdx + 3;
+    }
+
+    return lines.join('\n');
+  }
+
+  normaliseRoleFocusPlacement(tailoredText, cvData = {}) {
+    if (!tailoredText || !Array.isArray(cvData.experience) || cvData.experience.length === 0) {
+      return tailoredText;
+    }
+
+    const lines = String(tailoredText).split('\n');
+    const titleKeys = new Set(
+      (cvData.experience || [])
+        .map(exp => this._normaliseText(exp.title))
+        .filter(Boolean)
+    );
+    let searchFrom = 0;
+
+    for (const exp of (cvData.experience || [])) {
+      const title = String(exp.title || '').trim();
+      if (!title) continue;
+
+      const titleIdx = this._findTitleLineIndex(lines, title, searchFrom);
+      if (titleIdx === -1) continue;
+
+      const entryEnd = this._findRoleEntryEnd(lines, titleIdx, titleKeys);
+      const focusIndices = [];
+      for (let i = titleIdx + 1; i < entryEnd; i++) {
+        if (/^focus\s*:/i.test(String(lines[i] || '').trim())) {
+          focusIndices.push(i);
+        }
+      }
+
+      if (focusIndices.length === 0) {
+        searchFrom = titleIdx + 1;
+        continue;
+      }
+
+      const focusLine = String(lines[focusIndices[0]] || '').trim();
+      for (const idx of [...focusIndices].sort((a, b) => b - a)) {
+        lines.splice(idx, 1);
+      }
+      lines.splice(titleIdx + 1, 0, focusLine);
+      searchFrom = titleIdx + 2;
     }
 
     return lines.join('\n');
@@ -664,7 +711,7 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
       searchFrom = titleIdx + 2;
     }
 
-    return lines.join('\n');
+    return this.normaliseRoleFocusPlacement(lines.join('\n'), cvData);
   }
 
   cleanSkillsSection(tailoredText, matchMap = [], confirmedSkills = [], jdData = {}) {
@@ -1211,6 +1258,18 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
       if (line.includes(titleKey) && line.length <= titleKey.length + 20) return i;
     }
     return -1;
+  }
+
+  _findRoleEntryEnd(lines, titleIdx, titleKeys = new Set()) {
+    for (let i = titleIdx + 1; i < lines.length; i++) {
+      const trimmed = String(lines[i] || '').trim();
+      if (!trimmed) continue;
+      if (this._isLikelySectionHeader(trimmed)) return i;
+
+      const key = this._normaliseText(trimmed);
+      if (i > titleIdx + 1 && titleKeys.has(key)) return i;
+    }
+    return lines.length;
   }
 
   _findLineIndexContaining(lines, value, start = 0, end = lines.length) {

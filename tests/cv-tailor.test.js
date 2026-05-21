@@ -715,6 +715,58 @@ Focus: cloud infrastructure and automation
     const result = tailor.ensureRoleFocusLines(tailored, CV, INFRA_MLOPS_JD, map);
     expect(result.match(/^Focus:/gm)).toHaveLength(1);
   });
+
+  it('moves an existing misplaced Focus line above bullets even when no deterministic focus is built', () => {
+    const tailored = `John Doe
+
+PROFESSIONAL EXPERIENCE
+TechCorp
+Jan 2021 – Present
+Senior Frontend Engineer
+- Built React dashboards
+Focus: frontend product delivery and UI quality
+- Optimised PostgreSQL queries
+
+EDUCATION
+BSc Computer Science`;
+
+    const result = tailor.ensureRoleFocusLines(tailored, CV, JD_NO_MATCH, []);
+
+    expect(result).toMatch(/Senior Frontend Engineer\nFocus: frontend product delivery and UI quality\n- Built React dashboards/);
+    expect(result.match(/^Focus:/gm)).toHaveLength(1);
+  });
+});
+
+describe('normaliseRoleFocusPlacement', () => {
+  it('keeps Focus directly under the job title after date restoration and removes duplicates', () => {
+    const tailored = `John Doe
+Senior Software Engineer
+
+PROFESSIONAL EXPERIENCE
+TechCorp
+Jan 2021 -
+Present
+Senior Frontend Engineer
+- Built React dashboards
+Focus: cloud infrastructure and automation
+- Deployed containerised services to AWS using Docker
+Focus: duplicate should be removed
+
+StartupXYZ
+Jun 2019 - Dec 2020
+Junior Developer
+- Maintained CI pipelines`;
+
+    const result = tailor.finalizeTailoredCV(tailored, {
+      cvData: CV,
+      jdData: INFRA_MLOPS_JD,
+      matchMap: tailor.buildMatchMap(CV, INFRA_MLOPS_JD, ['Kubernetes', 'Terraform']),
+    });
+
+    expect(result).toContain('TechCorp\nJan 2021 – Present\nSenior Frontend Engineer\nFocus: cloud infrastructure and automation\n- Built React dashboards');
+    expect(result.match(/^Focus:/gm)).toHaveLength(1);
+    expect(result).not.toContain('duplicate should be removed');
+  });
 });
 
 // ── cleanSkillsSection ───────────────────────────────────────────────────────
