@@ -187,6 +187,28 @@ describe('extractTools', () => {
     expect(tools).toContain('Vercel');
     expect(tools).toContain('Supabase');
   });
+
+  it('extracts product management tools', () => {
+    const tools = parser.extractTools('Use Productboard, Amplitude, Mixpanel, Pendo, Miro, and Jira Product Discovery.');
+    expect(tools).toContain('Productboard');
+    expect(tools).toContain('Amplitude');
+    expect(tools).toContain('Mixpanel');
+    expect(tools).toContain('Pendo');
+    expect(tools).toContain('Miro');
+    expect(tools).toContain('Jira Product Discovery');
+  });
+
+  it('extracts marketing, customer success, sales, and finance tools', () => {
+    const tools = parser.extractTools('Stack includes HubSpot, Marketo, Google Analytics, Salesforce, Gainsight, Gong, NetSuite, and Workday.');
+    expect(tools).toContain('HubSpot');
+    expect(tools).toContain('Marketo');
+    expect(tools).toContain('Google Analytics');
+    expect(tools).toContain('Salesforce');
+    expect(tools).toContain('Gainsight');
+    expect(tools).toContain('Gong');
+    expect(tools).toContain('NetSuite');
+    expect(tools).toContain('Workday');
+  });
 });
 
 

@@ -83,46 +83,78 @@ export class CVParser {
     
     if (expSection) {
       const expText = expSection[1];
-      
-      // Pattern for job entries: Company, Title, Date range, then bullets
-      const jobPattern = /([A-Z][^\n]+)\n([^\n]+)\n([^\n]*\d{4}[^\n]*)\n([\s\S]*?)(?=\n[A-Z][^\n]+\n[^\n]+\n[^\n]*\d{4}|$)/gi;
-      
-      let match;
-      while ((match = jobPattern.exec(expText)) !== null) {
-        experiences.push({
-          company: match[1].trim(),
-          title: match[2].trim(),
-          dates: match[3].trim(),
-          responsibilities: this.extractBulletPoints(match[4])
-        });
-      }
-      
-      // Fallback: simpler extraction
-      if (experiences.length === 0) {
-        const lines = expText.split('\n').filter(l => l.trim());
-        let currentExp = null;
-        
-        for (const line of lines) {
-          if (line.match(/\d{4}\s*[-–]\s*(\d{4}|present|current)/i)) {
-            if (currentExp) experiences.push(currentExp);
-            currentExp = {
-              company: '',
-              title: '',
-              dates: line.trim(),
-              responsibilities: []
-            };
-          } else if (currentExp) {
-            if (!currentExp.company) {
-              currentExp.company = line.trim();
-            } else if (!currentExp.title) {
-              currentExp.title = line.trim();
-            } else if (line.match(/^[\s]*[•\-\*]/)) {
-              currentExp.responsibilities.push(line.replace(/^[\s]*[•\-\*]\s*/, '').trim());
-            }
-          }
+
+      const lines = expText
+        .split('\n')
+        .map(l => l.trim())
+        .filter(Boolean)
+        .filter(l => !this._isDecorativeLine(l));
+
+      let currentExp = null;
+      let headerBuffer = [];
+
+      const pushCurrent = () => {
+        if (!currentExp) return;
+        currentExp.company = this._cleanExperienceHeader(currentExp.company);
+        currentExp.title = this._cleanExperienceHeader(currentExp.title);
+        currentExp.dates = this._extractDateRange(currentExp.dates) || currentExp.dates;
+        if (currentExp.company || currentExp.title || currentExp.responsibilities.length > 0) {
+          experiences.push(currentExp);
         }
-        if (currentExp) experiences.push(currentExp);
+        currentExp = null;
+      };
+
+      const startEntry = (entry) => {
+        pushCurrent();
+        currentExp = {
+          company: entry.company || '',
+          title: entry.title || '',
+          dates: entry.dates || '',
+          responsibilities: [],
+        };
+        headerBuffer = [];
+      };
+
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        const bullet = this._cleanBullet(line);
+
+        if (bullet) {
+          if (currentExp) currentExp.responsibilities.push(bullet);
+          headerBuffer = [];
+          continue;
+        }
+
+        const inlineEntry = this._parseExperienceHeader(line);
+        if (inlineEntry) {
+          startEntry(inlineEntry);
+          continue;
+        }
+
+        const dates = this._extractDateRange(line);
+        if (dates) {
+          const entry = this._entryFromBufferedHeader(headerBuffer, dates);
+          startEntry(entry);
+          continue;
+        }
+
+        if (currentExp && !currentExp.title && this._isLikelyJobTitle(line)) {
+          currentExp.title = line;
+          continue;
+        }
+
+        if (currentExp && this._looksLikeResponsibility(line)) {
+          currentExp.responsibilities.push(line);
+          continue;
+        }
+
+        if (!this._isLikelyNoiseExperienceLine(line)) {
+          headerBuffer.push(line);
+          headerBuffer = headerBuffer.slice(-3);
+        }
       }
+
+      pushCurrent();
     }
     
     return experiences;
@@ -213,6 +245,135 @@ export class CVParser {
       .split('\n')
       .map(l => l.replace(/^[\s]*[•\-\*]\s*/, '').trim())
       .filter(l => l.length > 0);
+  }
+
+  _parseExperienceHeader(line) {
+    if (!line || this._isLikelyNoiseExperienceLine(line)) return null;
+    const dates = this._extractDateRange(line);
+    if (!dates) return null;
+
+    const withoutDates = line
+      .replace(dates, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .replace(/\s*[|,;:/-]\s*$/g, '')
+      .trim();
+    if (!withoutDates || this._isLikelyNoiseExperienceLine(withoutDates)) return null;
+
+    const atMatch = withoutDates.match(/^(.{3,80}?)\s+(?:at|@)\s+(.{2,80})$/i);
+    if (atMatch) {
+      return {
+        title: this._cleanExperienceHeader(atMatch[1]),
+        company: this._cleanExperienceHeader(atMatch[2]),
+        dates,
+      };
+    }
+
+    const parts = withoutDates
+      .split(/\s+(?:\||–|—|-)\s+/)
+      .map(p => this._cleanExperienceHeader(p))
+      .filter(Boolean)
+      .filter(p => !this._isLikelyNoiseExperienceLine(p));
+
+    if (parts.length >= 2) {
+      const [first, second] = parts;
+      if (this._isLikelyJobTitle(first) && !this._isLikelyJobTitle(second)) {
+        return { title: first, company: second, dates };
+      }
+      return { company: first, title: second, dates };
+    }
+
+    if (parts.length === 1) {
+      const only = parts[0];
+      return this._isLikelyJobTitle(only)
+        ? { title: only, company: '', dates }
+        : { company: only, title: '', dates };
+    }
+
+    return null;
+  }
+
+  _entryFromBufferedHeader(buffer, dates) {
+    const clean = (buffer || [])
+      .map(line => this._cleanExperienceHeader(line))
+      .filter(Boolean)
+      .filter(line => !this._isLikelyNoiseExperienceLine(line))
+      .slice(-3);
+
+    if (clean.length >= 2) {
+      const first = clean[clean.length - 2];
+      const second = clean[clean.length - 1];
+      if (this._isLikelyJobTitle(first) && !this._isLikelyJobTitle(second)) {
+        return { title: first, company: second, dates };
+      }
+      return { company: first, title: second, dates };
+    }
+
+    if (clean.length === 1) {
+      const only = clean[0];
+      return this._isLikelyJobTitle(only)
+        ? { title: only, company: '', dates }
+        : { company: only, title: '', dates };
+    }
+
+    return { company: '', title: '', dates };
+  }
+
+  _extractDateRange(line) {
+    const text = String(line || '');
+    const month = '(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)';
+    const year = '(?:19|20)\\d{2}';
+    const endpoint = `(?:${month}\\s+)?(?:${year}|Present|Current|Now)`;
+    const patterns = [
+      new RegExp(`\\b${endpoint}\\s*(?:-|–|—|to)\\s*${endpoint}\\b`, 'i'),
+      /\b(?:Present|Current|Now)\b/i,
+      /\b(?:19|20)\d{2}\b/,
+    ];
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (match) return match[0].trim();
+    }
+    return '';
+  }
+
+  _cleanBullet(line) {
+    const match = String(line || '').match(/^\s*(?:[•●▪*]|\-\s+|\d+[.)])\s*(.+)$/);
+    return match ? match[1].trim() : '';
+  }
+
+  _cleanExperienceHeader(value) {
+    return String(value || '')
+      .replace(/^[•●▪*\-\s]+/, '')
+      .replace(/\s+/g, ' ')
+      .replace(/\s*,\s*$/, '')
+      .trim();
+  }
+
+  _isLikelyJobTitle(line) {
+    const text = String(line || '').trim();
+    if (!text || text.length > 120 || this._cleanBullet(text)) return false;
+    return /\b(engineer|developer|architect|manager|lead|director|consultant|analyst|designer|scientist|specialist|officer|coordinator|administrator|advisor|associate|executive|representative|support|success|product|sales|marketing|finance|operations|devops|platform|cloud|data|software|security|solution|solutions|technical|principal|staff|head)\b/i.test(text);
+  }
+
+  _looksLikeResponsibility(line) {
+    const text = String(line || '').trim();
+    if (text.length < 35 || text.length > 260) return false;
+    if (this._extractDateRange(text) || this._isLikelyJobTitle(text)) return false;
+    return /^(built|created|designed|implemented|led|managed|owned|delivered|developed|improved|reduced|increased|supported|resolved|partnered|collaborated|provided|conducted|deployed|automated|maintained|launched|defined|drove|coordinated)\b/i.test(text);
+  }
+
+  _isLikelyNoiseExperienceLine(line) {
+    const text = String(line || '').trim();
+    if (!text) return true;
+    if (this._cleanBullet(text)) return true;
+    if (text.length > 160) return true;
+    if (/^(professional\s+experience|work\s+experience|employment|career\s+history|experience)$/i.test(text)) return true;
+    if (/^(responsibilities?|achievements?|key\s+achievements?|selected\s+projects?)[:\s]*$/i.test(text)) return true;
+    if (/^(remote|hybrid|onsite|full[- ]time|part[- ]time|contract|freelance)$/i.test(text)) return true;
+    return false;
+  }
+
+  _isDecorativeLine(line) {
+    return /^[=_\-—–]{3,}$/.test(String(line || '').trim());
   }
 
   /**

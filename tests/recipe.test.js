@@ -29,6 +29,7 @@ describe('render proxy recipe', () => {
     expect(prompt.systemPrompt).toMatch(/SALARY \/ COMPENSATION question/);
     expect(prompt.systemPrompt).toMatch(/\$X-\$Y per month/);
     expect(prompt.systemPrompt).toMatch(/Do NOT mention previous employers/);
+    expect(prompt.systemPrompt).toMatch(/do not claim to have live, official, or real-time salary data/i);
     expect(prompt.userPrompt).toMatch(/concrete USD monthly salary range/);
     expect(prompt.userPrompt).toMatch(/255 characters or fewer/);
     expect(prompt.maxTokens).toBeLessThanOrEqual(90);

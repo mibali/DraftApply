@@ -60,12 +60,20 @@ export class CVTailor {
 
     return deduped.map(({ req, type }) => {
       const confirmedByUser = confirmedSet.has(this._normaliseText(req));
-      const evidence = this._findEvidence(req, cvSources);
+      const directEvidence = this._findEvidence(req, cvSources);
+      const semanticEvidence = directEvidence.length > 0
+        ? []
+        : this._findSemanticEvidence(req, cvSources);
+      const evidence = [...new Set([...directEvidence, ...semanticEvidence])].slice(0, 5);
       const coreTokens = this._getCoreTokens(req);
       const supportedCoreTokens = coreTokens.filter(tok =>
-        cvSources.some(source => source && this._normaliseText(source).includes(tok))
+        cvSources.some(source => source && (
+          this._normaliseText(source).includes(tok) ||
+          this._semanticTokenSupported(tok, source)
+        ))
       );
-      const fullySupported = coreTokens.length === 0 || supportedCoreTokens.length === coreTokens.length;
+      const semanticSupported = semanticEvidence.length > 0;
+      const fullySupported = semanticSupported || coreTokens.length === 0 || supportedCoreTokens.length === coreTokens.length;
       const isAtomicRequirement = coreTokens.length <= 1;
       let status;
       if (confirmedByUser) {
@@ -74,7 +82,7 @@ export class CVTailor {
         status = 'missing';
       } else if (evidence.length >= 2) {
         status = 'strong_match';
-      } else if (evidence.length === 1 || (isAtomicRequirement && this._hasAdjacentTech(req, cvLower))) {
+      } else if (evidence.length === 1 || semanticSupported || (isAtomicRequirement && this._hasAdjacentTech(req, cvLower))) {
         status = 'partial_match';
       } else {
         status = 'missing';
@@ -1682,6 +1690,65 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
     }
 
     return [...new Set(evidence)].slice(0, 5);
+  }
+
+  /** Find evidence through controlled synonym/equivalence groups. */
+  _findSemanticEvidence(requirement, cvSources) {
+    const aliases = this._semanticAliasesForRequirement(requirement);
+    if (aliases.length === 0) return [];
+
+    const evidence = [];
+    for (const source of cvSources) {
+      if (!source) continue;
+      const lower = this._normaliseText(source);
+      if (aliases.some(alias => lower.includes(this._normaliseText(alias)))) {
+        evidence.push(source.trim().slice(0, 150));
+      }
+    }
+    return [...new Set(evidence)].slice(0, 5);
+  }
+
+  _semanticTokenSupported(token, source) {
+    const aliases = this._semanticAliasesForRequirement(token);
+    if (aliases.length === 0) return false;
+    const lower = this._normaliseText(source);
+    return aliases.some(alias => lower.includes(this._normaliseText(alias)));
+  }
+
+  _semanticAliasesForRequirement(requirement) {
+    const req = this._normaliseText(requirement);
+    if (!req) return [];
+
+    const groups = [
+      ['postgresql', 'postgres', 'psql'],
+      ['kubernetes', 'k8s'],
+      ['github actions', 'gha'],
+      ['google analytics', 'ga4'],
+      ['ci cd', 'cicd', 'pipeline automation', 'deployment automation', 'release automation'],
+      ['technical demos', 'technical demo', 'customer demo', 'customer demos', 'client presentations', 'client-facing presentations', 'stakeholder presentations', 'workshops'],
+      ['poc', 'proof of concept', 'pilot implementation', 'prototype'],
+      ['pov', 'proof of value', 'value assessment', 'business value assessment'],
+      ['pre sales', 'presales', 'solution consulting', 'solution selling', 'technical selling'],
+      ['technical discovery', 'requirements gathering', 'customer discovery', 'stakeholder workshops', 'diagnostic workshops'],
+      ['stakeholder management', 'stakeholder engagement', 'customer communication', 'executive communication', 'cross functional collaboration', 'expectation management'],
+      ['product metrics', 'north star metric', 'kpi', 'dashboards', 'analytics reporting', 'performance reporting'],
+      ['roadmap ownership', 'roadmap planning', 'backlog prioritisation', 'backlog prioritization', 'product prioritisation', 'product prioritization'],
+      ['go to market', 'gtm', 'launch planning', 'release launch', 'market launch'],
+      ['customer onboarding', 'implementation', 'customer implementation', 'enablement', 'adoption'],
+      ['renewal', 'retention', 'churn prevention', 'account expansion', 'customer health'],
+      ['crm', 'salesforce', 'hubspot crm'],
+      ['financial modelling', 'financial modeling', 'forecasting', 'budgeting', 'variance analysis'],
+      ['regulatory compliance', 'compliance reporting', 'audit support', 'risk control'],
+    ];
+
+    const matches = [];
+    for (const group of groups) {
+      const normalised = group.map(item => this._normaliseText(item));
+      if (normalised.some(item => req === item || req.includes(item) || item.includes(req))) {
+        matches.push(...group);
+      }
+    }
+    return [...new Set(matches)].filter(alias => this._normaliseText(alias) !== req);
   }
 
   /**

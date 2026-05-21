@@ -123,7 +123,7 @@ If `RECIPE_PATH` is not set (or fails to load), the proxy uses the bundled recip
 | `GROQ_API_KEY` | Yes, unless `OPENROUTER_API_KEY` is set | — | Groq API key; used as the primary LLM provider when present |
 | `OPENROUTER_API_KEY` | No | — | OpenRouter API key; used as fallback when Groq is rate-limited, times out, or returns a transient error |
 | `OPENROUTER_MODEL` | No | `meta-llama/llama-3.3-70b-instruct` | OpenRouter fallback model |
-| `OPENROUTER_TAILOR_FALLBACK` | No | `false` | Set to `true` only if you want Tailor CV generation/audit to fall back to OpenRouter; default is off to preserve Groq CV quality/format |
+| `OPENROUTER_TAILOR_FALLBACK` | No | `true` | Tailor CV generation/audit falls back to OpenRouter by default when `OPENROUTER_API_KEY` is set. Set to `false` only if you want Tailor CV to hard-fail rather than use OpenRouter as backup. |
 | `OPENROUTER_SITE_URL` | No | `https://draftapply.com` | Optional OpenRouter attribution header |
 | `OPENROUTER_APP_NAME` | No | `DraftApply` | Optional OpenRouter attribution header |
 | `TOKEN_SECRET` | Yes | — | Random long string for signing install tokens |
@@ -140,7 +140,7 @@ If `RECIPE_PATH` is not set (or fails to load), the proxy uses the bundled recip
 3. Root directory: `render-proxy`
 4. Build command: `npm install`
 5. Start command: `npm start`
-6. Add env vars: `GROQ_API_KEY`, `TOKEN_SECRET`. Optionally add `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` for answer fallback. Leave `OPENROUTER_TAILOR_FALLBACK` unset unless you deliberately want OpenRouter to generate/audit tailored CVs. No need to set `RECIPE_PATH` unless you use a custom recipe.
+6. Add env vars: `GROQ_API_KEY`, `TOKEN_SECRET`. Optionally add `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` for fallback. Leave `OPENROUTER_TAILOR_FALLBACK` unset to allow Tailor CV fallback, or set it to `false` if you deliberately want Tailor CV to fail rather than use OpenRouter. No need to set `RECIPE_PATH` unless you use a custom recipe.
 
 ---
 

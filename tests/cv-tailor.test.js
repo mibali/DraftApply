@@ -276,6 +276,60 @@ describe('buildMatchMap', () => {
     expect(() => tailor.buildMatchMap(CV, JD, undefined)).not.toThrow();
     expect(() => tailor.buildMatchMap(CV, JD, null)).not.toThrow();
   });
+
+  it('treats controlled synonyms as partial evidence in the production match map', () => {
+    const cv = {
+      rawText: 'Delivered client-facing presentations and stakeholder workshops for enterprise SaaS accounts.',
+      summary: '',
+      skills: [],
+      experience: [{
+        title: 'Customer Success Engineer',
+        company: 'Acme',
+        responsibilities: [
+          'Delivered client-facing presentations and stakeholder workshops for enterprise SaaS accounts.',
+        ],
+      }],
+      certifications: [],
+      achievements: [],
+    };
+    const jd = {
+      requiredSkills: ['Technical Demos', 'Technical Discovery'],
+      preferredSkills: [],
+      tools: [],
+      softSkills: [],
+    };
+
+    const map = tailor.buildMatchMap(cv, jd);
+    expect(map.find(m => m.requirement === 'Technical Demos')).toMatchObject({
+      status: 'partial_match',
+      allowedToMention: true,
+    });
+    expect(map.find(m => m.requirement === 'Technical Discovery')).toMatchObject({
+      status: 'partial_match',
+      allowedToMention: true,
+    });
+  });
+
+  it('normalises common tool aliases such as Postgres and PostgreSQL', () => {
+    const cv = {
+      rawText: 'Optimised Postgres schemas and reporting queries for customer dashboards.',
+      summary: '',
+      skills: ['Postgres'],
+      experience: [],
+      certifications: [],
+      achievements: [],
+    };
+    const jd = {
+      requiredSkills: ['PostgreSQL'],
+      preferredSkills: [],
+      tools: [],
+      softSkills: [],
+    };
+
+    const postgres = tailor.buildMatchMap(cv, jd).find(m => m.requirement === 'PostgreSQL');
+    expect(postgres.status).toBe('partial_match');
+    expect(postgres.allowedToMention).toBe(true);
+  });
 });
 
 

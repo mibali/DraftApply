@@ -28,7 +28,7 @@ describe('Tailor CV Groq budget', () => {
 
   it('uses OpenRouter only as a retry fallback behind Groq in production', () => {
     expect(renderProxyServer).toContain('const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY');
-    expect(renderProxyServer).toContain('const OPENROUTER_TAILOR_FALLBACK =');
+    expect(renderProxyServer).toContain("const OPENROUTER_TAILOR_FALLBACK = !/^false$/i.test");
     expect(renderProxyServer).toContain("url: 'https://openrouter.ai/api/v1/chat/completions'");
     expect(renderProxyServer).toContain("const primary = GROQ_API_KEY ? 'groq' : 'openrouter'");
     expect(renderProxyServer).toContain('const canFallback = options.allowFallback !== false');

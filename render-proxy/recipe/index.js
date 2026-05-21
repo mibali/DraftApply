@@ -26,6 +26,8 @@
  *   }
  */
 
+import { SalaryBenchmarkService } from '../../shared/salary-benchmark-service.js';
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -383,7 +385,7 @@ Rules:
   return { systemPrompt, userPrompt, temperature: 0.1, maxTokens: 120 };
 }
 
-function buildSalaryPrompt(cvText, question, jobCtx, jobTitle) {
+function buildSalaryPrompt(cvText, question, jobCtx, jobTitle, salaryBenchmarkHint = '') {
   const q = String(question || '').toLowerCase();
   const asksMonthly = /\b(monthly|per\s+month|\/\s*month|pcm)\b/.test(q);
   const asksAnnual = /\b(annual|annually|yearly|per\s+year|\/\s*year|base\s+salary)\b/.test(q);
@@ -412,11 +414,14 @@ Rules:
 - Do NOT mention previous employers, role history, projects, skills, or CV details.
 - Do NOT say "As a seasoned professional", "based on my experience", or any similar preamble.
 - Do NOT avoid the question with "open to discussion" alone; give a concrete range.
-- If exact market data is uncertain, give a reasonable professional range and say it is negotiable.`;
+- If exact market data is uncertain, give a reasonable professional range and say it is negotiable.
+- If salary benchmark context is provided, use it as the anchor.
+- If no salary benchmark context is provided, do not claim to have live, official, or real-time salary data. Still answer with a practical market-informed range and do not mention missing benchmark data to the employer.`;
 
   const cvContext = getCvContext(cvText, 12000);
   let userPrompt = `MY CV, for seniority context only. Do not summarize it in the answer:\n${cvContext}\n\n`;
   if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
+  if (salaryBenchmarkHint) userPrompt += `Salary benchmark context:\n${salaryBenchmarkHint}\n\n`;
   userPrompt += `Question: ${question}
 
 Write only the answer to paste into the form. It must contain a concrete ${currency} ${period} salary range and no CV narrative.`;
@@ -999,11 +1004,21 @@ export function buildPrompts(input) {
   const enrichedJdData = jdData || roleProfile ? { ...(jdData || {}), roleProfile: jdData?.roleProfile || roleProfile } : jdData;
   const candidateName = extractCandidateName(cvText);
   const qType = detectQuestionType(question);
+  let salaryBenchmarkHint = '';
+  if (qType === 'salary') {
+    const salaryBenchmarks = new SalaryBenchmarkService();
+    salaryBenchmarkHint = salaryBenchmarks.formatForPrompt(salaryBenchmarks.lookup({
+      jobTitle,
+      question,
+      jobDescription,
+      roleProfile: enrichedJdData?.roleProfile,
+    }));
+  }
 
   let result;
   switch (qType) {
     case 'salary':
-      result = buildSalaryPrompt(cvText, question, jobCtx, jobTitle);
+      result = buildSalaryPrompt(cvText, question, jobCtx, jobTitle, salaryBenchmarkHint);
       break;
     case 'short_factual':
       result = buildShortFactualPrompt(cvText, question);
