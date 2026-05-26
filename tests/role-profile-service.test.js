@@ -24,6 +24,13 @@ describe('RoleProfileService', () => {
     expect(service.classify({ jobTitle: 'Healthcare Administrator' })?.id).toBe('healthcare_admin');
   });
 
+  it('classifies data-engineering job titles into the data engineering role profile', () => {
+    expect(service.classify({ jobTitle: 'Data Engineer' })?.id).toBe('data_engineer');
+    expect(service.classify({ jobTitle: 'Database Architect' })?.id).toBe('data_engineer');
+    expect(service.classify({ jobTitle: 'ETL Developer' })?.id).toBe('data_engineer');
+    expect(service.enrichJDData({ jobTitle: 'Data Engineer' }).domain).toBe('data_engineering');
+  });
+
   it('enriches parsed JD data with positioning, credibility signals, risks, and skill categories', () => {
     const enriched = service.enrichJDData({
       jobTitle: 'Product Manager',
