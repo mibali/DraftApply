@@ -875,6 +875,21 @@ async function handleStreamingAPICall(payload, requestId, tabId, frameId) {
       throw new Error(await responseErrorMessage(response, `Proxy error: ${response.status}`));
     }
 
+    const provider = response.headers.get('X-DraftApply-Provider');
+    const model = response.headers.get('X-DraftApply-Model');
+    const fallbackFrom = response.headers.get('X-DraftApply-Fallback-From');
+    if (provider || fallbackFrom) {
+      try {
+        chrome.tabs.sendMessage(tabId, {
+          type: 'STREAM_META',
+          requestId: effectiveRequestId,
+          provider,
+          model,
+          fallbackFrom
+        }, { frameId });
+      } catch (e) {}
+    }
+
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';

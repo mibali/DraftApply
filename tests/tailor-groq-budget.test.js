@@ -21,6 +21,7 @@ describe('Tailor CV Groq budget', () => {
     expect(llmCalls).toHaveLength(2);
     expect(route).toContain('buildTailoringPrompt');
     expect(route).toContain('buildTailoredCvAuditPrompt');
+    expect(route).toContain('buildRecruiterReview');
     expect(route).toContain('allowFallback: OPENROUTER_TAILOR_FALLBACK');
     expect(route).not.toContain('buildLLMAnalysisPrompt');
     expect(route).not.toContain('buildSemanticMatchPrompt');
@@ -31,8 +32,11 @@ describe('Tailor CV Groq budget', () => {
     expect(renderProxyServer).toContain("const OPENROUTER_TAILOR_FALLBACK = !/^false$/i.test");
     expect(renderProxyServer).toContain("url: 'https://openrouter.ai/api/v1/chat/completions'");
     expect(renderProxyServer).toContain("const primary = GROQ_API_KEY ? 'groq' : 'openrouter'");
-    expect(renderProxyServer).toContain('const canFallback = options.allowFallback !== false');
-    expect(renderProxyServer).toContain("console.warn(`[DraftApply] Groq ${error.status || error.name || 'error'}; falling back to OpenRouter.`)");
+    expect(renderProxyServer).toContain('shouldUseOpenRouterFallback(error');
+    expect(renderProxyServer).toContain('buildOpenRouterFallbackModelOrder');
+    expect(renderProxyServer).toContain('OpenRouterFreeModelCache');
+    expect(renderProxyServer).toContain('OPENROUTER_MAX_FALLBACK_MODELS');
+    expect(renderProxyServer).toContain("console.warn(`[DraftApply] Groq ${error.status || error.name || 'error'}; falling back to OpenRouter free models.`)");
   });
 
   it('explains when Tailor CV fallback is disabled after Groq provider failure', () => {
@@ -52,6 +56,7 @@ describe('Tailor CV Groq budget', () => {
     expect(providerCalls).toHaveLength(2);
     expect(route).toContain('buildTailoringPrompt');
     expect(route).toContain('buildTailoredCvAuditPrompt');
+    expect(route).toContain('buildRecruiterReview');
     expect(route).not.toContain('buildLLMAnalysisPrompt');
     expect(route).not.toContain('buildSemanticMatchPrompt');
   });

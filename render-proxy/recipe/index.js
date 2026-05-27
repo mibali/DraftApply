@@ -1001,7 +1001,14 @@ export function buildPrompts(input) {
   }
 
   const jobCtx = buildJobContext(jobTitle, company, jobDescription, requirements);
-  const enrichedJdData = jdData || roleProfile ? { ...(jdData || {}), roleProfile: jdData?.roleProfile || roleProfile } : jdData;
+  const enrichedJdData = (jdData || roleProfile || jobTitle || company)
+    ? {
+        ...(jdData || {}),
+        jobTitle: jdData?.jobTitle || jobTitle,
+        company: jdData?.company || company,
+        roleProfile: jdData?.roleProfile || roleProfile,
+      }
+    : jdData;
   const candidateName = extractCandidateName(cvText);
   const qType = detectQuestionType(question);
   let salaryBenchmarkHint = '';
@@ -1058,9 +1065,9 @@ export function buildPrompts(input) {
       result = buildGeneralPrompt(cvText, question, length, jobCtx, candidateName, tone);
   }
 
-  // Inject structured-data hints for question types where
-  // structured context meaningfully improves specificity. Skipped for types
-  // that don't draw on CV stories (salary, short_factual, extraction, brief).
+  // Inject structured-data hints for question types where structured context
+  // meaningfully improves specificity. Skipped for salary, short factual, and
+  // data extraction prompts where CV stories would be noise.
   const HINT_TYPES = new Set([
     'behavioral', 'troubleshooting', 'strength_weakness',
     'motivation', 'why_company', 'cover_letter', 'general', 'yes_no', 'brief',

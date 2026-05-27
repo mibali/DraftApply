@@ -559,6 +559,93 @@ Senior Frontend Engineer
   });
 });
 
+// ── buildRecruiterReview ─────────────────────────────────────────────────────
+
+describe('buildRecruiterReview', () => {
+  it('returns a recruiter-style verdict for a credible tailored CV', () => {
+    const map = tailor.buildMatchMap(CV, JD);
+    const output = `John Doe
+Senior Software Engineer
+john@example.com
++44 7700 900000
+linkedin.com/in/johndoe
+
+PROFESSIONAL SUMMARY
+Senior software engineer with supported frontend, API, cloud, and delivery experience across React, TypeScript, Node.js, PostgreSQL, AWS, Docker, and CI pipelines.
+
+CORE COMPETENCIES
+Frontend Engineering: React, TypeScript, JavaScript, Dashboards
+Backend & APIs: Node.js, REST APIs, PostgreSQL
+Cloud & Containers: AWS, Docker, Containerised Services
+Software Delivery: Git, CI Pipelines, Code Review
+Team Collaboration: Mentoring, Communication, Teamwork
+
+PROFESSIONAL EXPERIENCE
+TechCorp                  Jan 2021 – Present
+Senior Frontend Engineer
+Focus: frontend engineering, API integration, cloud delivery, and software quality
+- Built React and TypeScript dashboards used by 200+ internal users
+- Optimised PostgreSQL queries, reducing report generation time
+- Deployed containerised services to AWS using Docker
+
+StartupXYZ                  Jun 2019 – Dec 2020
+Junior Developer
+Focus: backend APIs, CI workflows, and team delivery
+- Developed Node.js REST APIs serving 50k requests/day
+- Maintained Git workflows and CI pipelines
+
+EDUCATION / CERTIFICATIONS
+BSc Computer Science | University of London | 2015–2019`;
+
+    const warnings = [
+      ...tailor.validateTailoredCV(CV, output),
+      ...tailor.validateTailoringQuality(CV, JD, map, output),
+    ];
+    const review = tailor.buildRecruiterReview(CV, JD, map, output, warnings);
+
+    expect(['strong', 'ready_with_edits']).toContain(review.verdict);
+    expect(review.readyToSend).toBe(true);
+    expect(review.overallScore).toBeGreaterThanOrEqual(70);
+    expect(review.roleCredibilityScore).toBeGreaterThanOrEqual(70);
+    expect(review.jdCoverageScore).toBeGreaterThanOrEqual(70);
+    expect(review.sectionScores.professionalExperience.score).toBeGreaterThanOrEqual(70);
+    expect(review.recruiterSummary).toMatch(/recruiter|credible|fit/i);
+  });
+
+  it('downgrades a keyword-stuffed CV that lacks role evidence', () => {
+    const map = tailor.buildMatchMap(CV, SOLUTION_ARCHITECT_JD);
+    const output = `John Doe
+Senior Solutions Engineer
+john@example.com
++44 7700 900000
+
+PROFESSIONAL SUMMARY
+Senior cloud and platform engineer with Kubernetes, Docker, and CI/CD experience.
+
+CORE COMPETENCIES
+Pre-Sales & Solution Engineering: POV, MEDDPICC, POC/POV Delivery, RFP/RFI Response
+Technical Architecture & Integration: Solution Architecture, API Integration, Docker
+Communication and Collaboration: business communication skills
+
+PROFESSIONAL EXPERIENCE
+TechCorp                  Jan 2021 – Present
+Senior Frontend Engineer
+- Built React and TypeScript dashboards used by 200+ internal users
+- Deployed containerised services to AWS using Docker
+
+EDUCATION / CERTIFICATIONS
+BSc Computer Science | University of London | 2015–2019`;
+
+    const warnings = tailor.validateTailoringQuality(CV, SOLUTION_ARCHITECT_JD, map, output);
+    const review = tailor.buildRecruiterReview(CV, SOLUTION_ARCHITECT_JD, map, output, warnings);
+
+    expect(['borderline', 'not_ready']).toContain(review.verdict);
+    expect(review.readyToSend).toBe(false);
+    expect(review.risks.join(' ')).toMatch(/credibility|unsupported|missing/i);
+    expect(review.topFixes.join(' ')).toMatch(/credibility|Core Competencies|evidence/i);
+  });
+});
+
 
 // ── removeTailoringMetaPhrases ────────────────────────────────────────────────
 
@@ -1033,6 +1120,18 @@ describe('buildTailoringPrompt', () => {
     expect(userPrompt).toContain('The CV must visibly prioritize the target role');
   });
 
+  it('builds the CV against the recruiter screen question during generation', () => {
+    const map = tailor.buildMatchMap(CV, SOLUTION_ARCHITECT_JD);
+    const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(CV, SOLUTION_ARCHITECT_JD, map);
+
+    expect(systemPrompt).toContain('RECRUITER SCREENING GATE');
+    expect(systemPrompt).toContain('Would this CV credibly pass a 30-second recruiter screen for this exact role?');
+    expect(systemPrompt).toContain('Professional Experience, not only through a skills list');
+    expect(userPrompt).toContain('RECRUITER SCREENING QUESTION');
+    expect(userPrompt).toContain('only pass an ATS keyword scan but fail a human recruiter read');
+    expect(userPrompt).toContain('Final internal check before output');
+  });
+
   it('adds Solution Architect credibility guidance for architecture targets', () => {
     const map = tailor.buildMatchMap(CV, SOLUTION_ARCHITECT_JD);
     const { userPrompt } = tailor.buildTailoringPrompt(CV, SOLUTION_ARCHITECT_JD, map);
@@ -1098,6 +1197,8 @@ React, Track record of leading POCs and world-class demos`;
     );
 
     expect(systemPrompt).toContain('strict CV truth-auditor');
+    expect(systemPrompt).toContain('recruiter screen');
+    expect(systemPrompt).toContain('Would this CV credibly pass a 30-second recruiter screen for this exact role?');
     expect(systemPrompt).toContain('Every skill, claim, achievement, tool, methodology, domain phrase, and focus line');
     expect(systemPrompt).toContain('If a phrase only appears in the JD or target role and has no support, remove it');
     expect(userPrompt).toContain('ORIGINAL CV');
@@ -1107,6 +1208,7 @@ React, Track record of leading POCs and world-class demos`;
     expect(userPrompt).toContain('Evidence: "Built React dashboards used by support engineers."');
     expect(userPrompt).toContain('✗ Track record of leading POCs and world-class demos');
     expect(userPrompt).toContain('+ Grafana');
+    expect(userPrompt).toContain('30-second human recruiter scan');
     expect(temperature).toBe(0.1);
   });
 });

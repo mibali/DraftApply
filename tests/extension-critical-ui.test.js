@@ -86,4 +86,12 @@ describe('extension critical modal behavior', () => {
     expect(backgroundJs).toContain('buffer = lines.pop()');
     expect(backgroundJs).toContain('json.choices?.[0]?.delta?.content');
   });
+
+  it('shows the exact OpenRouter model when answer generation falls back from Groq', () => {
+    expect(backgroundJs).toContain("response.headers.get('X-DraftApply-Model')");
+    expect(backgroundJs).toContain("type: 'STREAM_META'");
+    expect(contentJs).toContain("if (message.type === 'STREAM_META')");
+    expect(contentJs).toContain('const model = result.model ? `: ${result.model}` :');
+    expect(contentJs).toContain('DraftApply used OpenRouter fallback${model}.');
+  });
 });

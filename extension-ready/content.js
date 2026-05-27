@@ -555,6 +555,13 @@ class DraftApplyExtension {
         return;
       }
 
+      if (message.type === 'STREAM_META') {
+        if (this.currentRequestId === message.requestId) {
+          this._showFallbackNotice(message);
+        }
+        return;
+      }
+
       if (message.type === 'STREAM_DONE') {
         const resolver = this._streamResolvers.get(message.requestId);
         if (resolver) {
@@ -1243,6 +1250,7 @@ class DraftApplyExtension {
           output.value = this._applyCharLimit(fallback.answer);
           this.lastAnswer = output.value;
           this._updateCharCounter();
+          this._showFallbackNotice(fallback);
         } else if (fallback?.error) {
           output.value = `Error: ${fallback.error}`;
         } else {
@@ -1298,6 +1306,7 @@ class DraftApplyExtension {
           output.value = this._applyCharLimit(fallback.answer);
           this.lastAnswer = output.value;
           this._updateCharCounter();
+          this._showFallbackNotice(fallback);
         } else if (fallback?.error) {
           output.value = `Error: ${fallback.error}`;
         } else {
@@ -1333,6 +1342,13 @@ class DraftApplyExtension {
     const question = this.modal.querySelector('#da-question-preview').value.trim();
     if (!question) return;
     await this.generateAnswer(question);
+  }
+
+  _showFallbackNotice(result) {
+    if (result?.provider === 'openrouter' && result?.fallbackFrom === 'groq') {
+      const model = result.model ? `: ${result.model}` : '';
+      this.showNotification(`Groq is busy, so DraftApply used OpenRouter fallback${model}.`);
+    }
   }
 
   async copyAnswer() {

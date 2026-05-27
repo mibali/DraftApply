@@ -480,8 +480,16 @@ app.post('/api/cv/tailor', async (req, res) => {
     ];
     const changedSections = tailor.detectChangedSections(cvText, tailoredCvText);
     const matchReport     = tailor.buildMatchSummary(matchMap);
+    const recruiterReview = tailor.buildRecruiterReview(
+      cvData,
+      jdData,
+      matchMap,
+      tailoredCvText,
+      warnings,
+      confirmedSkills
+    );
 
-    res.json({ tailoredCvText, matchReport, warnings, changedSections });
+    res.json({ tailoredCvText, matchReport, recruiterReview, warnings, changedSections });
   } catch (error) {
     console.error('CV tailor error:', error);
     res.status(500).json({ error: 'Failed to tailor CV', details: error.message });

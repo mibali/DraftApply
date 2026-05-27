@@ -289,7 +289,17 @@ WHAT YOU MAY DO:
 • Reorder bullets within a role to put the most relevant ones first.
 • Expand or compress bullet points within the bounds of what the original bullet states.
 • Include every user-confirmed addition in the skills/core competencies section as short phrases only.
-• Add truthful role-positioning lines in the form "Focus: ..." under existing role titles when supported by that role's original responsibilities.`;
+• Add truthful role-positioning lines in the form "Focus: ..." under existing role titles when supported by that role's original responsibilities.
+
+RECRUITER SCREENING GATE — this is the construction standard, not an afterthought:
+Before writing the final CV, internally ask: "Would this CV credibly pass a 30-second recruiter screen for this exact role?"
+If the honest answer is no, rewrite the CV before returning it.
+A credible 30-second screen means:
+• The headline, summary, Core Competencies, Focus lines, and first bullets under relevant roles all tell the same target-role story.
+• The target role is proven through Professional Experience, not only through a skills list.
+• The most important supported JD requirements are visible in the summary and/or first relevant experience bullets.
+• Unsupported JD requirements are not claimed, and adjacent transferable experience is framed honestly.
+• The CV reads like a real candidate with a relevant background, not a keyword-stuffed rewrite.`;
 
     const supported = matchMap.filter(m => m.allowedToMention).map(m => m.requirement);
     const unsupported = matchMap.filter(m => !m.allowedToMention).map(m => m.requirement);
@@ -336,6 +346,17 @@ ${tailoringPlan.roleFocusLines.length ? tailoringPlan.roleFocusLines.map(r => ` 
     • The CV must visibly prioritize the target role, not just lightly swap keywords.
     • Summary, skills, focus lines, and the first bullets under each relevant role must all point toward the target role.
     • Unsupported JD tools may appear only in the missing-skills/review context, never as claimed candidate experience.
+
+RECRUITER SCREENING QUESTION
+  Build the CV so the answer is YES to:
+  "Would this CV credibly pass a 30-second recruiter screen for this exact role?"
+
+  To pass that screen:
+    • The professional summary must explain why this candidate is credible for ${jdData.jobTitle || 'the target role'} using supported CV evidence.
+    • Core Competencies must be scan-friendly and role-specific, but not a dumping ground for JD keywords.
+    • Professional Experience must carry the proof: first bullets under relevant roles should show supported evidence for the JD's most important requirements.
+    • If the candidate lacks direct evidence for a requirement, do not fake it. Show adjacent transferable evidence or omit it.
+    • If the CV would only pass an ATS keyword scan but fail a human recruiter read, rewrite it before final output.
 ${roleCredibilityGuidance ? `\nROLE CREDIBILITY CHECK\n${roleCredibilityGuidance}` : ''}
 
 ORIGINAL CV
@@ -376,6 +397,7 @@ INSTRUCTION
 7. Preserve all locked fields exactly — same spelling, capitalisation, and punctuation.
 8. The final CV must read like a polished CV for "${jdData.jobTitle || 'the target role'}", not like a generic CV and not like generated marketing copy.
 9. Do not make the CV merely keyword-compatible. If the target role is architectural or customer-facing, the summary and first relevant bullets must show supported design authority, technical discovery, stakeholder alignment, implementation planning, or enterprise customer evidence from the original CV.
+10. Final internal check before output: if a recruiter scanning for "${jdData.jobTitle || 'the target role'}" would not immediately see credible role evidence in the summary, Core Competencies, and first relevant experience bullets, rewrite those sections using only supported evidence.
 
 Output the complete tailored CV text with no preamble, no commentary, and no markdown code fences. Begin directly with the candidate's name.`;
 
@@ -395,9 +417,10 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
       .map(m => m.requirement)
       .filter(Boolean);
 
-    const systemPrompt = `You are a strict CV truth-auditor.
+    const systemPrompt = `You are a strict CV truth-auditor and recruiter screen.
 
-Your job is to remove unsupported claims from a tailored CV. You are not improving style. You are checking evidence.
+Your job is to correct the tailored CV until it is both truthful and credible for the target role.
+The corrected CV must answer YES to: "Would this CV credibly pass a 30-second recruiter screen for this exact role?"
 
 Rules:
 - Return the complete corrected CV text only.
@@ -409,7 +432,8 @@ Rules:
 - If a phrase only appears in the JD or target role and has no support, remove it.
 - Never paste JD requirement prose into the skills section.
 - Skills sections must contain short skill phrases only, not sentences, years-of-experience requirements, commute/location requirements, education requirements, or phrases like "track record of...".
-- Do not add new content. Delete or simplify unsupported content.`;
+- Do not add new content. Delete, simplify, reorder, or refocus unsupported content.
+- If the CV reads as keyword-stuffed, under-positioned, or generic for the target role, rewrite the summary, Core Competencies, Focus lines, and first relevant bullets using only supported evidence.`;
 
     const supportedLines = supported.map(item => {
       const evidence = item.confirmedByUser
@@ -440,7 +464,9 @@ TAILORED CV TO AUDIT
 ${tailoredText || ''}
 
 AUDIT INSTRUCTION
-Return a corrected complete CV. Remove any unsupported JD-only skills, methods, responsibilities, tools, metrics, commute/location requirements, years-of-experience requirements, degree requirements, and sales/role requirements that are not evidenced by the original CV or confirmed additions.`;
+Return a corrected complete CV. Remove any unsupported JD-only skills, methods, responsibilities, tools, metrics, commute/location requirements, years-of-experience requirements, degree requirements, and sales/role requirements that are not evidenced by the original CV or confirmed additions.
+
+Then internally apply the recruiter screen: would this CV credibly pass a 30-second human recruiter scan for "${jdData?.jobTitle || 'the target role'}"? If not, refocus the summary, Core Competencies, Focus lines, and first relevant bullets using only supported evidence before returning the final CV.`;
 
     return { systemPrompt, userPrompt, temperature: 0.1 };
   }
@@ -899,6 +925,132 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
   }
 
   /**
+   * Deterministic recruiter screen for the final tailored CV.
+   */
+  buildRecruiterReview(originalCvData = {}, jdData = {}, matchMap = [], tailoredText = '', warnings = [], confirmedSkills = []) {
+    const output = String(tailoredText || '').trim();
+    if (!output) {
+      return {
+        verdict: 'not_ready',
+        overallScore: 0,
+        roleCredibilityScore: 0,
+        jdCoverageScore: 0,
+        readyToSend: false,
+        recruiterSummary: 'No tailored CV text was produced, so a recruiter screen cannot be completed.',
+        sectionScores: {},
+        strengths: [],
+        risks: ['No tailored CV text was produced.'],
+        topFixes: ['Regenerate the tailored CV before exporting or submitting.'],
+        coverage: { matched: 0, partial: 0, confirmed: 0, missing: 0, visibleMatched: 0, hiddenMatched: 0, unsupportedVisible: 0 },
+        roleFamily: jdData?.roleProfile?.family || jdData?.jobTitle || 'Target role',
+      };
+    }
+
+    const safeWarnings = Array.isArray(warnings) ? warnings.filter(Boolean) : [];
+    const profile = jdData?.roleProfile || this.roleProfiles.classify(jdData || {}) || {};
+    const roleFamily = profile.family || jdData?.jobTitle || 'Target role';
+    const reviewableMatchMap = (matchMap || []).filter(m => !this._isRecruiterLowSignalRequirement(m.requirement, m.type));
+    const supported = reviewableMatchMap.filter(m => m.allowedToMention);
+    const missing = reviewableMatchMap.filter(m => !m.allowedToMention);
+    const requiredMissing = missing.filter(m => m.type === 'required');
+    const visibleSupported = supported.filter(m => this._requirementVisibleInText(m.requirement, output));
+    const hiddenSupported = supported.filter(m => !this._requirementVisibleInText(m.requirement, output));
+    const unsupportedVisible = missing.filter(m => this._requirementVisibleInText(m.requirement, output));
+
+    const headline = this._extractHeadline(output);
+    const summaryText = this._extractSectionLines(
+      output,
+      /^professional\s+summary$/i,
+      /^(core\s+competenc(?:y|ies)|professional\s+experience|experience|employment|work\s+history|education|certifications?|skills)$/i
+    ).join(' ');
+    const competencyLines = this._extractSectionLines(
+      output,
+      /^core\s+competenc(?:y|ies)$/i,
+      /^(professional\s+experience|experience|employment|work\s+history|education|certifications?|projects?|skills)$/i
+    );
+    const experienceText = this._extractExperienceText(output);
+    const proofText = `${summaryText} ${experienceText}`;
+    const credibilitySignals = [
+      ...(profile.credibilitySignals || []),
+      ...(jdData?.credibilitySignals || []),
+    ];
+    const signalHits = this._uniqueDisplaySkills(credibilitySignals)
+      .filter(signal => this._conceptVisibleInText(signal, proofText));
+    const visibleInExperience = supported
+      .filter(m => this._requirementVisibleInText(m.requirement, experienceText));
+
+    const sectionScores = {
+      headline: this._sectionScore(
+        this._scoreRecruiterHeadline(headline, jdData),
+        headline ? `Headline: ${headline}` : 'Headline is missing or unclear.'
+      ),
+      summary: this._sectionScore(
+        this._scoreRecruiterSummary(summaryText, jdData, profile, signalHits),
+        signalHits.length ? `Summary proves ${signalHits.slice(0, 3).join(', ')}.` : 'Summary needs clearer role-specific proof.'
+      ),
+      coreCompetencies: this._sectionScore(
+        this._scoreRecruiterCompetencies(competencyLines, output, supported),
+        competencyLines.length ? `${competencyLines.length} competency categories detected.` : 'Core Competencies section is missing.'
+      ),
+      professionalExperience: this._sectionScore(
+        this._scoreRecruiterExperience(experienceText, supported, signalHits),
+        visibleInExperience.length ? `${visibleInExperience.length} matched requirement(s) visible in experience.` : 'Experience section needs stronger visible JD evidence.'
+      ),
+    };
+
+    const roleCredibilityScore = this._clampScore(
+      sectionScores.headline.score * 0.18 +
+      sectionScores.summary.score * 0.27 +
+      sectionScores.coreCompetencies.score * 0.20 +
+      sectionScores.professionalExperience.score * 0.35 -
+      this._roleCredibilityPenalty(safeWarnings)
+    );
+    const visibleRatio = supported.length ? visibleSupported.length / supported.length : 1;
+    const jdCoverageScore = this._clampScore(
+      this._scoreRecruiterMatchCoverage(reviewableMatchMap) * 0.70 +
+      visibleRatio * 100 * 0.30 -
+      unsupportedVisible.length * 10 -
+      Math.max(0, requiredMissing.length - 2) * 4
+    );
+    const trustScore = this._clampScore(100 - this._recruiterWarningPenalty(safeWarnings) - unsupportedVisible.length * 12);
+    const overallScore = this._clampScore(roleCredibilityScore * 0.43 + jdCoverageScore * 0.42 + trustScore * 0.15);
+    const highRiskCount = safeWarnings.filter(w =>
+      /New metric|Unsupported JD skill|without original CV evidence|not read credibly|under-positioned|implementation-only|broken or wrapped|Company name|Job title|Education institution|Email address|Phone number|LinkedIn|Full name/i.test(w)
+    ).length + unsupportedVisible.length;
+    const verdict = this._recruiterVerdict(overallScore, highRiskCount);
+    const readyToSend = verdict === 'strong' || verdict === 'ready_with_edits';
+    const strong = (matchMap || []).filter(m => m.status === 'strong_match');
+    const partial = (matchMap || []).filter(m => m.status === 'partial_match');
+    const confirmed = (matchMap || []).filter(m => m.status === 'user_confirmed');
+    const strengths = this._buildRecruiterStrengths({ signalHits, strong, partial, confirmed, sectionScores, roleFamily });
+    const risks = this._buildRecruiterRisks({ requiredMissing, hiddenSupported, unsupportedVisible, warnings: safeWarnings, roleFamily });
+    const topFixes = this._buildRecruiterTopFixes({ sectionScores, requiredMissing, hiddenSupported, unsupportedVisible, warnings: safeWarnings, jdData });
+
+    return {
+      verdict,
+      overallScore,
+      roleCredibilityScore,
+      jdCoverageScore,
+      readyToSend,
+      recruiterSummary: this._recruiterSummary(verdict, jdData, roleFamily, overallScore, risks),
+      sectionScores,
+      strengths,
+      risks,
+      topFixes,
+      coverage: {
+        matched: strong.length,
+        partial: partial.length,
+        confirmed: confirmed.length,
+        missing: missing.length,
+        visibleMatched: visibleSupported.length,
+        hiddenMatched: hiddenSupported.length,
+        unsupportedVisible: unsupportedVisible.length,
+      },
+      roleFamily,
+    };
+  }
+
+  /**
    * Detect which sections changed between original and tailored text.
    * @returns {string[]} section names
    */
@@ -926,6 +1078,240 @@ Return a corrected complete CV. Remove any unsupported JD-only skills, methods, 
   }
 
   // ── private helpers ──────────────────────────────────────────────────────
+
+  _scoreRecruiterHeadline(headline = '', jdData = {}) {
+    const target = String(jdData?.jobTitle || '').trim();
+    if (!headline) return 20;
+    if (!target) return 75;
+
+    const headlineNorm = this._normaliseText(headline);
+    const targetNorm = this._normaliseText(target);
+    if (headlineNorm === targetNorm || headlineNorm.includes(targetNorm)) return 100;
+
+    const targetTokens = this._getCoreTokens(target);
+    if (targetTokens.length === 0) return 75;
+    const hits = targetTokens.filter(tok => headlineNorm.includes(tok)).length;
+    const ratio = hits / targetTokens.length;
+    if (ratio >= 0.75) return 85;
+    if (ratio >= 0.5) return 65;
+    return 40;
+  }
+
+  _scoreRecruiterSummary(summaryText = '', jdData = {}, profile = {}, signalHits = []) {
+    const words = String(summaryText || '').trim().split(/\s+/).filter(Boolean).length;
+    if (!words) return 20;
+
+    let score = 45;
+    if (words >= 35 && words <= 120) score += 15;
+    else if (words >= 20 && words <= 160) score += 8;
+
+    const targetText = this._normaliseText([
+      jdData?.jobTitle,
+      jdData?.targetPositioning,
+      profile?.family,
+      ...(jdData?.atsKeywords || []).slice(0, 8),
+    ].join(' '));
+    const summaryNorm = this._normaliseText(summaryText);
+    const targetTokens = [...new Set(targetText.split(/\s+/).filter(t => t.length >= 4 && !this._noiseWords().has(t)))].slice(0, 12);
+    const targetHits = targetTokens.filter(tok => summaryNorm.includes(tok)).length;
+    if (targetTokens.length > 0) score += Math.min(18, Math.round((targetHits / targetTokens.length) * 18));
+
+    score += Math.min(25, signalHits.length * 9);
+    if (/\b(results[- ]driven|dynamic|passionate|hard[- ]working|self[- ]starter)\b/i.test(summaryText)) score -= 8;
+    if (/\btailored for|customi[sz]ed for|this application\b/i.test(summaryText)) score -= 20;
+    return this._clampScore(score);
+  }
+
+  _scoreRecruiterCompetencies(lines = [], output = '', supported = []) {
+    if (!lines.length) return 20;
+
+    let score = 25;
+    if (lines.length >= 5 && lines.length <= 7) score += 35;
+    else if (lines.length >= 4) score += 20;
+    else score += 5;
+
+    if (!this._hasBrokenCompetencyLine(lines)) score += 15;
+    if (!lines.some(line => /\bbusiness communication skills\b/i.test(line))) score += 8;
+    if (!lines.some(line => /^additional\s+(?:relevant\s+)?skills\s*:/i.test(line))) score += 8;
+    if (!lines.some(line => this._isJdRequirementProse(line) || this._isRequirementFragment(line))) score += 8;
+
+    const visibleSupported = supported
+      .slice(0, 12)
+      .filter(item => this._requirementVisibleInText(item.requirement, output));
+    if (supported.length > 0) score += Math.min(12, visibleSupported.length * 2);
+
+    return this._clampScore(score);
+  }
+
+  _scoreRecruiterExperience(experienceText = '', supported = [], signalHits = []) {
+    const words = String(experienceText || '').trim().split(/\s+/).filter(Boolean).length;
+    if (!words) return 20;
+
+    let score = words >= 120 ? 48 : 42;
+    const visible = supported.filter(item => this._requirementVisibleInText(item.requirement, experienceText));
+    score += Math.min(34, visible.length * 6);
+    score += Math.min(18, signalHits.length * 6);
+    if (/^focus\s*:/im.test(experienceText)) score += 7;
+    if (words < 50) score -= 8;
+    return this._clampScore(score);
+  }
+
+  _sectionScore(score, note = '') {
+    const value = this._clampScore(score);
+    return {
+      score: value,
+      status: value >= 80 ? 'strong' : value >= 60 ? 'needs_review' : 'weak',
+      note,
+    };
+  }
+
+  _clampScore(value) {
+    return Math.max(0, Math.min(100, Math.round(Number.isFinite(value) ? value : 0)));
+  }
+
+  _requirementVisibleInText(requirement = '', text = '') {
+    const source = String(text || '');
+    if (!requirement || !source) return false;
+    if (this._findEvidence(requirement, [source]).length > 0) return true;
+    if (this._findSemanticEvidence(requirement, [source]).length > 0) return true;
+
+    const tokens = this._getCoreTokens(requirement);
+    if (tokens.length === 0 || tokens.length > 8) return false;
+    const lower = this._normaliseText(source);
+    const hits = tokens.filter(tok => lower.includes(tok) || this._semanticTokenSupported(tok, source)).length;
+    const needed = tokens.length <= 2 ? tokens.length : Math.ceil(tokens.length * 0.65);
+    return hits >= needed;
+  }
+
+  _conceptVisibleInText(concept = '', text = '') {
+    if (!concept || !text) return false;
+    const lower = this._normaliseText(text);
+    const conceptNorm = this._normaliseText(concept);
+    if (conceptNorm && lower.includes(conceptNorm)) return true;
+    const aliases = this._semanticAliasesForRequirement(concept);
+    if (aliases.some(alias => lower.includes(this._normaliseText(alias)))) return true;
+    const tokens = this._getCoreTokens(concept);
+    if (tokens.length === 0) return false;
+    const hits = tokens.filter(tok => lower.includes(tok) || this._semanticTokenSupported(tok, text)).length;
+    return hits >= Math.min(tokens.length, 2);
+  }
+
+  _scoreRecruiterMatchCoverage(matchMap = []) {
+    if (!matchMap.length) return 0;
+
+    const required = matchMap.filter(m => m.type === 'required');
+    const strong = matchMap.filter(m => m.status === 'strong_match');
+    const partial = matchMap.filter(m => m.status === 'partial_match');
+    const confirmed = matchMap.filter(m => m.status === 'user_confirmed');
+    const reqTotal = required.length || 1;
+    const reqMatched = required.filter(m => m.status !== 'missing').length;
+    const allTotal = matchMap.length || 1;
+    const allMatched = strong.length + confirmed.length + partial.length * 0.5;
+    return this._clampScore(
+      ((reqMatched / reqTotal) * 0.7 + (allMatched / allTotal) * 0.3) * 100
+    );
+  }
+
+  _isRecruiterLowSignalRequirement(requirement = '', type = '') {
+    const text = this._normaliseText(requirement);
+    if (!text) return true;
+    if (/\b\d+\s*\+?\s*years?\b/.test(text)) return true;
+    if (/\b(years?|experience|minimum|least|required)\b/.test(text) && text.split(/\s+/).length <= 5) return true;
+
+    const genericSoft = new Set([
+      'communication', 'teamwork', 'collaboration', 'leadership', 'ownership',
+      'problem solving', 'stakeholder management', 'cross functional collaboration',
+    ]);
+    if (type === 'soft' && genericSoft.has(text)) return true;
+    return false;
+  }
+
+  _roleCredibilityPenalty(warnings = []) {
+    return warnings.reduce((sum, warning) => {
+      if (/not read credibly|under-positioned|implementation-only|skills rather than supported experience|High-risk|without original CV evidence/i.test(warning)) return sum + 10;
+      if (/Role focus line|Core Competencies|Target job title/i.test(warning)) return sum + 5;
+      return sum;
+    }, 0);
+  }
+
+  _recruiterWarningPenalty(warnings = []) {
+    return warnings.reduce((sum, warning) => {
+      if (/New metric|Company name|Job title|Education institution|Email address|Phone number|LinkedIn|Full name/i.test(warning)) return sum + 15;
+      if (/Unsupported JD skill|without original CV evidence|not read credibly|under-positioned|implementation-only/i.test(warning)) return sum + 10;
+      if (/Core Competencies|Role focus line|User-confirmed skill/i.test(warning)) return sum + 5;
+      return sum + 2;
+    }, 0);
+  }
+
+  _recruiterVerdict(score, highRiskCount = 0) {
+    if (score >= 85 && highRiskCount === 0) return 'strong';
+    if (score >= 72 && highRiskCount <= 1) return 'ready_with_edits';
+    if (score >= 55) return 'borderline';
+    return 'not_ready';
+  }
+
+  _recruiterSummary(verdict, jdData = {}, roleFamily = 'target role', score = 0, risks = []) {
+    const target = jdData?.jobTitle || roleFamily || 'the target role';
+    if (verdict === 'strong') {
+      return `Strong recruiter fit for ${target}: the CV visibly connects supported experience to the JD and should survive a quick human screen.`;
+    }
+    if (verdict === 'ready_with_edits') {
+      return `Credible for ${target}, but review the flagged edits before sending. Recruiter score: ${score}%.`;
+    }
+    if (verdict === 'borderline') {
+      const reason = risks[0] ? ` Main concern: ${risks[0]}` : '';
+      return `Borderline for ${target}: the CV has relevant evidence but does not yet read consistently role-ready.${reason}`;
+    }
+    return `Not ready for ${target}: the CV needs stronger supported evidence before it is safe to send.`;
+  }
+
+  _buildRecruiterStrengths({ signalHits = [], strong = [], partial = [], confirmed = [], sectionScores = {}, roleFamily = 'Target role' }) {
+    const strengths = [];
+    if (signalHits.length > 0) strengths.push(`Visible ${roleFamily} proof: ${signalHits.slice(0, 4).join(', ')}.`);
+    if (strong.length > 0) strengths.push(`Strong evidence for: ${strong.slice(0, 4).map(m => m.requirement).join(', ')}.`);
+    if (partial.length > 0) strengths.push(`Transferable evidence for: ${partial.slice(0, 3).map(m => m.requirement).join(', ')}.`);
+    if (confirmed.length > 0) strengths.push(`User-confirmed additions included: ${confirmed.slice(0, 3).map(m => m.requirement).join(', ')}.`);
+    if (sectionScores.coreCompetencies?.score >= 80) strengths.push('Core Competencies are formatted for fast recruiter scanning.');
+    if (sectionScores.professionalExperience?.score >= 80) strengths.push('Professional Experience shows role-relevant evidence, not just skills.');
+    return strengths.slice(0, 5);
+  }
+
+  _buildRecruiterRisks({ requiredMissing = [], hiddenSupported = [], unsupportedVisible = [], warnings = [], roleFamily = 'Target role' }) {
+    const risks = [];
+    if (requiredMissing.length > 0) {
+      risks.push(`Missing required JD evidence: ${requiredMissing.slice(0, 3).map(m => m.requirement).join(', ')}.`);
+    }
+    if (hiddenSupported.length > 0) {
+      risks.push(`Matched evidence is not visible enough in the final CV: ${hiddenSupported.slice(0, 3).map(m => m.requirement).join(', ')}.`);
+    }
+    if (unsupportedVisible.length > 0) {
+      risks.push(`Unsupported claims appear in the CV: ${unsupportedVisible.slice(0, 3).map(m => m.requirement).join(', ')}.`);
+    }
+    const credibilityWarning = warnings.find(w => /not read credibly|under-positioned|implementation-only|skills rather than supported experience|High-risk/i.test(w));
+    if (credibilityWarning) risks.push(`${roleFamily} credibility risk: ${credibilityWarning}`);
+    const accuracyWarning = warnings.find(w => /New metric|Company name|Job title|Education institution|Email address|Phone number|LinkedIn|Full name/i.test(w));
+    if (accuracyWarning) risks.push(`Accuracy risk: ${accuracyWarning}`);
+    return [...new Set(risks)].slice(0, 5);
+  }
+
+  _buildRecruiterTopFixes({ sectionScores = {}, requiredMissing = [], hiddenSupported = [], unsupportedVisible = [], warnings = [], jdData = {} }) {
+    const fixes = [];
+    const target = jdData?.jobTitle || 'the target role';
+    if (sectionScores.headline?.score < 80) fixes.push(`Set the headline directly to "${target}" if that is the role being targeted.`);
+    if (sectionScores.summary?.score < 75) fixes.push('Rewrite the summary so it proves the target role with supported evidence from the CV.');
+    if (sectionScores.professionalExperience?.score < 75) fixes.push('Move the strongest matching experience bullets to the top of each relevant role.');
+    if (sectionScores.coreCompetencies?.score < 75) fixes.push('Rebuild Core Competencies into 5-7 complete "Category: Skill, Skill" lines.');
+    if (hiddenSupported.length > 0) fixes.push(`Make matched evidence visible in the final CV: ${hiddenSupported.slice(0, 3).map(m => m.requirement).join(', ')}.`);
+    if (requiredMissing.length > 0) fixes.push(`Do not claim missing required skills unless genuinely true: ${requiredMissing.slice(0, 3).map(m => m.requirement).join(', ')}.`);
+    if (unsupportedVisible.length > 0) fixes.push(`Remove unsupported JD-only claims: ${unsupportedVisible.slice(0, 3).map(m => m.requirement).join(', ')}.`);
+    for (const warning of warnings) {
+      if (fixes.length >= 6) break;
+      if (/New metric/.test(warning)) fixes.push('Verify or remove any new metrics that were not present in the original CV.');
+      else if (/Core Competencies/.test(warning)) fixes.push('Fix the Core Competencies warning before export.');
+      else if (/not read credibly|under-positioned|implementation-only/.test(warning)) fixes.push('Strengthen role credibility in the headline, summary, and first relevant experience bullets.');
+    }
+    return [...new Set(fixes)].slice(0, 6);
+  }
 
   _buildRoleCredibilityGuidance(jdData = {}) {
     return this.roleProfiles.buildCredibilityGuidance(jdData) || '';

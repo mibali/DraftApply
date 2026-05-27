@@ -11,15 +11,23 @@ import { pathToFileURL } from 'url';
 import { CVParser } from '../shared/cv-parser.js';
 import { JDParser } from '../shared/jd-parser.js';
 import { CVTailor } from '../shared/cv-tailor.js';
+import {
+  OpenRouterFreeModelCache,
+  PREFERRED_OPENROUTER_FREE_MODELS,
+  buildOpenRouterFallbackModelOrder,
+  isRetryableOpenRouterModelError,
+  shouldUseOpenRouterFallback,
+} from './llm-fallback.js';
 
 const PORT = Number(process.env.PORT || 10000);
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct';
 const OPENROUTER_SITE_URL = process.env.OPENROUTER_SITE_URL || 'https://draftapply.com';
 const OPENROUTER_APP_NAME = process.env.OPENROUTER_APP_NAME || 'DraftApply';
 const OPENROUTER_TAILOR_FALLBACK = !/^false$/i.test(process.env.OPENROUTER_TAILOR_FALLBACK || 'true');
+const OPENROUTER_MODEL_CACHE_TTL_MS = Number(process.env.OPENROUTER_MODEL_CACHE_TTL_MS || 10 * 60 * 1000);
+const OPENROUTER_MAX_FALLBACK_MODELS = Math.max(1, Number(process.env.OPENROUTER_MAX_FALLBACK_MODELS || 6));
 const TOKEN_SECRET = process.env.TOKEN_SECRET;
 
 // Recipe module – default is the bundled open-source recipe. Set RECIPE_PATH to override.
@@ -96,15 +104,22 @@ function getBearerToken(req) {
 }
 
 class LLMProviderError extends Error {
-  constructor(provider, status, detail = '', retryAfterMs = null) {
+  constructor(provider, status, detail = '', retryAfterMs = null, model = null) {
     super(`${provider} request failed${status ? ` (${status})` : ''}`);
     this.name = 'LLMProviderError';
     this.provider = provider;
     this.status = status;
     this.detail = detail;
     this.retryAfterMs = retryAfterMs;
+    this.model = model;
   }
 }
+
+const openRouterModelCache = new OpenRouterFreeModelCache({
+  fetchFn: fetch,
+  apiKey: OPENROUTER_API_KEY,
+  ttlMs: Number.isFinite(OPENROUTER_MODEL_CACHE_TTL_MS) ? OPENROUTER_MODEL_CACHE_TTL_MS : 10 * 60 * 1000,
+});
 
 function formatRetryAfter(ms) {
   const value = Number(ms);
@@ -167,10 +182,16 @@ function retryAfterMsFromProviderDetail(detail = '') {
   return ms > 0 ? ms : null;
 }
 
-function isRetryableLLMError(error) {
-  if (error?.name === 'AbortError') return true;
-  const status = Number(error?.status);
-  return status === 429 || status === 408 || status >= 500;
+function logLLMAttempt({ provider, model, attempt, outcome, status, fallbackFrom, elapsedMs }) {
+  console.info('[DraftApply] llm_attempt', JSON.stringify({
+    provider,
+    model,
+    attempt,
+    outcome,
+    status: status || undefined,
+    fallbackFrom: fallbackFrom || undefined,
+    elapsedMs,
+  }));
 }
 
 function llmErrorResponse(error, context = {}) {
@@ -204,7 +225,7 @@ function llmErrorResponse(error, context = {}) {
   };
 }
 
-function llmProviderConfig(provider) {
+function llmProviderConfig(provider, model) {
   if (provider === 'groq') {
     return {
       provider,
@@ -218,7 +239,7 @@ function llmProviderConfig(provider) {
   return {
     provider: 'openrouter',
     apiKey: OPENROUTER_API_KEY,
-    model: OPENROUTER_MODEL,
+    model,
     url: 'https://openrouter.ai/api/v1/chat/completions',
     headers: {
       'HTTP-Referer': OPENROUTER_SITE_URL,
@@ -233,14 +254,21 @@ async function callProviderChat(provider, {
   maxTokens,
   stream = false,
   timeoutMs = 60000,
+  model,
+  attempt = 1,
+  fallbackFrom = null,
 }) {
-  const config = llmProviderConfig(provider);
+  const config = llmProviderConfig(provider, model);
   if (!config.apiKey) {
-    throw new LLMProviderError(provider, 0, 'Missing API key');
+    throw new LLMProviderError(provider, 0, 'Missing API key', null, config.model);
+  }
+  if (!config.model) {
+    throw new LLMProviderError(provider, 0, 'Missing model', null, config.model);
   }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const startedAt = Date.now();
   try {
     const response = await fetch(config.url, {
       method: 'POST',
@@ -262,31 +290,82 @@ async function callProviderChat(provider, {
     if (!response.ok) {
       const text = await response.text().catch(() => '');
       const retryAfterMs = retryAfterMsFromHeaders(response.headers) ?? retryAfterMsFromProviderDetail(text);
-      throw new LLMProviderError(provider, response.status, text.slice(0, 500), retryAfterMs);
+      logLLMAttempt({ provider, model: config.model, attempt, outcome: 'error', status: response.status, fallbackFrom, elapsedMs: Date.now() - startedAt });
+      throw new LLMProviderError(provider, response.status, text.slice(0, 500), retryAfterMs, config.model);
     }
 
+    logLLMAttempt({ provider, model: config.model, attempt, outcome: 'success', fallbackFrom, elapsedMs: Date.now() - startedAt });
     return { response, provider: config.provider, model: config.model };
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      logLLMAttempt({ provider, model: config.model, attempt, outcome: 'timeout', fallbackFrom, elapsedMs: Date.now() - startedAt });
+    }
+    throw error;
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function getOpenRouterFallbackModelOrder() {
+  const models = await openRouterModelCache.getModels();
+  return buildOpenRouterFallbackModelOrder(models, PREFERRED_OPENROUTER_FREE_MODELS)
+    .slice(0, OPENROUTER_MAX_FALLBACK_MODELS);
+}
+
+async function callOpenRouterFreeFallback(options, { callStart, fallbackFrom = 'groq' } = {}) {
+  let orderedModels;
+  try {
+    orderedModels = await getOpenRouterFallbackModelOrder();
+  } catch (error) {
+    throw new LLMProviderError('openrouter', 0, error.message || 'Could not load OpenRouter free model catalogue');
+  }
+  if (orderedModels.length === 0) {
+    throw new LLMProviderError('openrouter', 0, 'No free OpenRouter text models are currently available');
+  }
+
+  let lastError = null;
+  for (let i = 0; i < orderedModels.length; i += 1) {
+    const model = orderedModels[i];
+    const elapsed = Date.now() - callStart;
+    const timeoutMs = Math.max(8000, (options.timeoutMs || 60000) - elapsed);
+    try {
+      return {
+        ...(await callProviderChat('openrouter', {
+          ...options,
+          model,
+          timeoutMs,
+          attempt: i + 1,
+          fallbackFrom,
+        })),
+        fallbackFrom,
+      };
+    } catch (error) {
+      lastError = error;
+      if (Number(error?.status) === 401 || Number(error?.status) === 403) throw error;
+      if (!isRetryableOpenRouterModelError(error)) throw error;
+      console.warn(`[DraftApply] OpenRouter model ${model} failed (${error.status || error.name || 'error'}); trying next free model.`);
+    }
+  }
+
+  throw lastError || new LLMProviderError('openrouter', 0, 'All OpenRouter free models failed');
 }
 
 async function callChatCompletionWithFallback(options) {
   const primary = GROQ_API_KEY ? 'groq' : 'openrouter';
   const callStart = Date.now();
   try {
-    return { ...(await callProviderChat(primary, options)), fallbackFrom: null };
+    if (primary === 'openrouter') return { ...(await callOpenRouterFreeFallback(options, { callStart, fallbackFrom: null })), fallbackFrom: null };
+    return { ...(await callProviderChat(primary, { ...options, attempt: 1 })), fallbackFrom: null };
   } catch (error) {
-    const canFallback = options.allowFallback !== false && primary === 'groq' && OPENROUTER_API_KEY && isRetryableLLMError(error);
+    const canFallback = shouldUseOpenRouterFallback(error, {
+      primary,
+      hasOpenRouter: Boolean(OPENROUTER_API_KEY),
+      allowFallback: options.allowFallback,
+    });
     if (!canFallback) throw error;
 
-    console.warn(`[DraftApply] Groq ${error.status || error.name || 'error'}; falling back to OpenRouter.`);
-    // Give the fallback only the time remaining from the original budget — prevents
-    // AbortError scenarios from doubling the wall-clock time (Groq 60s + OR 60s = 120s).
-    // For fast Groq failures (429), elapsed ≈ 0 so OpenRouter gets the full budget.
-    const elapsed = Date.now() - callStart;
-    const fallbackTimeout = Math.max(8000, (options.timeoutMs || 60000) - elapsed);
-    return { ...(await callProviderChat('openrouter', { ...options, timeoutMs: fallbackTimeout })), fallbackFrom: primary };
+    console.warn(`[DraftApply] Groq ${error.status || error.name || 'error'}; falling back to OpenRouter free models.`);
+    return callOpenRouterFreeFallback(options, { callStart, fallbackFrom: primary });
   }
 }
 
@@ -321,9 +400,10 @@ app.get('/api/health', (req, res) => {
   res.json({
     ok: true,
     provider: GROQ_API_KEY ? 'groq' : 'openrouter',
-    model: GROQ_API_KEY ? GROQ_MODEL : OPENROUTER_MODEL,
+    model: GROQ_API_KEY ? GROQ_MODEL : 'openrouter-free-dynamic',
     fallbackProvider: GROQ_API_KEY && OPENROUTER_API_KEY ? 'openrouter' : null,
-    fallbackModel: GROQ_API_KEY && OPENROUTER_API_KEY ? OPENROUTER_MODEL : null,
+    fallbackModel: GROQ_API_KEY && OPENROUTER_API_KEY ? 'openrouter-free-dynamic' : null,
+    fallbackModelPreference: GROQ_API_KEY && OPENROUTER_API_KEY ? PREFERRED_OPENROUTER_FREE_MODELS : [],
   });
 });
 
@@ -535,6 +615,9 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-DraftApply-Provider', completion.provider);
+      res.setHeader('X-DraftApply-Model', completion.model);
+      if (completion.fallbackFrom) res.setHeader('X-DraftApply-Fallback-From', completion.fallbackFrom);
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -910,8 +993,25 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
     ];
     const changedSections = tailor.detectChangedSections(cvText, tailoredCvText);
     const matchReport     = tailor.buildMatchSummary(matchMap);
+    const recruiterReview = tailor.buildRecruiterReview(
+      cvData,
+      jdData,
+      matchMap,
+      tailoredCvText,
+      warnings,
+      confirmedSkills
+    );
 
-    res.json({ tailoredCvText, matchReport, warnings, changedSections, provider: tailorProvider, fallbackFrom: completion.fallbackFrom || undefined });
+    res.json({
+      tailoredCvText,
+      matchReport,
+      recruiterReview,
+      warnings,
+      changedSections,
+      provider: tailorProvider,
+      model: completion.model,
+      fallbackFrom: completion.fallbackFrom || undefined
+    });
   } catch (e) {
     if (e?.name === 'AbortError') {
       return res.status(504).json({ error: 'AI service timed out. Please try again.' });

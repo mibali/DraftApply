@@ -763,14 +763,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function displayTailorResults(result) {
-    const { tailoredCvText, matchReport, warnings, provider, fallbackFrom } = result;
+    const { tailoredCvText, matchReport, warnings, provider, fallbackFrom, model } = result;
     displayMatchReport(matchReport, { reviewMode: false, domainSuggestions: [] });
 
     const badge = document.getElementById('tailor-provider-badge');
     if (badge) {
       if (provider) {
         badge.textContent = fallbackFrom
-          ? `${provider === 'openrouter' ? 'OpenRouter' : provider} fallback from ${fallbackFrom === 'groq' ? 'Groq' : fallbackFrom}`
+          ? `${provider === 'openrouter' ? 'OpenRouter' : provider} fallback from ${fallbackFrom === 'groq' ? 'Groq' : fallbackFrom}${model ? ` (${model})` : ''}`
           : (provider === 'openrouter' ? 'OpenRouter' : 'Groq');
         badge.style.background = provider === 'openrouter' ? '#fef3c7' : '#d1fae5';
         badge.style.color = provider === 'openrouter' ? '#92400e' : '#065f46';
