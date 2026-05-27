@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-05-27",
+  "sources": [
+    {
+      "id": "bls-oews",
+      "name": "BLS Occupational Employment and Wage Statistics (OEWS)",
+      "country": "US",
+      "cadence": "annual",
+      "officialLandingUrl": "https://www.bls.gov/oes/",
+      "officialDownloadNotes": "Use BLS-provided downloadable tables/files only (e.g., national/state/metropolitan OEWS downloads). Save raw files under shared/data-sources/salary/raw/.",
+      "expectedRawFiles": [],
+      "licenseNotes": "US government work (public domain), but verify BLS-specific terms for redistribution of derived tables."
+    },
+    {
+      "id": "ons-ashe",
+      "name": "ONS Annual Survey of Hours and Earnings (ASHE)",
+      "country": "UK",
+      "cadence": "annual",
+      "officialLandingUrl": "https://www.ons.gov.uk/employmentandlabourmarket/peopleinwork/earningsandworkinghours",
+      "officialDownloadNotes": "Use ONS-provided downloadable ASHE tables only (typically XLS/XLSX/ZIP). Save raw files under shared/data-sources/salary/raw/.",
+      "expectedRawFiles": [],
+      "licenseNotes": "ONS content is typically under the Open Government Licence (OGL); confirm for each download."
+    },
+    {
+      "id": "esco",
+      "name": "ESCO Occupation Classification",
+      "country": "EU",
+      "cadence": "periodic",
+      "officialLandingUrl": "https://esco.ec.europa.eu/en/use-esco/download",
+      "officialDownloadNotes": "ESCO is used for title normalisation/mapping only (not a salary source). If used, store raw exports under shared/data-sources/salary/raw/.",
+      "expectedRawFiles": [],
+      "licenseNotes": "Check ESCO licensing for redistribution of derived mappings."
+    }
+  ]
+}
+

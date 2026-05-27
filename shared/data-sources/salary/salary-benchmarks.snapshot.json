@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-05-27",
+  "generation": {
+    "tool": "scripts/refresh-salary-benchmarks.js",
+    "retrievedAt": null,
+    "notes": "No official raw datasets are committed. Download official files into shared/data-sources/salary/raw/ and re-run the refresh script."
+  },
+  "sources": [
+    {
+      "id": "ons-ashe",
+      "name": "ONS Annual Survey of Hours and Earnings",
+      "country": "UK",
+      "url": "https://www.ons.gov.uk/employmentandlabourmarket/peopleinwork/earningsandworkinghours",
+      "cadence": "annual",
+      "release": null,
+      "retrievedAt": null,
+      "sha256": null
+    },
+    {
+      "id": "bls-oews",
+      "name": "BLS Occupational Employment and Wage Statistics",
+      "country": "US",
+      "url": "https://www.bls.gov/oes/",
+      "cadence": "annual",
+      "release": null,
+      "retrievedAt": null,
+      "sha256": null
+    },
+    {
+      "id": "esco",
+      "name": "ESCO Occupation Classification",
+      "country": "EU",
+      "url": "https://esco.ec.europa.eu/en/use-esco/download",
+      "cadence": "periodic",
+      "release": null,
+      "retrievedAt": null,
+      "sha256": null
+    }
+  ],
+  "benchmarks": []
+}
+

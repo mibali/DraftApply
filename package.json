@@ -8,6 +8,7 @@
     "dev": "npm run dev --prefix backend",
     "serve-frontend": "npx serve frontend -p 3000",
     "install-all": "npm install --prefix backend",
+    "refresh:salary-benchmarks": "node scripts/refresh-salary-benchmarks.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",

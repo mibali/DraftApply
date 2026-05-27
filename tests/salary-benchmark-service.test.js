@@ -3,11 +3,12 @@ import { SalaryBenchmarkService } from '../shared/salary-benchmark-service.js';
 import { SALARY_BENCHMARKS } from '../shared/salary-benchmarks.js';
 
 describe('SalaryBenchmarkService', () => {
-  it('ships official-source metadata without hand-entered salary rows', () => {
+  it('ships official-source metadata and a compact snapshot (may be empty until refreshed)', () => {
+    expect(SALARY_BENCHMARKS.schemaVersion).toBe(1);
     expect(SALARY_BENCHMARKS.sources.map(source => source.id)).toEqual(
       expect.arrayContaining(['ons-ashe', 'bls-oews', 'esco'])
     );
-    expect(SALARY_BENCHMARKS.benchmarks).toEqual([]);
+    expect(Array.isArray(SALARY_BENCHMARKS.benchmarks)).toBe(true);
     expect(new SalaryBenchmarkService().hasOfficialSnapshot()).toBe(false);
   });
 

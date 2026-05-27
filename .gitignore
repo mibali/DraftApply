@@ -29,6 +29,9 @@ coverage/
 # Artifacts
 *.zip
 
+# Official dataset downloads (do not commit)
+shared/data-sources/salary/raw/
+
 # Chrome extension packaging (do not commit private keys)
 *.crx
 *.pem

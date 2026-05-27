@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-05-27",
+  "notes": "Minimal deterministic mapping from official occupation codes/titles to DraftApply role profile IDs. Extend only when sourced from an official taxonomy release.",
+  "mappings": {
+    "US": {
+      "bls-oews": {}
+    },
+    "UK": {
+      "ons-ashe": {}
+    }
+  }
+}
+
