@@ -145,7 +145,7 @@ export const ROLE_PROFILES = [
       /\betl\s+developer\b/i,
     ],
     credibilitySignals: ['data pipelines', 'ETL/ELT delivery', 'data modelling', 'data quality', 'warehouse performance', 'reliable datasets'],
-    evidencePatterns: [/\b(?:etl|elt)\b/i, /\bpipeline\b/i, /\bdata\s+model/i, /\bwarehouse\b/i, /\b(sql|postgres|mysql|snowflake|bigquery|redshift)\b/i, /\b(airflow|prefect|dagster)\b/i, /\bdbt\b/i],
+    evidencePatterns: [/\betl|elt\b/i, /\bpipeline\b/i, /\bdata\s+model/i, /\bwarehouse\b/i, /\b(sql|postgres|mysql|snowflake|bigquery|redshift)\b/i, /\bairflow|prefect|dagster\b/i, /\bdbt\b/i],
     riskClaims: ['enterprise data strategy ownership', 'org-wide data governance ownership', 'security/compliance sign-off', '24/7 production on-call'],
     transferableEvidence: ['backend engineering -> data service reliability', 'analytics/reporting -> dataset quality improvement', 'platform engineering -> workflow orchestration and observability'],
     skillCategories: [
