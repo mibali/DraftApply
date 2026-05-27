@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import vm from 'node:vm';
 import { describe, expect, it } from 'vitest';
 
 const popupHtml = fs.readFileSync(new URL('../extension-ready/popup.html', import.meta.url), 'utf8');
@@ -6,6 +7,14 @@ const popupJs = fs.readFileSync(new URL('../extension-ready/popup.js', import.me
 const contentJs = fs.readFileSync(new URL('../extension-ready/content.js', import.meta.url), 'utf8');
 const contentCss = fs.readFileSync(new URL('../extension-ready/content.css', import.meta.url), 'utf8');
 const backgroundJs = fs.readFileSync(new URL('../extension-ready/background.js', import.meta.url), 'utf8');
+
+function loadExtractCvContactUrls() {
+  const match = popupJs.match(/function extractCvContactUrls\(text\) \{[\s\S]*?\n  \}/);
+  if (!match) throw new Error('extractCvContactUrls not found');
+  const sandbox = {};
+  vm.runInNewContext(`${match[0]}\nglobalThis.__extractCvContactUrls = extractCvContactUrls;`, sandbox);
+  return sandbox.__extractCvContactUrls;
+}
 
 describe('popup productivity stats UI', () => {
   it('renders the empty collapsed state', () => {
@@ -89,5 +98,18 @@ describe('popup productivity stats UI', () => {
     expect(contentJs).toContain('fieldsInAncestor > 1');
     expect(contentJs).toContain('labelTextWithoutControls');
     expect(contentJs).toContain("field.closest?.('label')");
+  });
+
+  it('extracts bare portfolio domains without treating emails as websites', () => {
+    const extractCvContactUrls = loadExtractCvContactUrls();
+    const urls = extractCvContactUrls(`Jane Doe
+jane@example.xyz
+linkedin.com/in/janedoe
+github.com/janedoe
+portfolio.xyz/work`);
+
+    expect(urls.linkedin).toBe('https://linkedin.com/in/janedoe');
+    expect(urls.github).toBe('https://github.com/janedoe');
+    expect(urls.website).toBe('https://portfolio.xyz/work');
   });
 });
