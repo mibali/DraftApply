@@ -22,6 +22,8 @@ describe('RoleProfileService', () => {
     expect(service.classify({ jobTitle: 'Digital Marketing Manager' })?.id).toBe('marketing');
     expect(service.classify({ jobTitle: 'HR Business Partner' })?.id).toBe('hr_people');
     expect(service.classify({ jobTitle: 'Healthcare Administrator' })?.id).toBe('healthcare_admin');
+    expect(service.classify({ jobTitle: 'Information Security Analyst' })?.id).toBe('security_analyst');
+    expect(service.classify({ jobTitle: 'Systems Administrator' })?.id).toBe('systems_administrator');
   });
 
   it('classifies data-engineering job titles into the data engineering role profile', () => {
@@ -29,6 +31,11 @@ describe('RoleProfileService', () => {
     expect(service.classify({ jobTitle: 'Database Architect' })?.id).toBe('data_engineer');
     expect(service.classify({ jobTitle: 'ETL Developer' })?.id).toBe('data_engineer');
     expect(service.enrichJDData({ jobTitle: 'Data Engineer' }).domain).toBe('data_engineering');
+  });
+
+  it('enriches JD data for security and IT operations roles with consistent domains', () => {
+    expect(service.enrichJDData({ jobTitle: 'Security Analyst' }).domain).toBe('cybersecurity');
+    expect(service.enrichJDData({ jobTitle: 'Network Administrator' }).domain).toBe('it_operations');
   });
 
   it('enriches parsed JD data with positioning, credibility signals, risks, and skill categories', () => {
