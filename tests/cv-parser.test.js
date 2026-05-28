@@ -102,4 +102,74 @@ MSc Computer Science`);
     expect(cv.experience[0].company).not.toMatch(/Designed Kubernetes/i);
     expect(cv.experience[0].title).not.toMatch(/Reduced incident/i);
   });
+
+  it('does not classify a company name containing "Solutions" as a job title', () => {
+    const cv = new CVParser().parse(`Sam Okafor
+sam@example.com
+
+PROFESSIONAL EXPERIENCE
+Bincom ICT Solutions
+March 2019 - January 2022
+Software Developer
+- Built internal tools and REST APIs
+
+EDUCATION
+BSc Computer Science`);
+
+    expect(cv.experience[0]).toMatchObject({
+      company: 'Bincom ICT Solutions',
+      title: 'Software Developer',
+    });
+  });
+
+  it('does not classify a company name with a legal suffix as a job title', () => {
+    const parser = new CVParser();
+    expect(parser._isLikelyJobTitle('Bincom ICT Solutions')).toBe(false);
+    expect(parser._isLikelyJobTitle('Acme Technologies')).toBe(false);
+    expect(parser._isLikelyJobTitle('Ventures Holdings Ltd')).toBe(false);
+    expect(parser._isLikelyJobTitle('Sourcegraph, USA')).toBe(false);
+    expect(parser._isLikelyJobTitle('Semgrep, India')).toBe(false);
+  });
+
+  it('still classifies legitimate job titles that contain role keywords', () => {
+    const parser = new CVParser();
+    expect(parser._isLikelyJobTitle('Solutions Architect')).toBe(true);
+    expect(parser._isLikelyJobTitle('Senior Software Engineer')).toBe(true);
+    expect(parser._isLikelyJobTitle('Data Platform Lead')).toBe(true);
+    expect(parser._isLikelyJobTitle('Cloud Security Consultant')).toBe(true);
+  });
+
+  it('does not classify "Position: X" lines as job titles', () => {
+    const parser = new CVParser();
+    expect(parser._isLikelyJobTitle('Position: MLOps/DevOps Engineer')).toBe(false);
+    expect(parser._isLikelyJobTitle('Title: Senior Data Scientist')).toBe(false);
+  });
+
+  it('does not classify preposition-start lines as job titles', () => {
+    const parser = new CVParser();
+    expect(parser._isLikelyJobTitle('with Engineering and Product teams')).toBe(false);
+  });
+
+  it('does not store prose sentence fragments as company or title', () => {
+    const cv = new CVParser().parse(`Alex Smith
+alex@example.com
+
+PROFESSIONAL EXPERIENCE
+Semgrep, USA
+January 2023 - Present
+SRE / DevOps Engineer
+- Improved operational scalability and team effectiveness
+- and communicating measures effectively.
+- Drove platform reliability improvements
+
+EDUCATION
+BSc Computer Science`);
+
+    const exp = cv.experience[0];
+    expect(exp.company).toBe('Semgrep, USA');
+    expect(exp.title).toBe('SRE / DevOps Engineer');
+    expect(exp.company).not.toBe('operational scalability');
+    expect(exp.company).not.toMatch(/team effectiveness/);
+    expect(exp.title).not.toMatch(/and communicating/);
+  });
 });

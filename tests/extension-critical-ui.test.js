@@ -8,11 +8,45 @@ const backgroundJs = fs.readFileSync(new URL('../extension-ready/background.js',
 
 describe('extension critical modal behavior', () => {
   it('does not block modal button target handlers with capture-phase propagation stops', () => {
-    expect(contentJs).toContain("modal.querySelector('#da-btn-insert').onclick = () => this.insertAnswer()");
-    expect(contentJs).toContain("modal.querySelector('#da-jd-confirm').onclick = () => this._confirmJdPaste()");
+    expect(contentJs).toContain("bindModalAction('#da-btn-insert', (event) => this.insertAnswer(event))");
+    expect(contentJs).toContain("bindModalAction('#da-jd-confirm', () => this._confirmJdPaste())");
     expect(contentJs).not.toContain("modalContent.addEventListener(eventName, stopPageEvent, true)");
     expect(contentJs).not.toContain("modal.addEventListener('focusin', stopPageEvent, true)");
     expect(contentJs).not.toContain("modal.addEventListener('focusout', stopPageEvent, true)");
+  });
+
+  it('keeps the modal open when a page rejects an insert instead of failing silently', () => {
+    expect(contentJs).toContain('async writeAnswerToTarget(target, answerToInsert)');
+    expect(contentJs).toContain('Some controlled React/Vue inputs briefly roll back after the first event');
+    expect(contentJs).toContain('const inserted = await this.writeAnswerToTarget(target, answerToInsert)');
+    expect(contentJs).toContain('The page rejected the insert. The answer is still here to copy or try again.');
+    expect(contentJs).toContain('Could not insert into the embedded form. The answer is still here to copy.');
+  });
+
+  it('does not let stale iframe targets or overlapping requests leak across modal sessions', () => {
+    expect(contentJs).toContain('this._iframeSourceFrameId = null;');
+    expect(contentJs).toContain('if (this.currentRequestId) {');
+    expect(contentJs).toContain('await this.cancelGeneration({ silent: true });');
+    expect(contentJs).toContain('clearSessionForNavigation()');
+    expect(contentJs).toContain('this.clearAnswerCaches();');
+  });
+
+  it('uses target-scoped contenteditable insertion and keeps copy non-destructive', () => {
+    expect(contentJs).toContain('setContentEditableValue(target, value)');
+    expect(contentJs).toContain('range.selectNodeContents(target)');
+    expect(contentJs).not.toContain("document.execCommand('selectAll'");
+    expect(contentJs).not.toContain('this.hideModal();\n      this.showNotification(\'Copied to clipboard!');
+  });
+
+  it('surfaces iframe relay failures instead of silently doing nothing', () => {
+    expect(contentJs).toContain("type: 'RELAY_GENERATE_TO_PARENT'");
+    expect(contentJs).toContain('Could not open DraftApply from this embedded form');
+    expect(backgroundJs).toContain('Relay to main frame failed');
+    expect(backgroundJs).toContain('sendResponse({ success: false, error: chrome.runtime.lastError.message })');
+  });
+
+  it('does not bypass answer quality checks for prefetches', () => {
+    expect(contentJs).not.toContain('skipEvaluation: true');
   });
 
   it('promotes visible generic job posting text to heuristic context', () => {

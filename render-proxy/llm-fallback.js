@@ -6,6 +6,7 @@ export const PREFERRED_OPENROUTER_FREE_MODELS = [
 
 const DEFAULT_CACHE_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_STALE_TTL_MS = 6 * 60 * 60 * 1000;
+const NON_TEXT_MODEL_ID_RE = /(?:^|[/:._-])(audio|clip|dall-?e|embedding|embed|flux|image|imagen|lyria|moderation|rerank|stable-?diffusion|tts|video|vision|whisper)(?:$|[/:._-])/i;
 
 export function coercePositiveInteger(value, fallback) {
   const parsed = Number(value);
@@ -27,6 +28,7 @@ function isExpired(model, now = Date.now()) {
 export function isOpenRouterFreeTextModel(model, now = Date.now()) {
   if (!model || typeof model.id !== 'string' || !model.id) return false;
   if (isExpired(model, now)) return false;
+  if (NON_TEXT_MODEL_ID_RE.test(model.id)) return false;
 
   const inputModalities = model.architecture?.input_modalities || [];
   const outputModalities = model.architecture?.output_modalities || [];

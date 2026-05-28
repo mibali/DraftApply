@@ -13,7 +13,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   const TAILOR_DRAFT_KEY = 'tailorCvDraft';
   const TAILOR_JOB_KEY = 'tailorCvJob';
   const TAILOR_JOB_POLL_INTERVAL_MS = 1500;
-  const TAILOR_JOB_MAX_POLL_MS = 3 * 60 * 1000;
+  const TAILOR_JOB_MAX_POLL_MS = 7 * 60 * 1000;
+  const TAILOR_FALLBACK_HINT_MS = 10 * 1000;
 
   const elements = {
     cvStatusDot:     document.getElementById('cv-status-dot'),
@@ -93,6 +94,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   let savingDraftTimer = null;
   let tailorJobPollTimer = null;
   let tailorJobPollStartedAt = 0;
+  let tailorLoadingFallbackTimer = null;
   let statsResetTimer = null;
   let messageTimer = null;
   let tailorMessageTimer = null;
@@ -328,6 +330,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     analyzeToken++;
     tailorToken++;
     stopTailorJobPolling();
+    stopTailorLoadingHint();
     await chrome.storage.local.remove(TAILOR_JOB_KEY).catch?.(() => {});
     elements.tailorOutput.value = '';
     elements.tailorOutputWrap.hidden = true;
@@ -425,6 +428,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   async function openTailorView() {
     analyzeToken++; // discard any in-flight response from a previous session
     stopTailorJobPolling();
+    stopTailorLoadingHint();
     elements.mainView.hidden = true;
     elements.tailorView.hidden = false;
     elements.tailorResults.hidden = true;
@@ -443,6 +447,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   function closeTailorView() {
     stopTailorJobPolling();
+    stopTailorLoadingHint();
     elements.tailorView.hidden = true;
     elements.mainView.hidden = false;
     elements.tailorWarningsBox.hidden = true;
@@ -474,14 +479,30 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  function restoreTailorJob(job) {
+  function restoreTailorJob(job, { inline = false } = {}) {
     if (!job || !['running', 'done', 'error'].includes(job.status)) return;
+
+    const startedAt = Date.parse(job.startedAt || '');
+    const jobAgeMs = Number.isFinite(startedAt) ? Date.now() - startedAt : 0;
+    if (job.status === 'running' && jobAgeMs > TAILOR_JOB_MAX_POLL_MS) {
+      stopTailorJobPolling();
+      chrome.storage.local.remove(TAILOR_JOB_KEY).catch?.(() => {});
+      elements.tailorLoading.hidden = true;
+      elements.tailorGenerateBtn.hidden = false;
+      elements.tailorGenerateBtn.disabled = false;
+      elements.tailorGenerateBtn.textContent = 'Generate Tailored CV';
+      elements.tailorRedoBtn.disabled = false;
+      showTailorMessage('Previous CV generation timed out before DraftApply could finish. Please try again.', 'error');
+      setStep('generate');
+      return;
+    }
 
     elements.tailorJd.value = job.jobDescription || elements.tailorJd.value;
     elements.tailorJobTitle.value = job.jobTitle || elements.tailorJobTitle.value;
     elements.tailorCompany.value = job.company || elements.tailorCompany.value;
 
     if (job.status === 'running') {
+      startTailorLoadingHint(job.startedAt);
       elements.tailorAnalyzeBtn.hidden = true;
       elements.tailorReanalyzeBtn.style.display = 'none';
       elements.tailorGenerateBtn.hidden = false;
@@ -489,21 +510,31 @@ document.addEventListener('DOMContentLoaded', async () => {
       elements.tailorGenerateBtn.textContent = 'Generating…';
       elements.tailorLoading.hidden = false;
       elements.tailorLoadingText.textContent = 'Tailoring your CV…';
-      elements.tailorLoadingSub.textContent = 'You can close this popup — DraftApply will restore the result here.';
+      elements.tailorLoadingSub.textContent = tailorFallbackHintDue(job.startedAt)
+        ? 'Provider is busy, retrying fallback models…'
+        : 'You can close this popup — fallback may take a few minutes.';
       elements.tailorResults.hidden = true;
       setStep('generate');
-      startTailorJobPolling(job.id);
+      startTailorJobPolling(job.id, inline);
       return;
     }
 
     stopTailorJobPolling();
+    stopTailorLoadingHint();
     elements.tailorLoading.hidden = true;
     elements.tailorGenerateBtn.disabled = false;
     elements.tailorGenerateBtn.textContent = 'Generate Tailored CV';
+    elements.tailorRedoBtn.disabled = false;
 
     if (job.status === 'done' && job.result) {
       displayTailorResults(job.result);
-      showTailorMessage('Restored your generated CV.');
+      if (inline) {
+        saveTailorDraft();
+        window.DraftApplyStats?.track?.('cvsTailored').catch?.(() => {});
+        refreshStatsUI();
+      } else {
+        showTailorMessage('Restored your generated CV.');
+      }
     } else if (job.status === 'error') {
       elements.tailorGenerateBtn.hidden = false;
       showTailorMessage(job.error || 'Previous CV generation failed. Please try again.', 'error');
@@ -511,27 +542,31 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  function startTailorJobPolling(jobId) {
+  function startTailorJobPolling(jobId, inline = false) {
     stopTailorJobPolling();
     tailorJobPollStartedAt = Date.now();
     tailorJobPollTimer = setInterval(async () => {
       try {
-        if (Date.now() - tailorJobPollStartedAt > TAILOR_JOB_MAX_POLL_MS) {
+        const stored = await chrome.storage.local.get(TAILOR_JOB_KEY);
+        const job = stored?.[TAILOR_JOB_KEY];
+        const startedAt = Date.parse(job?.startedAt || '');
+        const jobAgeMs = Number.isFinite(startedAt) ? Date.now() - startedAt : Date.now() - tailorJobPollStartedAt;
+        if (jobAgeMs > TAILOR_JOB_MAX_POLL_MS) {
           stopTailorJobPolling();
+          stopTailorLoadingHint();
           await chrome.storage.local.remove(TAILOR_JOB_KEY).catch?.(() => {});
           elements.tailorLoading.hidden = true;
           elements.tailorGenerateBtn.hidden = false;
           elements.tailorGenerateBtn.disabled = false;
           elements.tailorGenerateBtn.textContent = 'Generate Tailored CV';
+          elements.tailorRedoBtn.disabled = false;
           showTailorMessage('CV generation is taking longer than expected. Please try again; no CV was changed.', 'error');
           setStep('generate');
           return;
         }
-        const stored = await chrome.storage.local.get(TAILOR_JOB_KEY);
-        const job = stored?.[TAILOR_JOB_KEY];
         if (!job || (jobId && job.id !== jobId)) return;
         if (job.status === 'done' || job.status === 'error') {
-          restoreTailorJob(job);
+          restoreTailorJob(job, { inline });
         }
       } catch (e) {
         // Polling is best-effort; the user can reopen the popup to restore.
@@ -543,6 +578,29 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (tailorJobPollTimer) clearInterval(tailorJobPollTimer);
     tailorJobPollTimer = null;
     tailorJobPollStartedAt = 0;
+  }
+
+  function tailorFallbackHintDue(startedAt) {
+    const startedMs = Date.parse(startedAt || '');
+    return Number.isFinite(startedMs) && Date.now() - startedMs >= TAILOR_FALLBACK_HINT_MS;
+  }
+
+  function startTailorLoadingHint(startedAt = new Date().toISOString()) {
+    stopTailorLoadingHint();
+    const startedMs = Date.parse(startedAt || '');
+    const elapsedMs = Number.isFinite(startedMs) ? Math.max(0, Date.now() - startedMs) : 0;
+    const delayMs = Math.max(0, TAILOR_FALLBACK_HINT_MS - elapsedMs);
+    tailorLoadingFallbackTimer = setTimeout(() => {
+      if (!elements.tailorLoading.hidden) {
+        elements.tailorLoadingSub.textContent = 'Provider is busy, retrying fallback models…';
+      }
+      tailorLoadingFallbackTimer = null;
+    }, delayMs);
+  }
+
+  function stopTailorLoadingHint() {
+    if (tailorLoadingFallbackTimer) clearTimeout(tailorLoadingFallbackTimer);
+    tailorLoadingFallbackTimer = null;
   }
 
   function handleTailorDraftInput() {
@@ -714,12 +772,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.tailorRedoBtn.disabled = true;
     elements.tailorLoading.hidden = false;
     elements.tailorLoadingText.textContent = 'Tailoring your CV…';
-    elements.tailorLoadingSub.textContent = 'This takes 15–30 seconds';
+    elements.tailorLoadingSub.textContent = 'This can take a few minutes if DraftApply needs fallback';
+    startTailorLoadingHint();
     elements.tailorMessage.hidden = true;
     const confirmedSkills = getConfirmedMissingSkills();
     elements.tailorOutputWrap.hidden = true;
     elements.tailorActionRow.hidden = true;
     setStep('generate');
+    stopTailorJobPolling();
+    await chrome.storage.local.remove(TAILOR_JOB_KEY).catch?.(() => {});
     tailorToken++;
     const myToken = tailorToken;
 
@@ -745,6 +806,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         return;
       }
 
+      // Background responded immediately — poll storage for the actual result.
+      if (result?.started) {
+        startTailorJobPolling(result.jobId, true);
+        return;
+      }
+
       displayTailorResults(result);
       await saveTailorDraft();
       await window.DraftApplyStats?.track?.('cvsTailored');
@@ -753,7 +820,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (myToken !== tailorToken) return;
       showTailorMessage('Something went wrong: ' + e.message, 'error');
     } finally {
-      if (myToken === tailorToken) {
+      // Don't hide the spinner if storage polling is now responsible for the UI.
+      if (myToken === tailorToken && !tailorJobPollTimer) {
+        stopTailorLoadingHint();
         elements.tailorLoading.hidden = true;
         elements.tailorGenerateBtn.disabled = false;
         elements.tailorGenerateBtn.textContent = 'Generate Tailored CV';
@@ -763,7 +832,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function displayTailorResults(result) {
-    const { tailoredCvText, matchReport, warnings, provider, fallbackFrom, model } = result;
+    const { tailoredCvText, matchReport, warnings, provider, fallbackFrom, model, auditSkipped } = result;
     displayMatchReport(matchReport, { reviewMode: false, domainSuggestions: [] });
 
     const badge = document.getElementById('tailor-provider-badge');
@@ -779,6 +848,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         badge.style.display = 'none';
       }
     }
+
+    const auditBadge = document.getElementById('tailor-audit-badge');
+    if (auditBadge) auditBadge.style.display = auditSkipped ? 'inline-block' : 'none';
 
     if (warnings?.length > 0) {
       elements.tailorWarningsBox.innerHTML = formatTailorWarnings(warnings);
@@ -1057,7 +1129,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.tailorMessage.textContent = text;
     elements.tailorMessage.className = 'message' + (type === 'error' ? ' error' : '');
     elements.tailorMessage.hidden = false;
-    tailorMessageTimer = setTimeout(() => { elements.tailorMessage.hidden = true; }, 5000);
+    // Errors stay visible until the user acts (clicks Generate again).
+    // Success messages auto-hide after 5 s.
+    if (type !== 'error') {
+      tailorMessageTimer = setTimeout(() => { elements.tailorMessage.hidden = true; }, 5000);
+    }
   }
 
   function esc(str) {

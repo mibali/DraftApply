@@ -1,4 +1,8 @@
+import { createRequire } from 'module';
 import { RoleProfileService } from './role-profile-service.js';
+
+const _require = createRequire(import.meta.url);
+const _semanticConceptGroups = _require('./data-sources/semantic-concepts.json');
 
 export class CVTailor {
   constructor(roleProfiles = new RoleProfileService()) {
@@ -61,9 +65,12 @@ export class CVTailor {
     return deduped.map(({ req, type }) => {
       const confirmedByUser = confirmedSet.has(this._normaliseText(req));
       const directEvidence = this._findEvidence(req, cvSources);
-      const semanticEvidence = directEvidence.length > 0
-        ? []
-        : this._findSemanticEvidence(req, cvSources);
+      // Always run semantic matching — direct evidence and semantic aliases are
+      // complementary. Direct matching catches exact/token overlap; semantic
+      // matching catches outcome equivalences (e.g. "cut onboarding time" matches
+      // a JD requirement for "reduce time-to-value"). Deduplication below ensures
+      // the same bullet never appears twice.
+      const semanticEvidence = this._findSemanticEvidence(req, cvSources);
       const evidence = [...new Set([...directEvidence, ...semanticEvidence])].slice(0, 5);
       const coreTokens = this._getCoreTokens(req);
       const supportedCoreTokens = coreTokens.filter(tok =>
@@ -310,12 +317,19 @@ A credible 30-second screen means:
     const topKeywords = (jdData.atsKeywords || []).slice(0, 20);
     const tailoringPlan = this.buildTailoringPlan(cvData, jdData, matchMap);
     const roleCredibilityGuidance = this._buildRoleCredibilityGuidance(jdData);
+    const matchStrength = this.calcMatchStrength(matchMap);
+    const confidenceInstruction = {
+      strong:  'MATCH LEVEL: STRONG — the CV covers most requirements. Write with confidence. Use assertive, achievement-led language for supported claims.',
+      moderate:'MATCH LEVEL: MODERATE — the CV covers some requirements. Write confidently where supported; frame unsupported areas honestly as transferable experience.',
+      weak:    'MATCH LEVEL: WEAK — the CV has limited direct matches. Focus on genuine transferable evidence. Do not overstate. Be specific about what IS supported and honest about what is not.',
+      unknown: '',
+    }[matchStrength.level] || '';
 
     const userPrompt = `TARGET ROLE
   Job title:  ${jdData.jobTitle || 'Not specified'}
   Company:    ${jdData.company  || 'Not specified'}
   Seniority:  ${jdData.seniority}
-
+${confidenceInstruction ? `\n${confidenceInstruction}\n` : ''}
 REQUIRED SKILLS (up to 15)
 ${topRequired.map(s => `  • ${s}`).join('\n') || '  (none listed)'}
 
@@ -323,7 +337,7 @@ TECHNOLOGIES / ATS KEYWORDS FROM THE JD
 ${topTools.length ? topTools.map(s => `  • ${s}`).join('\n') : '  (none listed)'}
 ${topKeywords.length ? `\nRepeated JD keywords:\n${topKeywords.map(s => `  • ${s}`).join('\n')}` : ''}
 
-MATCH REPORT
+MATCH REPORT (${matchStrength.supportedCount}/${matchStrength.totalCount} requirements supported)
   Supported requirements (you MAY reference these):
 ${supported.length ? supported.map(s => `    ✓ ${s}`).join('\n') : '    (none)'}
 
@@ -382,8 +396,10 @@ HARVARD FORMAT — apply this structure exactly:
   Company Name                  Month Year – Month Year
   Job Title
   Focus: [one-line positioning, when supported]
-  • Bullet one
+  • Bullet one (most relevant to target role — lead with impact or scale)
   • Bullet two
+  • Bullet three
+  • Bullet four (ALL original bullets preserved — none dropped)
   [blank line]
   EDUCATION / CERTIFICATIONS (as in original CV)
 
@@ -392,7 +408,7 @@ INSTRUCTION
 2. Rewrite the professional summary so it clearly positions the candidate for this exact role and domain without saying it was tailored for a company or application. It must mention only supported evidence from the CV.
 3. CORE COMPETENCIES: MANDATORY — output exactly 5–7 named categories (never fewer than 5 for senior roles). Each category on its own line, NO bullet prefix, NO dash, format exactly: "Category Label: Skill A, Skill B, Skill C, Skill D" — aim for 3–6 skills per category. Cover both technical and business domains appropriate to the role (e.g. for a Solution Architect: Pre-Sales Execution, Cloud & Architecture, Integration & APIs, DevOps & Delivery, Sales Methodology, Stakeholder Engagement, Programming & Scripting). Do NOT use an "Additional Relevant Skills" or "Additional Skills" section. No duplicate skills across categories.
 4. For each relevant role: preserve the official job title exactly, then add one short "Focus:" line below it when the original responsibilities support the target role.
-5. For each role: rewrite relevant bullets with JD vocabulary (same meaning, aligned language), reorder bullets so the strongest target-role evidence comes first.
+5. For each role: preserve ALL original bullets — do not drop any. Rewrite each bullet using JD vocabulary (same meaning, aligned language) and reorder them so the strongest target-role evidence comes first. A senior role with only 1–2 bullets will fail a recruiter screen; include every bullet the original CV has for that role.
 6. Include every user-confirmed addition in the skills/core competencies section as concise skill names. You may also use them in the summary when natural, but do not attach them to a specific employer, project, metric, certification, or achievement unless that context exists in the original CV.
 7. Preserve all locked fields exactly — same spelling, capitalisation, and punctuation.
 8. The final CV must read like a polished CV for "${jdData.jobTitle || 'the target role'}", not like a generic CV and not like generated marketing copy.
@@ -417,23 +433,24 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
       .map(m => m.requirement)
       .filter(Boolean);
 
-    const systemPrompt = `You are a strict CV truth-auditor and recruiter screen.
+    const systemPrompt = `You are a strict CV truth-auditor. Your only job is to remove unsupported content and then reposition the remaining supported evidence — nothing more.
 
-Your job is to correct the tailored CV until it is both truthful and credible for the target role.
-The corrected CV must answer YES to: "Would this CV credibly pass a 30-second recruiter screen for this exact role?"
+PERMITTED ACTIONS (in this exact priority order):
+1. REMOVE any content not evidenced by the ORIGINAL CV, the SUPPORTED REQUIREMENTS list, or USER-CONFIRMED additions.
+2. REORDER existing supported bullets, skills, or sections so the most role-relevant evidence appears first.
+3. REFOCUS summary, Core Competencies, and Focus lines by recombining language already present in the ORIGINAL CV or SUPPORTED REQUIREMENTS — do not introduce new wording.
 
-Rules:
-- Return the complete corrected CV text only.
-- Preserve locked facts from the original CV: names, employers, job titles, dates, education, certifications, contact details.
-- Every skill, claim, achievement, tool, methodology, domain phrase, and focus line in the corrected CV must be supported by either:
-  1. the ORIGINAL CV text,
-  2. a SUPPORTED REQUIREMENT with evidence,
-  3. a USER-CONFIRMED addition.
-- If a phrase only appears in the JD or target role and has no support, remove it.
-- Never paste JD requirement prose into the skills section.
-- Skills sections must contain short skill phrases only, not sentences, years-of-experience requirements, commute/location requirements, education requirements, or phrases like "track record of...".
-- Do not add new content. Delete, simplify, reorder, or refocus unsupported content.
-- If the CV reads as keyword-stuffed, under-positioned, or generic for the target role, rewrite the summary, Core Competencies, Focus lines, and first relevant bullets using only supported evidence.`;
+FORBIDDEN:
+- Do not add any new skill, tool, phrase, metric, claim, or sentence that does not appear verbatim in the ORIGINAL CV or SUPPORTED REQUIREMENTS.
+- Do not introduce improvements, suggestions, or language the candidate has not already demonstrated.
+- Do not paste JD requirement prose into the skills section.
+
+ALWAYS PRESERVE:
+- Every locked fact: names, employers, historical job titles, dates, education, certifications, contact details.
+- Every experience bullet from the ORIGINAL CV must remain. Do not remove a bullet because it was reworded; only remove a bullet if it contains a specific metric, tool, or claim that does not exist anywhere in the ORIGINAL CV and is not in the SUPPORTED REQUIREMENTS list.
+- Skills sections must contain short skill phrases only — not sentences, years-of-experience requirements, location requirements, education requirements, or prose like "track record of...".
+
+Return the complete corrected CV text only.`;
 
     const supportedLines = supported.map(item => {
       const evidence = item.confirmedByUser
@@ -464,11 +481,13 @@ TAILORED CV TO AUDIT
 ${tailoredText || ''}
 
 AUDIT INSTRUCTION
-Return a corrected complete CV. Remove any unsupported JD-only skills, methods, responsibilities, tools, metrics, commute/location requirements, years-of-experience requirements, degree requirements, and sales/role requirements that are not evidenced by the original CV or confirmed additions.
+Step 1 — REMOVE: Delete any skill, tool, phrase, responsibility, metric, or claim that does not appear in the ORIGINAL CV or the SUPPORTED REQUIREMENTS list above.
+Step 2 — REORDER: Move the most role-relevant supported evidence earlier within each section (summary, skills, bullets).
+Step 3 — REFOCUS: Rewrite the summary and Focus lines using only words and phrases already present in the ORIGINAL CV or SUPPORTED REQUIREMENTS. Do not introduce new language.
 
-Then internally apply the recruiter screen: would this CV credibly pass a 30-second human recruiter scan for "${jdData?.jobTitle || 'the target role'}"? If not, refocus the summary, Core Competencies, Focus lines, and first relevant bullets using only supported evidence before returning the final CV.`;
+Do not add anything new. Return the complete corrected CV.`;
 
-    return { systemPrompt, userPrompt, temperature: 0.1 };
+    return { systemPrompt, userPrompt, temperature: 0.2 };
   }
 
   buildTailoringPlan(cvData, jdData, matchMap = []) {
@@ -508,12 +527,114 @@ Then internally apply the recruiter screen: would this CV credibly pass a 30-sec
     };
   }
 
+  /**
+   * Check how many high-frequency JD keywords landed in the tailored CV.
+   * Returns missing keywords and a 0–1 coverage fraction.
+   *
+   * @param {string} tailoredText
+   * @param {Object} jdData — enriched JD data with atsKeywords, requiredSkills, tools
+   * @returns {{ missingKeywords: string[], coverage: number }}
+   */
+  checkAtsKeywordCoverage(tailoredText, jdData) {
+    if (tailoredText == null || !jdData) return { missingKeywords: [], coverage: 1.0 };
+
+    const candidates = [
+      ...(jdData.atsKeywords     || []),
+      ...(jdData.requiredSkills  || []).slice(0, 10),
+      ...(jdData.tools           || []).slice(0, 10),
+    ];
+    if (candidates.length === 0) return { missingKeywords: [], coverage: 1.0 };
+
+    const lower = tailoredText.toLowerCase();
+    const deduped = [...new Set(candidates.map(k => (k || '').trim().toLowerCase()).filter(Boolean))];
+    const missing = deduped.filter(kw => !lower.includes(kw));
+
+    return {
+      missingKeywords: missing.slice(0, 10),
+      coverage: deduped.length > 0 ? (deduped.length - missing.length) / deduped.length : 1.0,
+    };
+  }
+
+  /**
+   * Compute how strongly the CV matches the JD based on the matchMap.
+   * Used to calibrate the confidence of the tailoring and answer prompts.
+   *
+   * @param {Array} matchMap — output of buildMatchMap()
+   * @returns {{ level: 'strong'|'moderate'|'weak'|'unknown', score: number, supportedCount: number, totalCount: number }}
+   */
+  calcMatchStrength(matchMap) {
+    if (!matchMap || matchMap.length === 0) {
+      return { level: 'unknown', score: 0, supportedCount: 0, totalCount: 0 };
+    }
+    const scoreable = matchMap.filter(m => m.type !== 'user_confirmed');
+    const total = scoreable.length;
+    if (total === 0) return { level: 'unknown', score: 0, supportedCount: 0, totalCount: 0 };
+
+    const supported = scoreable.filter(m => m.allowedToMention).length;
+    const score = Math.round((supported / total) * 100) / 100;
+    const level = score >= 0.65 ? 'strong' : score >= 0.40 ? 'moderate' : 'weak';
+    return { level, score, supportedCount: supported, totalCount: total };
+  }
+
+  isValidCvOutput(text) {
+    if (!text || text.trim().length < 200) return false;
+    if (/AUDIT INSTRUCTION/i.test(text)) return false;
+    if (/list supported requirements/i.test(text)) return false;
+    if (/USER-CONFIRMED addition/i.test(text)) return false;
+    if (/SUPPORTED REQUIREMENT/i.test(text)) return false;
+    if (/We need to audit the tailored CV/i.test(text)) return false;
+    return /^(PROFESSIONAL SUMMARY|CORE COMPETENCIES|PROFESSIONAL EXPERIENCE|EDUCATION)\s*$/im.test(text);
+  }
+
+  _ensureCoreCompetencies(text, matchMap = [], confirmedSkills = [], jdData = {}) {
+    if (!text || /^CORE COMPETENCIES\s*$/im.test(text)) return text;
+
+    const allowed = (matchMap || []).filter(r => r.allowedToMention);
+
+    const tools = [...new Set(
+      allowed.filter(r => r.type === 'tool').map(r => r.requirement).filter(Boolean)
+    )].slice(0, 6);
+
+    const coreSkills = [...new Set(
+      allowed
+        .filter(r => r.type === 'required' || r.type === 'preferred')
+        .map(r => r.requirement)
+        .filter(Boolean)
+        .filter(s => !/\b(team|communicat|collaborat|stakeholder)\b/i.test(s))
+    )].slice(0, 6);
+
+    const softSkills = [...new Set(
+      allowed.filter(r => r.type === 'soft').map(r => r.requirement).filter(Boolean)
+    )].slice(0, 5);
+
+    const confirmed = [...new Set((confirmedSkills || []).filter(Boolean))];
+
+    const lines = [];
+    if (tools.length > 0)      lines.push(`Technical Tools: ${tools.join(', ')}`);
+    if (coreSkills.length > 0) lines.push(`Core Skills: ${coreSkills.join(', ')}`);
+    if (confirmed.length > 0)  lines.push(`Confirmed Skills: ${confirmed.join(', ')}`);
+    if (softSkills.length > 0) lines.push(`Professional Skills: ${softSkills.join(', ')}`);
+
+    if (lines.length < 2) return text;
+
+    const section = `CORE COMPETENCIES\n${lines.join('\n')}`;
+
+    const expIdx = text.search(/^PROFESSIONAL EXPERIENCE\s*$/im);
+    if (expIdx !== -1) {
+      const before = text.slice(0, expIdx).replace(/\n+$/, '');
+      return `${before}\n\n${section}\n\n${text.slice(expIdx)}`;
+    }
+
+    return text;
+  }
+
   finalizeTailoredCV(rawText, { cvData, jdData, matchMap = [], confirmedSkills = [] } = {}) {
+    const withCoreCompetencies = this._ensureCoreCompetencies(rawText, matchMap, confirmedSkills, jdData);
     const cleaned = this.cleanSkillsSection(
       this.ensureRoleFocusLines(
         this.ensureConfirmedSkillsIncluded(
           this.removeTailoringMetaPhrases(
-            this.enforceTargetHeadline(rawText, jdData?.jobTitle),
+            this.enforceTargetHeadline(withCoreCompetencies, jdData?.jobTitle),
             jdData?.company
           ),
           confirmedSkills
@@ -526,9 +647,15 @@ Then internally apply the recruiter screen: would this CV credibly pass a 30-sec
       confirmedSkills,
       jdData
     );
-    return this.normaliseRoleFocusPlacement(
+    const normalised = this.normaliseRoleFocusPlacement(
       this.restoreLockedExperienceDates(cleaned, cvData),
       cvData
+    );
+    return this.ensureExperienceDepth(
+      this.consolidateSkillsSections(normalised),
+      cvData,
+      jdData,
+      matchMap
     );
   }
 
@@ -775,7 +902,99 @@ Then internally apply the recruiter screen: would this CV credibly pass a 30-sec
       continue;
     }
 
-    return cleaned.join('\n');
+    return this.consolidateSkillsSections(cleaned.join('\n'));
+  }
+
+  consolidateSkillsSections(tailoredText) {
+    if (!tailoredText) return tailoredText;
+
+    const lines = String(tailoredText).split('\n');
+    const coreIdx = lines.findIndex(line => /^core\s+competenc(?:y|ies)\s*[:\-]?$/i.test(String(line || '').trim()));
+    if (coreIdx === -1) return tailoredText;
+
+    const output = [];
+    let i = 0;
+    while (i < lines.length) {
+      const trimmed = String(lines[i] || '').trim();
+      const isExtraSkillsSection = i !== coreIdx
+        && /^(technical\s+skills?|skills|technologies|tools|expertise)\s*[:\-]?$/i.test(trimmed);
+
+      if (!isExtraSkillsSection) {
+        output.push(lines[i]);
+        i++;
+        continue;
+      }
+
+      i++;
+      while (i < lines.length && !this._isLikelySectionHeader(lines[i])) {
+        i++;
+      }
+      while (output.length && !String(output[output.length - 1] || '').trim()) {
+        output.pop();
+      }
+      if (i < lines.length && output.length && String(output[output.length - 1] || '').trim()) {
+        output.push('');
+      }
+    }
+
+    return output.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  ensureExperienceDepth(tailoredText, cvData = {}, jdData = {}, matchMap = []) {
+    if (!tailoredText || !Array.isArray(cvData?.experience) || cvData.experience.length === 0) {
+      return tailoredText;
+    }
+
+    const lines = String(tailoredText).split('\n');
+    const companyKeys = new Set(
+      cvData.experience
+        .map(exp => this._normaliseText(exp.company))
+        .filter(Boolean)
+    );
+    let searchFrom = 0;
+
+    for (let expIndex = 0; expIndex < cvData.experience.length; expIndex++) {
+      const exp = cvData.experience[expIndex];
+      const title = String(exp.title || '').trim();
+      const sourceBullets = (exp.responsibilities || [])
+        .map(item => String(item || '').trim())
+        .filter(Boolean)
+        .filter(item => !this._isParserArtefact(item));
+      if (!title || sourceBullets.length === 0) continue;
+
+      const titleIdx = this._findTitleLineIndex(lines, title, searchFrom);
+      if (titleIdx === -1) continue;
+
+      const entryEnd = this._findExperienceEntryEnd(lines, exp, titleIdx, companyKeys);
+      const existingBulletKeys = new Set(
+        lines.slice(titleIdx + 1, entryEnd)
+          .map(line => String(line || '').trim())
+          .filter(line => /^[-•*●▪◦–—]\s/.test(line))
+          .map(line => this._normaliseText(line.replace(/^[-•*●▪◦–—]\s*/, '')))
+          .filter(Boolean)
+      );
+
+      const currentCount = existingBulletKeys.size;
+      const minimum = Math.min(sourceBullets.length, expIndex < 3 ? 4 : 3);
+      if (currentCount >= minimum) {
+        searchFrom = titleIdx + 1;
+        continue;
+      }
+
+      const needed = minimum - currentCount;
+      const additions = this._rankExperienceBulletsForRole(sourceBullets, jdData, matchMap)
+        .filter(item => !existingBulletKeys.has(this._normaliseText(item)))
+        .slice(0, needed);
+
+      if (additions.length > 0) {
+        lines.splice(entryEnd, 0, ...additions.map(item => `- ${item}`));
+        searchFrom = entryEnd + additions.length;
+      } else {
+        searchFrom = titleIdx + 1;
+      }
+    }
+
+    return lines.join('\n');
   }
 
   /**
@@ -795,6 +1014,7 @@ Then internally apply the recruiter screen: would this CV credibly pass a 30-sec
       if (/^(position|title|role)\s*:/i.test(co)) continue;        // "Position: X" artefact
       if (/^[•●▪◦\-–—]/.test(co)) continue;                       // bullet artefact
       if (co.length > 80) continue;                                 // too long to be a company name
+      if (this._isParserArtefact(co)) continue;                    // prose fragment stored as company
       if (!t.includes(co)) {
         warnings.push(`Company name may have changed or been removed: "${co}"`);
       }
@@ -806,6 +1026,8 @@ Then internally apply the recruiter screen: would this CV credibly pass a 30-sec
       if (!title) continue;
       if (/^[•●▪◦\-–—]/.test(title)) continue;                    // bullet artefact
       if (title.length > 80) continue;                              // sentence stored as title
+      if (/^(position|title|role)\s*:/i.test(title)) continue;     // "Position: X" artefact
+      if (this._isParserArtefact(title)) continue;                  // prose fragment stored as title
       if (!t.includes(title)) {
         warnings.push(`Job title may have changed or been removed: "${title}"`);
       }
@@ -1666,6 +1888,23 @@ Then internally apply the recruiter screen: would this CV credibly pass a 30-sec
     return lines.length;
   }
 
+  _findExperienceEntryEnd(lines, exp = {}, titleIdx = 0, companyKeys = new Set()) {
+    const currentCompanyKey = this._normaliseText(exp.company);
+
+    for (let i = titleIdx + 1; i < lines.length; i++) {
+      const trimmed = String(lines[i] || '').trim();
+      if (!trimmed) continue;
+      if (this._isLikelySectionHeader(trimmed)) return i;
+
+      const key = this._normaliseText(trimmed);
+      if (i > titleIdx + 1 && companyKeys.has(key) && key !== currentCompanyKey) {
+        return i;
+      }
+    }
+
+    return lines.length;
+  }
+
   _findLineIndexContaining(lines, value, start = 0, end = lines.length) {
     const key = this._normaliseText(value);
     if (!key) return -1;
@@ -1675,6 +1914,46 @@ Then internally apply the recruiter screen: would this CV credibly pass a 30-sec
       if (line === key || line.includes(key)) return i;
     }
     return -1;
+  }
+
+  _rankExperienceBulletsForRole(bullets = [], jdData = {}, matchMap = []) {
+    const targetText = this._normaliseText([
+      jdData?.jobTitle,
+      jdData?.targetPositioning,
+      ...(jdData?.requiredSkills || []),
+      ...(jdData?.tools || []),
+      ...(jdData?.responsibilities || []),
+      ...(jdData?.atsKeywords || []),
+      ...(matchMap || []).filter(m => m.allowedToMention).map(m => m.requirement),
+    ].join(' '));
+    const targetTokens = new Set(
+      targetText
+        .split(/\s+/)
+        .filter(tok => tok.length >= 4 && !this._noiseWords().has(tok))
+    );
+
+    return [...bullets].sort((a, b) => {
+      const aScore = this._experienceBulletRelevanceScore(a, targetTokens);
+      const bScore = this._experienceBulletRelevanceScore(b, targetTokens);
+      return bScore - aScore || a.length - b.length;
+    });
+  }
+
+  _experienceBulletRelevanceScore(bullet = '', targetTokens = new Set()) {
+    const text = this._normaliseText(bullet);
+    if (!text) return 0;
+
+    let score = 0;
+    for (const token of targetTokens) {
+      if (text.includes(token)) score += 2;
+    }
+    if (/\b(production|incident|reliability|automation|python|cloud|aws|azure|gcp|kubernetes|docker|terraform|ci.?cd|pipeline|api|integration|engineering|sre|runbook|root cause|rca|monitoring|observability|deployment|customer|enterprise|stakeholder)\b/i.test(bullet)) {
+      score += 5;
+    }
+    if (/\b(reduced|improved|increased|built|developed|led|designed|implemented|delivered|partnered|mentored|scaled|accelerated|strengthened|mitigated)\b/i.test(bullet)) {
+      score += 3;
+    }
+    return score;
   }
 
   _looksLikeDateLine(line) {
@@ -1743,6 +2022,15 @@ Then internally apply the recruiter screen: would this CV credibly pass a 30-sec
       && /,/.test(line)
       && /\b(uk|united kingdom|usa|united states|belgium|canada|germany|france|ireland|netherlands|remote)\b/i.test(line)
       && !/\b(engineer|developer|manager|architect|support|mlops|devops|sre|data|platform)\b/i.test(line);
+  }
+
+  _isParserArtefact(text) {
+    const t = String(text || '').trim();
+    if (!t) return false;
+    if (/[.!?]$/.test(t)) return true;
+    if (/^(and|or|with|for|to|in|of|at|by|from|that|which|who|when|where)\s+/i.test(t) && /^[a-z]/.test(t)) return true;
+    if (/^[a-z]/.test(t) && !/[A-Z]/.test(t.slice(1)) && t.split(/\s+/).length >= 2) return true;
+    return false;
   }
 
   _isLikelySectionHeader(line) {
@@ -1928,8 +2216,9 @@ Then internally apply the recruiter screen: would this CV credibly pass a 30-sec
       { label: 'AI & GenAI Systems', terms: ['Generative AI', 'AI solutions', 'RAG systems', 'multi-agent workflows', 'agentic systems', 'ReAct', 'tool-calling', 'context engineering', 'explainability', 'transparency'] },
       { label: 'Cloud & Platform Engineering', terms: ['Google Cloud', 'GCP', 'Vertex AI', 'AWS', 'Azure', 'cloud infrastructure', 'platform reliability', 'production reliability', 'engineering enablement', 'Terraform', 'Pulumi', 'Infrastructure as Code', 'IaC'] },
       { label: 'Programming & Automation', terms: ['Python', 'Go', 'Bash', 'PowerShell', 'automation', 'scripting', 'FastAPI', 'Flask', 'Git', 'version control'] },
-      { label: 'MLOps & ML Lifecycle', terms: ['MLOps', 'MLflow', 'DVC', 'model registry', 'experiment tracking', 'artifact versioning', 'reproducible training workflows'] },
-      { label: 'Model Serving & Infrastructure', terms: ['KServe', 'SageMaker', 'BentoML', 'Docker', 'Kubernetes', 'K8s', 'Kubeflow Pipelines', 'container orchestration'] },
+      { label: 'MLOps & ML Lifecycle', terms: ['MLOps', 'MLflow', 'DVC', 'model registry', 'experiment tracking', 'artifact versioning', 'TensorFlow', 'PyTorch', 'Scikit-learn', 'Keras', 'XGBoost', 'LightGBM', 'NumPy', 'Pandas', 'Hugging Face', 'WandB', 'Optuna', 'Ray', 'ONNX'] },
+      { label: 'Data Processing & Streaming', terms: ['Apache Kafka', 'Kafka', 'Apache Spark', 'Spark', 'Apache Hadoop', 'Hadoop', 'Apache Flink', 'Flink', 'Apache Hive', 'Hive', 'Apache Beam', 'Beam', 'dbt', 'Airflow', 'Dagster', 'Delta Lake', 'Apache Iceberg', 'Presto', 'Trino', 'HBase'] },
+      { label: 'Model Serving & Infrastructure', terms: ['KServe', 'SageMaker', 'BentoML', 'Docker', 'Kubernetes', 'K8s', 'Kubeflow Pipelines', 'container orchestration', 'NGINX', 'API Gateway', 'NoSQL', 'MongoDB', 'Redis', 'Elasticsearch', 'PostgreSQL'] },
       { label: 'CI/CD & Delivery', terms: ['GitHub Actions', 'GitLab CI', 'Jenkins', 'CircleCI', 'Azure DevOps', 'ArgoCD', 'Argo Workflows', 'Prefect', 'DevOps', 'Release Governance', 'Change Management'] },
       { label: 'Observability & Reliability', terms: ['Prometheus', 'Grafana', 'logging', 'log analysis', 'distributed tracing', 'incident response', 'RCA', 'runbooks', 'on-call', 'monitoring', 'performance tuning', 'diagnostics', 'alerting'] },
       { label: 'Leadership & Stakeholder Management', terms: ['people management', 'technical mentorship', 'technical hiring', 'stakeholder management', 'sales partnership', 'engineering leadership', 'technical lead', 'team leadership', 'customer-facing technical leadership'] },
@@ -1973,6 +2262,16 @@ Then internally apply the recruiter screen: would this CV credibly pass a 30-sec
 
       const cleaned = this._uniqueDisplaySkills(matched).slice(0, 8);
       if (cleaned.length > 0) lines.push(`${bucket.label}: ${cleaned.join(', ')}`);
+    }
+
+    // Any skills not placed in a named bucket (e.g. niche confirmed tools) must not be dropped.
+    const remaining = [];
+    for (const [key, item] of itemKeys) {
+      if (!used.has(key)) remaining.push(item);
+    }
+    const cleanedRemaining = this._uniqueDisplaySkills(remaining).slice(0, 10);
+    if (cleanedRemaining.length > 0) {
+      lines.push(`Additional Technical Skills: ${cleanedRemaining.join(', ')}`);
     }
 
     return lines;
@@ -2029,9 +2328,10 @@ Then internally apply the recruiter screen: would this CV credibly pass a 30-sec
     const text = this._normaliseText(item);
     const patterns = {
       'AI & GenAI Systems': /\b(genai|generative ai|rag|agent|react|tool calling|context engineering|explainability|ai solutions?)\b/,
-      'Cloud & Platform Engineering': /\b(gcp|google cloud|vertex|aws|azure|cloud|platform|infrastructure|reliability|enablement|performance.tun|diagnostic|terraform|pulumi|iac)\b/,
+      'Cloud & Platform Engineering': /\b(gcp|google cloud|vertex|aws|azure|cloud|platform|infrastructure|reliability|enablement|performance.tun|diagnostic|terraform|pulumi|iac|nosql|mongodb|redis|cassandra|elasticsearch|nginx|api.?gateway|load.?balanc|postgre|mysql)\b/,
       'Programming & Automation': /\b(python|golang|go|bash|powershell|automation|scripting|fastapi|flask|git|version.?control)\b/,
-      'MLOps & ML Lifecycle': /\b(mlops|mlflow|dvc|model registry|experiment|artifact|training workflow)\b/,
+      'MLOps & ML Lifecycle': /\b(mlops|mlflow|dvc|model registry|experiment|artifact|training workflow|tensorflow|pytorch|scikit|keras|xgboost|lightgbm|numpy|pandas|hugging.?face|onnx|wandb|optuna|ray)\b/,
+      'Data Processing & Streaming': /\b(kafka|spark|hadoop|flink|hive|hudi|beam|airflow|dagster|dbt|delta.?lake|iceberg|presto|trino|hbase|storm|samza)\b/,
       'Model Serving & Infrastructure': /\b(kserve|sagemaker|bentoml|docker|kubernetes|k8s|kubeflow|serving|container)\b/,
       'CI/CD & Delivery': /\b(ci.?cd|github actions|gitlab|jenkins|circleci|azure devops|argocd|argo|prefect|delivery|devops|release|change management|governance|compliance)\b/,
       'CI/CD & DevOps': /\b(ci.?cd|github actions|gitlab|jenkins|circleci|azure devops|buildkite|pipeline|deployment|devops|release)\b/,
@@ -2105,30 +2405,8 @@ Then internally apply the recruiter screen: would this CV credibly pass a 30-sec
     const req = this._normaliseText(requirement);
     if (!req) return [];
 
-    const groups = [
-      ['postgresql', 'postgres', 'psql'],
-      ['kubernetes', 'k8s'],
-      ['github actions', 'gha'],
-      ['google analytics', 'ga4'],
-      ['ci cd', 'cicd', 'pipeline automation', 'deployment automation', 'release automation'],
-      ['technical demos', 'technical demo', 'customer demo', 'customer demos', 'client presentations', 'client-facing presentations', 'stakeholder presentations', 'workshops'],
-      ['poc', 'proof of concept', 'pilot implementation', 'prototype'],
-      ['pov', 'proof of value', 'value assessment', 'business value assessment'],
-      ['pre sales', 'presales', 'solution consulting', 'solution selling', 'technical selling'],
-      ['technical discovery', 'requirements gathering', 'customer discovery', 'stakeholder workshops', 'diagnostic workshops'],
-      ['stakeholder management', 'stakeholder engagement', 'customer communication', 'executive communication', 'cross functional collaboration', 'expectation management'],
-      ['product metrics', 'north star metric', 'kpi', 'dashboards', 'analytics reporting', 'performance reporting'],
-      ['roadmap ownership', 'roadmap planning', 'backlog prioritisation', 'backlog prioritization', 'product prioritisation', 'product prioritization'],
-      ['go to market', 'gtm', 'launch planning', 'release launch', 'market launch'],
-      ['customer onboarding', 'implementation', 'customer implementation', 'enablement', 'adoption'],
-      ['renewal', 'retention', 'churn prevention', 'account expansion', 'customer health'],
-      ['crm', 'salesforce', 'hubspot crm'],
-      ['financial modelling', 'financial modeling', 'forecasting', 'budgeting', 'variance analysis'],
-      ['regulatory compliance', 'compliance reporting', 'audit support', 'risk control'],
-    ];
-
     const matches = [];
-    for (const group of groups) {
+    for (const group of _semanticConceptGroups) {
       const normalised = group.map(item => this._normaliseText(item));
       if (normalised.some(item => req === item || req.includes(item) || item.includes(req))) {
         matches.push(...group);

@@ -57,6 +57,8 @@ describe('OpenRouter free-model fallback ordering', () => {
       ...freeModel('image/model:free'),
       architecture: { input_modalities: ['image'], output_modalities: ['image'] },
     })).toBe(false);
+    expect(isOpenRouterFreeTextModel(freeModel('google/lyria-3-clip-preview'))).toBe(false);
+    expect(isOpenRouterFreeTextModel(freeModel('openai/whisper-large-v3:free'))).toBe(false);
   });
 
   it('tries preferred free models first when they are available', () => {
@@ -68,6 +70,24 @@ describe('OpenRouter free-model fallback ordering', () => {
     ]);
 
     expect(ordered.slice(0, 2)).toEqual([
+      'nvidia/nemotron-3-super-120b-a12b:free',
+      'google/gemma-4-26b-a4b-it:free',
+    ]);
+  });
+
+  it('honors a configured preferred OpenRouter model before the built-in preferred order', () => {
+    const ordered = buildOpenRouterFallbackModelOrder([
+      freeModel('google/gemma-4-26b-a4b-it:free'),
+      freeModel('nvidia/nemotron-3-super-120b-a12b:free'),
+      freeModel('meta-llama/llama-3.3-70b-instruct'),
+    ], [
+      'meta-llama/llama-3.3-70b-instruct',
+      'nvidia/nemotron-3-super-120b-a12b:free',
+      'google/gemma-4-26b-a4b-it:free',
+    ]);
+
+    expect(ordered.slice(0, 3)).toEqual([
+      'meta-llama/llama-3.3-70b-instruct',
       'nvidia/nemotron-3-super-120b-a12b:free',
       'google/gemma-4-26b-a4b-it:free',
     ]);

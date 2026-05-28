@@ -316,8 +316,42 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Server keep-alive — ping /api/health every 14 minutes so the Render proxy
+// never hits its 15-minute idle cold-start. Uses chrome.alarms which fires
+// even when the MV3 service worker is otherwise sleeping.
+// ---------------------------------------------------------------------------
+const KEEPALIVE_ALARM = 'draftapply-keepalive';
+const KEEPALIVE_PERIOD_MINUTES = 14;
+
+async function pingProxyHealth() {
+  try {
+    await fetch(`${DEFAULT_PROXY_URL}/api/health`, { method: 'GET' });
+  } catch (_) {
+    // Network error during ping is expected when offline — ignore silently.
+  }
+}
+
+function ensureKeepaliveAlarm() {
+  chrome.alarms.get(KEEPALIVE_ALARM, alarm => {
+    if (!alarm) {
+      chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: KEEPALIVE_PERIOD_MINUTES });
+    }
+  });
+}
+
+chrome.alarms.onAlarm.addListener(alarm => {
+  if (alarm.name === KEEPALIVE_ALARM) pingProxyHealth();
+});
+
+// Recreate the alarm after install/update or browser restart (alarms persist
+// across SW restarts but are cleared on extension update/reinstall).
+chrome.runtime.onStartup.addListener(ensureKeepaliveAlarm);
+
 // Create context menu on install/update (idempotent)
 chrome.runtime.onInstalled.addListener(() => {
+  ensureKeepaliveAlarm();
+
   // On extension reload/update, Chrome may keep old menu items.
   // Ensure we don't throw "duplicate id" by removing first.
   chrome.contextMenus.remove('draftapply', () => {
@@ -486,20 +520,48 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sourceCompany: message.source?.sourceCompany || '',
         sourceSavedAt: message.source?.sourceSavedAt || new Date().toISOString(),
       };
+
+      // Phase 1: validate inputs and save running state.
+      // Respond immediately so the popup can start polling storage — the SW
+      // may be killed before sendResponse fires on long jobs, which causes the
+      // popup's sendMessage Promise to hang indefinitely.
+      let cvText;
       try {
-        const { cvText } = await chrome.storage.local.get('cvText');
+        const stored = await chrome.storage.local.get('cvText');
+        cvText = stored.cvText;
         if (!cvText) { sendResponse({ error: 'No CV loaded — please save your CV first' }); return; }
         await chrome.storage.local.set({ [TAILOR_JOB_KEY]: jobSnapshot });
+      } catch (e) {
+        sendResponse({ error: e.message });
+        return;
+      }
+      sendResponse({ started: true, jobId });
 
+      // Phase 2: run the job. The message channel is closed; popup polls storage.
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 360000);
+      const keepAlive = setInterval(() => chrome.storage.local.get('_sw_keepalive'), 20000);
+      try {
         const proxyUrl = await getProxyUrl();
         let token = await ensureInstallToken(proxyUrl);
 
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 150000);
-        const keepAlive = setInterval(() => chrome.storage.local.get('_sw_keepalive'), 20000);
+        let response = await fetch(`${proxyUrl}/api/cv/tailor`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          signal: controller.signal,
+          body: JSON.stringify({
+            cvText,
+            jobDescription: message.jobDescription,
+            jobTitle: message.jobTitle || '',
+            company:  message.company  || '',
+            confirmedSkills: message.confirmedSkills || [],
+          }),
+        });
 
-        try {
-          let response = await fetch(`${proxyUrl}/api/cv/tailor`, {
+        if (response.status === 401) {
+          await clearInstallToken();
+          token = await ensureInstallToken(proxyUrl);
+          response = await fetch(`${proxyUrl}/api/cv/tailor`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
             signal: controller.signal,
@@ -507,53 +569,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               cvText,
               jobDescription: message.jobDescription,
               jobTitle: message.jobTitle || '',
-              company:  message.company  || '',
+              company: message.company || '',
               confirmedSkills: message.confirmedSkills || [],
             }),
           });
-
-          if (response.status === 401) {
-            await clearInstallToken();
-            token = await ensureInstallToken(proxyUrl);
-            response = await fetch(`${proxyUrl}/api/cv/tailor`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-              signal: controller.signal,
-              body: JSON.stringify({
-                cvText,
-                jobDescription: message.jobDescription,
-                jobTitle: message.jobTitle || '',
-                company: message.company || '',
-                confirmedSkills: message.confirmedSkills || [],
-              }),
-            });
-          }
-
-          if (!response.ok) {
-            throw new Error(await responseErrorMessage(response));
-          }
-
-          const data = await response.json();
-          await setTailorJobIfCurrent(jobId, {
-            ...jobSnapshot,
-            status: 'done',
-            result: data,
-            completedAt: new Date().toISOString(),
-          });
-          sendResponse({ success: true, ...data });
-        } finally {
-          clearTimeout(timeout);
-          clearInterval(keepAlive);
         }
+
+        if (!response.ok) {
+          throw new Error(await responseErrorMessage(response));
+        }
+
+        const data = await response.json();
+        await setTailorJobIfCurrent(jobId, {
+          ...jobSnapshot,
+          status: 'done',
+          result: data,
+          completedAt: new Date().toISOString(),
+        });
       } catch (e) {
         const error = e?.name === 'AbortError' ? 'Timed out — please try again' : e.message;
         await setTailorJobIfCurrent(jobId, {
-            ...jobSnapshot,
-            status: 'error',
-            error,
-            completedAt: new Date().toISOString(),
-        });
-        sendResponse({ error });
+          ...jobSnapshot,
+          status: 'error',
+          error,
+          completedAt: new Date().toISOString(),
+        }).catch(() => {});
+      } finally {
+        clearTimeout(timeout);
+        clearInterval(keepAlive);
       }
     })();
     return true;
@@ -763,9 +806,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }, { frameId: 0 }, () => {
         if (chrome.runtime.lastError) {
           console.warn('Relay to main frame failed:', chrome.runtime.lastError.message);
+          sendResponse({ success: false, error: chrome.runtime.lastError.message });
+          return;
         }
+        sendResponse({ success: true });
       });
-      sendResponse({ success: true });
     })();
     return true;
   }
@@ -777,14 +822,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       chrome.tabs.sendMessage(tabId, {
         type: 'INSERT_FROM_PARENT',
         answer: message.answer
-      }, { frameId: message.targetFrameId }, () => {
+      }, { frameId: message.targetFrameId }, (response) => {
         if (chrome.runtime.lastError) {
           console.warn('Relay to iframe failed:', chrome.runtime.lastError.message);
+          sendResponse({ success: false, error: chrome.runtime.lastError.message });
+          return;
         }
+        sendResponse(response?.success ? { success: true } : { success: false, error: response?.error || 'Iframe did not confirm insert' });
       });
+      return true;
     }
-    sendResponse({ success: true });
-    return true;
+    sendResponse({ success: false, error: 'Missing iframe target' });
+    return;
   }
 
   if (message.type === 'CHECK_PAGE_ACTIVE') {
@@ -879,15 +928,13 @@ async function handleStreamingAPICall(payload, requestId, tabId, frameId) {
     const model = response.headers.get('X-DraftApply-Model');
     const fallbackFrom = response.headers.get('X-DraftApply-Fallback-From');
     if (provider || fallbackFrom) {
-      try {
-        chrome.tabs.sendMessage(tabId, {
-          type: 'STREAM_META',
-          requestId: effectiveRequestId,
-          provider,
-          model,
-          fallbackFrom
-        }, { frameId });
-      } catch (e) {}
+      chrome.tabs.sendMessage(tabId, {
+        type: 'STREAM_META',
+        requestId: effectiveRequestId,
+        provider,
+        model,
+        fallbackFrom
+      }, { frameId }).catch(() => {});
     }
 
     const reader = response.body.getReader();
@@ -895,9 +942,7 @@ async function handleStreamingAPICall(payload, requestId, tabId, frameId) {
     let buffer = '';
 
     const sendChunk = (chunk) => {
-      try {
-        chrome.tabs.sendMessage(tabId, { type: 'STREAM_CHUNK', requestId: effectiveRequestId, chunk }, { frameId });
-      } catch (e) {}
+      chrome.tabs.sendMessage(tabId, { type: 'STREAM_CHUNK', requestId: effectiveRequestId, chunk }, { frameId }).catch(() => {});
     };
 
     while (true) {
@@ -923,16 +968,12 @@ async function handleStreamingAPICall(payload, requestId, tabId, frameId) {
       }
     }
 
-    try {
-      chrome.tabs.sendMessage(tabId, { type: 'STREAM_DONE', requestId: effectiveRequestId }, { frameId });
-    } catch (e) {}
+    chrome.tabs.sendMessage(tabId, { type: 'STREAM_DONE', requestId: effectiveRequestId }, { frameId }).catch(() => {});
 
   } catch (e) {
     if (e?.name === 'AbortError') {
       // Cancelled — notify so the promise bridge resolves cleanly
-      try {
-        chrome.tabs.sendMessage(tabId, { type: 'STREAM_DONE', requestId: effectiveRequestId }, { frameId });
-      } catch (_) {}
+      chrome.tabs.sendMessage(tabId, { type: 'STREAM_DONE', requestId: effectiveRequestId }, { frameId }).catch(() => {});
       return;
     }
     throw e;

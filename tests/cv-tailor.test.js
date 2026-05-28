@@ -453,6 +453,114 @@ describe('validateTailoredCV', () => {
     const minimalCv = { rawText: 'Foo', contactInfo: {}, experience: [], education: [] };
     expect(tailor.validateTailoredCV(minimalCv, 'Foo bar baz')).toEqual([]);
   });
+
+  it('skips "Position: X" artefacts in the title loop', () => {
+    const cvWithArtefact = {
+      ...CV,
+      experience: [{ company: 'Acme Corp', title: 'Position: MLOps/DevOps Engineer', dates: '2022 - Present', responsibilities: [] }],
+    };
+    const tailored = 'Acme Corp\n2022 - Present\nMLOps Engineer\n- Built pipelines';
+    const warnings = tailor.validateTailoredCV(cvWithArtefact, tailored);
+    expect(warnings.every(w => !w.includes('Position:'))).toBe(true);
+  });
+
+  it('skips prose sentence fragment artefacts in both company and title loops', () => {
+    const cvWithArtefact = {
+      ...CV,
+      experience: [
+        { company: 'and communicating measures effectively.', title: 'operational scalability', dates: '2021 - 2022', responsibilities: [] },
+      ],
+    };
+    const warnings = tailor.validateTailoredCV(cvWithArtefact, faithfulTailoring());
+    expect(warnings.every(w => !w.includes('communicating') && !w.includes('operational scalability'))).toBe(true);
+  });
+});
+
+// ── isValidCvOutput ────────────────────────────────────────────────────────────
+
+describe('isValidCvOutput', () => {
+  it('returns true for valid CV text', () => {
+    const validCv = `John Smith
+john@example.com
+
+PROFESSIONAL SUMMARY
+Experienced platform engineer with 5 years building MLOps infrastructure.
+
+PROFESSIONAL EXPERIENCE
+Acme Corp
+Jan 2021 - Present
+Senior Platform Engineer
+- Built CI/CD pipelines for ML model deployment`;
+    expect(tailor.isValidCvOutput(validCv)).toBe(true);
+  });
+
+  it('returns false for text that is too short', () => {
+    expect(tailor.isValidCvOutput('Too short')).toBe(false);
+    expect(tailor.isValidCvOutput('')).toBe(false);
+    expect(tailor.isValidCvOutput(null)).toBe(false);
+  });
+
+  it('returns false when audit-echo phrases are present', () => {
+    const auditEcho = `AUDIT INSTRUCTION
+Review the tailored CV below and remove any unsupported claims.
+
+PROFESSIONAL EXPERIENCE
+Acme Corp
+Engineer`;
+    expect(tailor.isValidCvOutput(auditEcho)).toBe(false);
+  });
+
+  it('returns false when no CV section header is present', () => {
+    const prose = 'This is a long prose text without any CV section headers. It could be an error response or prompt echo that has been returned accidentally by the LLM. No section headers here at all.';
+    expect(tailor.isValidCvOutput(prose)).toBe(false);
+  });
+});
+
+// ── _ensureCoreCompetencies ───────────────────────────────────────────────────
+
+describe('_ensureCoreCompetencies', () => {
+  it('inserts a CORE COMPETENCIES section before PROFESSIONAL EXPERIENCE when absent', () => {
+    const cv = `John Smith
+
+PROFESSIONAL SUMMARY
+Experienced engineer.
+
+PROFESSIONAL EXPERIENCE
+Acme Corp
+2021 - Present
+Senior Engineer
+- Built pipelines`;
+
+    const matchMap = [
+      { requirement: 'Python', type: 'tool', allowedToMention: true },
+      { requirement: 'Kubernetes', type: 'tool', allowedToMention: true },
+      { requirement: 'MLOps', type: 'required', allowedToMention: true },
+      { requirement: 'CI/CD', type: 'required', allowedToMention: true },
+    ];
+
+    const result = tailor._ensureCoreCompetencies(cv, matchMap, [], {});
+    expect(result).toMatch(/^CORE COMPETENCIES\s*$/im);
+    const coreIdx = result.search(/^CORE COMPETENCIES\s*$/im);
+    const expIdx = result.search(/^PROFESSIONAL EXPERIENCE\s*$/im);
+    expect(coreIdx).toBeLessThan(expIdx);
+  });
+
+  it('does not insert a duplicate CORE COMPETENCIES section when one already exists', () => {
+    const cv = `John Smith
+
+CORE COMPETENCIES
+Technical Tools: Python, Kubernetes
+
+PROFESSIONAL EXPERIENCE
+Acme Corp
+2021 - Present
+Senior Engineer`;
+
+    const matchMap = [{ requirement: 'Python', type: 'tool', allowedToMention: true }];
+    const result = tailor._ensureCoreCompetencies(cv, matchMap, [], {});
+    const count = (result.match(/^CORE COMPETENCIES\s*$/gim) || []).length;
+    expect(count).toBe(1);
+  });
 });
 
 // ── validateTailoringQuality ─────────────────────────────────────────────────
@@ -1059,6 +1167,94 @@ TechCorp`;
   });
 });
 
+describe('finalizeTailoredCV quality gates', () => {
+  it('removes duplicate trailing skills sections when Core Competencies exists', () => {
+    const tailored = `John Doe
+Senior Software Engineer
+john@example.com
+
+PROFESSIONAL SUMMARY
+Frontend and cloud engineer.
+
+CORE COMPETENCIES
+Frontend Engineering: React, TypeScript
+Cloud & Platform Engineering: AWS, Docker
+Programming & Automation: JavaScript
+Delivery & Reliability: CI/CD, Git
+Team Collaboration: Code Review, Mentoring
+
+PROFESSIONAL EXPERIENCE
+TechCorp
+Jan 2021 – Present
+Senior Frontend Engineer
+- Built React dashboards
+
+SKILLS
+Technical Architecture & Integration: CI/CD
+Programming & Automation: JavaScript`;
+
+    const map = tailor.buildMatchMap(CV, JD);
+    const result = tailor.finalizeTailoredCV(tailored, { cvData: CV, jdData: JD, matchMap: map });
+
+    expect((result.match(/^CORE COMPETENCIES\s*$/gim) || []).length).toBe(1);
+    expect(result).not.toMatch(/^SKILLS\s*$/im);
+    expect(result).not.toMatch(/Technical Architecture & Integration: CI\/CD/);
+  });
+
+  it('restores enough supported experience bullets when the model makes roles too thin', () => {
+    const cvData = {
+      ...CV,
+      experience: [
+        {
+          title: 'Senior Frontend Engineer',
+          company: 'TechCorp',
+          dates: 'Jan 2021 – Present',
+          responsibilities: [
+            'Built React and TypeScript dashboards used by 200+ internal users',
+            'Optimised PostgreSQL queries, reducing report generation time',
+            'Deployed containerised services to AWS using Docker',
+            'Maintained Git workflows and CI pipelines for release reliability',
+            'Mentored junior engineers through code review and delivery planning',
+          ],
+        },
+        CV.experience[1],
+      ],
+    };
+    const tailored = `John Doe
+Senior Software Engineer
+john@example.com
+
+PROFESSIONAL SUMMARY
+Senior engineer with frontend and cloud experience.
+
+CORE COMPETENCIES
+Frontend Engineering: React, TypeScript
+Backend & APIs: Node.js, REST APIs
+Cloud & Containers: AWS, Docker
+Software Delivery: Git, CI Pipelines
+Team Collaboration: Mentoring, Communication
+
+PROFESSIONAL EXPERIENCE
+TechCorp
+Jan 2021 – Present
+Senior Frontend Engineer
+- Built React dashboards
+
+StartupXYZ
+Jun 2019 – Dec 2020
+Junior Developer
+- Developed Node.js REST APIs serving 50k requests/day`;
+
+    const map = tailor.buildMatchMap(cvData, JD);
+    const result = tailor.finalizeTailoredCV(tailored, { cvData, jdData: JD, matchMap: map });
+    const techCorpBlock = result.match(/TechCorp[\s\S]*?(?=StartupXYZ)/)?.[0] || '';
+    const bullets = techCorpBlock.match(/^-/gm) || [];
+
+    expect(bullets.length).toBeGreaterThanOrEqual(4);
+    expect(techCorpBlock).toMatch(/AWS using Docker|CI pipelines|PostgreSQL queries/);
+  });
+});
+
 // ── buildTailoringPrompt ──────────────────────────────────────────────────────
 
 describe('buildTailoringPrompt', () => {
@@ -1197,10 +1393,10 @@ React, Track record of leading POCs and world-class demos`;
     );
 
     expect(systemPrompt).toContain('strict CV truth-auditor');
-    expect(systemPrompt).toContain('recruiter screen');
-    expect(systemPrompt).toContain('Would this CV credibly pass a 30-second recruiter screen for this exact role?');
-    expect(systemPrompt).toContain('Every skill, claim, achievement, tool, methodology, domain phrase, and focus line');
-    expect(systemPrompt).toContain('If a phrase only appears in the JD or target role and has no support, remove it');
+    expect(systemPrompt).toContain('PERMITTED ACTIONS');
+    expect(systemPrompt).toContain('FORBIDDEN');
+    expect(systemPrompt).toContain('ALWAYS PRESERVE');
+    expect(systemPrompt).toContain('Do not add any new skill');
     expect(userPrompt).toContain('ORIGINAL CV');
     expect(userPrompt).toContain(CV.rawText);
     expect(userPrompt).toContain('TAILORED CV TO AUDIT');
@@ -1208,7 +1404,21 @@ React, Track record of leading POCs and world-class demos`;
     expect(userPrompt).toContain('Evidence: "Built React dashboards used by support engineers."');
     expect(userPrompt).toContain('✗ Track record of leading POCs and world-class demos');
     expect(userPrompt).toContain('+ Grafana');
-    expect(userPrompt).toContain('30-second human recruiter scan');
-    expect(temperature).toBe(0.1);
+    expect(userPrompt).toContain('AUDIT INSTRUCTION');
+    expect(temperature).toBe(0.2);
+  });
+
+  it('tailoring prompt instructs the model to preserve ALL original bullets per role', () => {
+    const map = tailor.buildMatchMap(CV, JD);
+    const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(CV, JD, map);
+    expect(systemPrompt + userPrompt).toMatch(/preserve ALL original bullets/i);
+    expect(systemPrompt + userPrompt).not.toMatch(/rewrite relevant bullets/i);
+  });
+
+  it('audit prompt preserves every experience bullet and only removes fabricated claims', () => {
+    const map = tailor.buildMatchMap(CV, JD);
+    const { systemPrompt } = tailor.buildTailoredCvAuditPrompt(CV, JD, map, CV.rawText, []);
+    expect(systemPrompt).toMatch(/Every experience bullet.*must remain/i);
+    expect(systemPrompt).toMatch(/only remove a bullet if it contains/i);
   });
 });

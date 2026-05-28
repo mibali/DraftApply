@@ -327,16 +327,16 @@ The answer must feel like something the candidate wrote themselves on a good day
       }
     }
 
-    if (cvData.skills?.length > 0) {
-      context += `### Skills\n${cvData.skills.join(', ')}\n\n`;
-    }
-
     if (cvData.achievements?.length > 0) {
-      context += '### Key Achievements\n';
-      for (const achievement of cvData.achievements.slice(0, 8)) {
+      context += '### Key Evidence (quantified — use as primary proof points)\n';
+      for (const achievement of cvData.achievements.slice(0, 10)) {
         context += `- ${achievement}\n`;
       }
       context += '\n';
+    }
+
+    if (cvData.skills?.length > 0) {
+      context += `### Skills\n${cvData.skills.join(', ')}\n\n`;
     }
 
     if (cvData.education?.length > 0) {

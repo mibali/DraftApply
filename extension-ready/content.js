@@ -105,12 +105,14 @@ class DraftApplyExtension {
     // Re-extract on SPA navigation — stored so destroy() can remove it
     this._onPopState = () => {
       try { if (!chrome.runtime?.id) return; } catch { return; }
+      this.clearSessionForNavigation();
       this.scheduleContextRefresh('popstate', 100);
     };
     window.addEventListener('popstate', this._onPopState);
 
     this._onDraftApplyNavigation = () => {
       try { if (!chrome.runtime?.id) return; } catch { return; }
+      this.clearSessionForNavigation();
       this.scheduleContextRefresh('history', 250);
     };
     window.addEventListener('draftapply:navigation', this._onDraftApplyNavigation);
@@ -197,6 +199,13 @@ class DraftApplyExtension {
     this._prefetchByQuestion.clear();
     document.querySelectorAll('.da-field-btn-overlay.da-btn-ready,.da-field-btn-overlay.da-btn-prefetching')
       .forEach(btn => btn.classList.remove('da-btn-ready', 'da-btn-prefetching'));
+  }
+
+  clearSessionForNavigation() {
+    this.clearAnswerCaches();
+    this._iframeSourceFrameId = null;
+    this.currentField = null;
+    this.lastFocusedField = null;
   }
 
   scheduleContextRefresh(_reason = 'change', delay = 900) {
@@ -289,32 +298,32 @@ class DraftApplyExtension {
           <div class="da-answer-label">Generated Answer <span id="da-char-hint" class="da-char-hint"></span></div>
           <textarea class="da-answer-output" id="da-answer-output" placeholder="Your answer will appear here. You can edit it before inserting."></textarea>
           <div id="da-char-counter" class="da-char-counter" hidden></div>
-          <div class="da-modal-actions">
-            <div class="da-controls-row">
-              <div class="da-control-group">
-                <span class="da-control-label">Length</span>
-                <div class="da-length-pills" id="da-length-pills" role="group" aria-label="Answer length">
-                  <button type="button" class="da-length-pill" data-value="short">Short</button>
-                  <button type="button" class="da-length-pill da-pill-active" data-value="medium">Medium</button>
-                  <button type="button" class="da-length-pill" data-value="long">Long</button>
-                </div>
-              </div>
-              <div class="da-control-group">
-                <span class="da-control-label">Tone</span>
-                <div class="da-tone-pills" id="da-tone-pills" role="group" aria-label="Answer tone">
-                  <button type="button" class="da-tone-pill" data-value="formal">Formal</button>
-                  <button type="button" class="da-tone-pill da-pill-active" data-value="natural">Natural</button>
-                  <button type="button" class="da-tone-pill" data-value="direct">Direct</button>
-                </div>
+          <input type="hidden" id="da-length-select" value="medium">
+          <input type="hidden" id="da-tone-select" value="natural">
+        </div>
+        <div class="da-modal-actions">
+          <div class="da-controls-row">
+            <div class="da-control-group">
+              <span class="da-control-label">Length</span>
+              <div class="da-length-pills" id="da-length-pills" role="group" aria-label="Answer length">
+                <button type="button" class="da-length-pill" data-value="short">Short</button>
+                <button type="button" class="da-length-pill da-pill-active" data-value="medium">Medium</button>
+                <button type="button" class="da-length-pill" data-value="long">Long</button>
               </div>
             </div>
-            <input type="hidden" id="da-length-select" value="medium">
-            <input type="hidden" id="da-tone-select" value="natural">
-            <div class="da-modal-actions-row">
-              <button class="da-btn da-btn-regenerate" id="da-btn-regenerate">Regenerate</button>
-              <button class="da-btn da-btn-copy" id="da-btn-copy">Copy</button>
-              <button class="da-btn da-btn-insert" id="da-btn-insert">Insert Answer</button>
+            <div class="da-control-group">
+              <span class="da-control-label">Tone</span>
+              <div class="da-tone-pills" id="da-tone-pills" role="group" aria-label="Answer tone">
+                <button type="button" class="da-tone-pill" data-value="formal">Formal</button>
+                <button type="button" class="da-tone-pill da-pill-active" data-value="natural">Natural</button>
+                <button type="button" class="da-tone-pill" data-value="direct">Direct</button>
+              </div>
             </div>
+          </div>
+          <div class="da-modal-actions-row">
+            <button class="da-btn da-btn-regenerate" id="da-btn-regenerate">Regenerate</button>
+            <button class="da-btn da-btn-copy" id="da-btn-copy">Copy</button>
+            <button class="da-btn da-btn-insert" id="da-btn-insert">Insert Answer</button>
           </div>
         </div>
         <div class="da-loading" id="da-loading" hidden role="status" aria-label="Generating answer">
@@ -333,13 +342,24 @@ class DraftApplyExtension {
     if (logoImg) logoImg.addEventListener('error', () => { logoImg.style.display = 'none'; });
 
     // Bind events first (they persist even if modal is detached from DOM)
-    modal.querySelector('.da-modal-close').onclick = () => this.hideModal();
-    modal.querySelector('#da-btn-insert').onclick = () => this.insertAnswer();
-    modal.querySelector('#da-btn-regenerate').onclick = () => this.regenerate();
-    modal.querySelector('#da-btn-copy').onclick = () => this.copyAnswer();
-    modal.querySelector('#da-btn-stop').onclick = () => this.cancelGeneration();
-    modal.querySelector('#da-jd-confirm').onclick = () => this._confirmJdPaste();
-    modal.querySelector('#da-jd-cancel').onclick = () => this._cancelJdPaste();
+    const bindModalAction = (selector, handler) => {
+      const el = modal.querySelector(selector);
+      if (!el) return;
+      el.onclick = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation?.();
+        handler(event);
+      };
+    };
+
+    bindModalAction('.da-modal-close', () => this.hideModal());
+    bindModalAction('#da-btn-insert', (event) => this.insertAnswer(event));
+    bindModalAction('#da-btn-regenerate', () => this.regenerate());
+    bindModalAction('#da-btn-copy', () => this.copyAnswer());
+    bindModalAction('#da-btn-stop', () => this.cancelGeneration());
+    bindModalAction('#da-jd-confirm', () => this._confirmJdPaste());
+    bindModalAction('#da-jd-cancel', () => this._cancelJdPaste());
     modal.querySelector('#da-length-pills').onclick = (e) => {
       const pill = e.target.closest('.da-length-pill');
       if (!pill) return;
@@ -517,19 +537,27 @@ class DraftApplyExtension {
       // Iframe receives this when the parent frame's user clicks "Insert Answer"
       if (message.type === 'INSERT_FROM_PARENT') {
         if (window === window.top) return; // Only handle in iframes
-        const target = this.currentField || this.lastFocusedField;
-        if (target?.isConnected) {
+        (async () => {
+          const target = this.currentField || this.lastFocusedField;
+          if (!target?.isConnected) {
+            sendResponse({ success: false, error: 'Target field no longer exists' });
+            return;
+          }
           try {
-            target.scrollIntoView?.({ block: 'center', inline: 'nearest' });
-            target.focus?.();
-            this.setNativeValue(target, message.answer);
-            this.dispatchInputEvents(target, message.answer);
+            const inserted = await this.writeAnswerToTarget(target, message.answer);
+            if (!inserted) {
+              sendResponse({ success: false, error: 'Field rejected inserted value' });
+              return;
+            }
             this.showNotification('Answer inserted!');
             globalThis.DraftApplyStats?.track?.('answersInserted')?.catch?.(() => {});
+            sendResponse({ success: true });
           } catch (e) {
             console.warn('[DraftApply] Insert from parent failed:', e);
+            sendResponse({ success: false, error: e?.message || 'Insert failed' });
           }
-        }
+        })();
+        return true;
       }
       
       if (message.type === 'SHOW_NOTIFICATION') {
@@ -1100,14 +1128,22 @@ class DraftApplyExtension {
     // If running inside an iframe, relay to the parent frame for modal display
     // (modals inside iframes are often invisible due to viewport clipping)
     if (window !== window.top) {
-      chrome.runtime.sendMessage({
-        type: 'RELAY_GENERATE_TO_PARENT',
-        question,
-        pageContext: this.pageContext
-      });
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: 'RELAY_GENERATE_TO_PARENT',
+          question,
+          pageContext: this.pageContext
+        });
+        if (!response?.success) {
+          this.showNotification('Could not open DraftApply from this embedded form. Try activating it from the main page.', 'error');
+        }
+      } catch (e) {
+        this.showNotification('Could not open DraftApply from this embedded form. Try activating it from the main page.', 'error');
+      }
       return;
     }
     
+    this._iframeSourceFrameId = null;
     this.showModal(question);
     await this.generateAnswer(question);
   }
@@ -1154,10 +1190,15 @@ class DraftApplyExtension {
   hideModal() {
     // If a generation is in-flight, cancel it to avoid "infinite spinner" behavior.
     this.cancelGeneration({ silent: true });
+    this._iframeSourceFrameId = null;
     if (this.modal) this.modal.setAttribute('style', 'display:none !important;');
   }
 
   async generateAnswer(question) {
+    if (this.currentRequestId) {
+      await this.cancelGeneration({ silent: true });
+    }
+
     const loading = this.modal.querySelector('#da-loading');
     const output = this.modal.querySelector('#da-answer-output');
     const length = this.modal.querySelector('#da-length-select').value;
@@ -1341,6 +1382,7 @@ class DraftApplyExtension {
   async regenerate() {
     const question = this.modal.querySelector('#da-question-preview').value.trim();
     if (!question) return;
+    await this.cancelGeneration({ silent: true });
     await this.generateAnswer(question);
   }
 
@@ -1400,6 +1442,81 @@ class DraftApplyExtension {
     if (!options.silent) {
       this.showNotification('Cancelled generation.');
     }
+  }
+
+  async writeAnswerToTarget(target, answerToInsert) {
+    if (!target?.isConnected || !answerToInsert) return false;
+
+    const applyValue = () => {
+      target.scrollIntoView?.({ block: 'center', inline: 'nearest' });
+      target.focus?.();
+
+      if (target.isContentEditable || target.getAttribute?.('contenteditable') === 'true' || target.getAttribute?.('role') === 'textbox') {
+        this.setContentEditableValue(target, answerToInsert);
+        this.dispatchInputEvents(target, answerToInsert);
+        return;
+      }
+
+      if (typeof target.setSelectionRange === 'function') {
+        try {
+          target.setSelectionRange(0, target.value?.length ?? 0);
+        } catch (e) {
+          // Some inputs (e.g. type=number/date) can throw; ignore.
+        }
+      }
+
+      this.setNativeValue(target, answerToInsert);
+      this.dispatchInputEvents(target, answerToInsert);
+    };
+
+    applyValue();
+    await new Promise(resolve => setTimeout(resolve, 75));
+    if (this.targetHasInsertedAnswer(target, answerToInsert)) return true;
+
+    // Some controlled React/Vue inputs briefly roll back after the first event.
+    // A second write after the page has processed the first input event catches
+    // that common race without hiding the modal prematurely.
+    applyValue();
+    await new Promise(resolve => setTimeout(resolve, 75));
+    return this.targetHasInsertedAnswer(target, answerToInsert);
+  }
+
+  setContentEditableValue(target, value) {
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(target);
+      range.deleteContents();
+      const textNode = document.createTextNode(value);
+      range.insertNode(textNode);
+      range.setStartAfter(textNode);
+      range.collapse(true);
+
+      const selection = window.getSelection?.();
+      if (selection) {
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+    } catch (e) {
+      target.textContent = value;
+    }
+  }
+
+  targetHasInsertedAnswer(target, expected) {
+    if (!target?.isConnected) return false;
+    const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const expectedNorm = normalize(expected);
+    if (!expectedNorm) return false;
+
+    if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) {
+      return normalize(target.value) === expectedNorm;
+    }
+
+    if (target.isContentEditable || target.getAttribute?.('contenteditable') === 'true' || target.getAttribute?.('role') === 'textbox') {
+      const actual = normalize(target.innerText || target.textContent || '');
+      return actual === expectedNorm || actual.includes(expectedNorm);
+    }
+
+    return false;
   }
 
   getInsertionTarget() {
@@ -1484,27 +1601,45 @@ class DraftApplyExtension {
     }
   }
 
-  insertAnswer() {
+  async insertAnswer(event) {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    event?.stopImmediatePropagation?.();
+
     const raw = String(this.modal?.querySelector?.('#da-answer-output')?.value || '').trim();
     // Don't insert error/status messages that the UI writes into the textarea
     const current = (raw && !raw.startsWith('Error:') && raw !== 'Cancelled.') ? raw : '';
     const answerToInsert = current || this.lastAnswer;
+    const insertBtn = this.modal?.querySelector?.('#da-btn-insert');
 
     if (!answerToInsert) {
       this.showNotification('No answer to insert yet.', 'error');
       return;
     }
 
+    if (insertBtn?.disabled) return;
+    if (insertBtn) insertBtn.disabled = true;
+
     // If this modal is serving an iframe, relay the answer back to the iframe for insertion
     if (this._iframeSourceFrameId != null) {
-      chrome.runtime.sendMessage({
-        type: 'RELAY_INSERT_TO_IFRAME',
-        answer: answerToInsert,
-        targetFrameId: this._iframeSourceFrameId
-      });
-      this.hideModal();
-      this.showNotification('Answer inserted!');
-      this._iframeSourceFrameId = null;
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: 'RELAY_INSERT_TO_IFRAME',
+          answer: answerToInsert,
+          targetFrameId: this._iframeSourceFrameId
+        });
+        if (!response?.success) {
+          this.showNotification('Could not insert into the embedded form. The answer is still here to copy.', 'error');
+          return;
+        }
+        this.hideModal();
+        this.showNotification('Answer inserted!');
+        this._iframeSourceFrameId = null;
+      } catch (e) {
+        this.showNotification('Could not reach the embedded form. The answer is still here to copy.', 'error');
+      } finally {
+        if (insertBtn) insertBtn.disabled = false;
+      }
       return;
     }
 
@@ -1515,38 +1650,15 @@ class DraftApplyExtension {
       // Copy to clipboard and tell the user explicitly so they aren't confused.
       navigator.clipboard.writeText(answerToInsert).catch(() => {});
       this.showNotification('Field no longer found — answer copied to clipboard instead.', 'error');
+      if (insertBtn) insertBtn.disabled = false;
       return;
     }
 
     try {
-      // Ensure focus/visibility
-      target.scrollIntoView?.({ block: 'center', inline: 'nearest' });
-      target.focus?.();
-
-      // Contenteditable
-      if (target.isContentEditable || target.getAttribute?.('contenteditable') === 'true' || target.getAttribute?.('role') === 'textbox') {
-        // Prefer execCommand if available (works on many rich text editors)
-        if (typeof document.execCommand === 'function') {
-          document.execCommand('selectAll', false);
-          document.execCommand('insertText', false, answerToInsert);
-        } else {
-          target.textContent = answerToInsert;
-        }
-
-        this.dispatchInputEvents(target, answerToInsert);
-      } else {
-        // Inputs/Textareas (React/Vue/Angular friendly)
-        // Prefer selecting all first (helps on some controlled inputs)
-        if (typeof target.setSelectionRange === 'function') {
-          try {
-            target.setSelectionRange(0, target.value?.length ?? 0);
-          } catch (e) {
-            // Some inputs (e.g. type=number) can throw; ignore.
-          }
-        }
-
-        this.setNativeValue(target, answerToInsert);
-        this.dispatchInputEvents(target, answerToInsert);
+      const inserted = await this.writeAnswerToTarget(target, answerToInsert);
+      if (!inserted) {
+        this.showNotification('The page rejected the insert. The answer is still here to copy or try again.', 'error');
+        return;
       }
 
       this.currentField = target;
@@ -1556,6 +1668,8 @@ class DraftApplyExtension {
     } catch (e) {
       console.warn('[DraftApply] Insert failed:', e);
       this.showNotification('Could not insert into that field. Try clicking the field and typing once, then Insert again.', 'error');
+    } finally {
+      if (insertBtn) insertBtn.disabled = false;
     }
   }
 
@@ -1564,7 +1678,6 @@ class DraftApplyExtension {
     const text = output?.value?.trim() || this.lastAnswer;
     try {
       await navigator.clipboard.writeText(text);
-      this.hideModal();
       this.showNotification('Copied to clipboard! Paste with Ctrl+V / Cmd+V');
     } catch (e) {
       this.showNotification('Could not copy. Please select and copy the text manually.', 'error');

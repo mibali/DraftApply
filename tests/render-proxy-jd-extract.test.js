@@ -25,4 +25,11 @@ describe('Render proxy JD extraction route', () => {
     expect(route).toContain('Remove completely:');
     expect(route).toContain('res.json({ extractedText, provider: completion.provider, fallbackFrom: completion.fallbackFrom || undefined })');
   });
+
+  it('keeps profile URL fields deterministic even with compound labels', () => {
+    expect(renderProxyServer).toContain('/^linkedin(?:\\s*(?:url|link|profile|page))*$/i');
+    expect(renderProxyServer).toContain('/^github(?:\\s*(?:url|link|profile|page))*$/i');
+    expect(renderProxyServer).toContain('normalizeExtractedUrl');
+    expect(renderProxyServer).toContain('link\\s+(?:to\\s+)?(?:your\\s+)?');
+  });
 });

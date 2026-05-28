@@ -56,10 +56,12 @@ describe('popup productivity stats UI', () => {
   });
 
   it('stops polling stuck Tailor CV jobs and clears stale job state', () => {
-    expect(popupJs).toContain('const TAILOR_JOB_MAX_POLL_MS = 3 * 60 * 1000');
-    expect(popupJs).toContain('Date.now() - tailorJobPollStartedAt > TAILOR_JOB_MAX_POLL_MS');
+    expect(popupJs).toContain('const TAILOR_JOB_MAX_POLL_MS = 7 * 60 * 1000');
+    expect(popupJs).toContain('jobAgeMs > TAILOR_JOB_MAX_POLL_MS');
+    expect(popupJs).toContain("Date.parse(job?.startedAt || '')");
     expect(popupJs).toContain('await chrome.storage.local.remove(TAILOR_JOB_KEY)');
     expect(popupJs).toContain('CV generation is taking longer than expected');
+    expect(popupJs).toContain('Previous CV generation timed out before DraftApply could finish');
   });
 
   it('resets generated Tailor results when the saved CV changes but keeps the draft JD available', () => {
@@ -76,6 +78,14 @@ describe('popup productivity stats UI', () => {
   it('labels OpenRouter Tailor output as a fallback when Groq failed over', () => {
     expect(popupJs).toContain('fallbackFrom');
     expect(popupJs).toContain('fallback from');
+  });
+
+  it('sets user-friendly Tailor CV loading copy when providers are busy and fallback is likely', () => {
+    expect(popupJs).toContain('const TAILOR_FALLBACK_HINT_MS = 10 * 1000');
+    expect(popupJs).toContain('startTailorLoadingHint');
+    expect(popupJs).toContain('stopTailorLoadingHint');
+    expect(popupJs).toContain('Provider is busy, retrying fallback models…');
+    expect(popupJs).toContain('This can take a few minutes if DraftApply needs fallback');
   });
 
   it('explains Tailor CV warnings with a review-before-sending action', () => {

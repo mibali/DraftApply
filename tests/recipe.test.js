@@ -61,10 +61,14 @@ Used log analysis to reproduce and isolate customer platform issues.`,
     });
 
     expect(prompt.systemPrompt).toMatch(/troubleshooting\/process question/i);
-    expect(prompt.systemPrompt).toMatch(/define\/reproduce the issue, gather evidence, isolate variables, test hypotheses/i);
+    expect(prompt.systemPrompt).toMatch(/define or reproduce the issue, gather evidence, isolate variables, test hypotheses/i);
+    expect(prompt.systemPrompt).toMatch(/first sentence must name the sequence before any employer\/example appears/i);
+    expect(prompt.systemPrompt).toMatch(/not a vague "structured approach" sentence/i);
     expect(prompt.systemPrompt).toMatch(/AVOID:/);
-    expect(prompt.userPrompt).toMatch(/one specific CV example/i);
+    expect(prompt.userPrompt).toMatch(/state the actual method as a sequence/i);
+    expect(prompt.userPrompt).toMatch(/Second sentence: explain how you decide what to inspect first/i);
     expect(prompt.userPrompt).toMatch(/no bullet list/i);
+    expect(prompt.userPrompt).toMatch(/Do not repeat the same sentence twice/i);
     expect(prompt.maxTokens).toBeLessThanOrEqual(380);
   });
 
@@ -161,6 +165,33 @@ Used log analysis to reproduce and isolate customer platform issues.`,
     expect(prompt.userPrompt).toMatch(/Kubernetes platform operations/);
   });
 
+  it('treats covering-letter fields as cover letters and requires company context in the opening', () => {
+    const prompt = buildPrompts({
+      question: 'Covering Letter',
+      length: 'medium',
+      tone: 'natural',
+      cvText: CV,
+      jobTitle: 'Principal AI Solution Architect',
+      company: 'NeuralBridge Cloud',
+      jobDescription: 'NeuralBridge Cloud helps regulated enterprises design, deploy, and govern production AI systems. The role leads customer-facing GenAI, RAG, observability, and secure cloud architecture work.',
+      jdData: {
+        responsibilities: [
+          'Lead discovery and architecture for customer-facing GenAI programmes',
+          'Guide customers through production readiness, observability, and governance decisions',
+        ],
+        requiredSkills: ['GenAI architecture', 'Cloud architecture'],
+        tools: ['RAG', 'Kubernetes'],
+      },
+    });
+
+    expect(prompt.questionType).toBe('cover_letter');
+    expect(prompt.systemPrompt).toMatch(/MUST use one concrete company\/business detail/i);
+    expect(prompt.systemPrompt).toMatch(/what the company builds, who it serves, its mission, market, product, or operating environment/i);
+    expect(prompt.systemPrompt).toMatch(/Do not only repeat the job title and location/i);
+    expect(prompt.userPrompt).toMatch(/regulated enterprises design, deploy, and govern production AI systems/);
+    expect(prompt.userPrompt).toMatch(/explicitly connect my background to one real company\/business detail/i);
+  });
+
   it('surfaces unsupported directly-asked requirements so the answer does not overclaim', () => {
     const prompt = buildPrompts({
       question: 'Do you have experience with Redis?',
@@ -212,6 +243,40 @@ Worked with engineering and support stakeholders to prioritise fixes.`,
     expect(prompt.userPrompt).toMatch(/support escalations -> customer pain-point discovery/);
     expect(prompt.userPrompt).toMatch(/Do not claim without direct CV evidence/);
     expect(prompt.userPrompt).toMatch(/Use this rubric to choose evidence, not to stuff keywords/);
+  });
+
+  it('treats "Please link your LinkedIn profile" as a data extraction field, not an essay', () => {
+    const cvWithLinkedIn = `${CV}\nhttps://linkedin.com/in/michael-test-bali`;
+    const prompt = buildPrompts({
+      question: 'Please link your LinkedIn profile.',
+      cvText: cvWithLinkedIn,
+    });
+
+    expect(prompt.systemPrompt).toMatch(/data extraction assistant/i);
+    expect(prompt.userPrompt).toMatch(/linkedin\.com\/in\/michael-test-bali/);
+    expect(prompt.userPrompt).toMatch(/Return ONLY the value/i);
+  });
+
+  it('treats "Please share your LinkedIn URL" as a data extraction field', () => {
+    const cvWithLinkedIn = `${CV}\nhttps://linkedin.com/in/michael-test-bali`;
+    const prompt = buildPrompts({
+      question: 'Please share your LinkedIn URL',
+      cvText: cvWithLinkedIn,
+    });
+
+    expect(prompt.systemPrompt).toMatch(/data extraction assistant/i);
+  });
+
+  it('treats sentence-style portfolio link requests as data extraction fields', () => {
+    const cvWithPortfolio = `${CV}\nPortfolio: michaelbali.dev/work`;
+    const prompt = buildPrompts({
+      question: 'Please provide a link to your portfolio.',
+      cvText: cvWithPortfolio,
+    });
+
+    expect(prompt.systemPrompt).toMatch(/data extraction assistant/i);
+    expect(prompt.userPrompt).toMatch(/portfolio/i);
+    expect(prompt.userPrompt).toMatch(/Return ONLY the value/i);
   });
 
   it('keeps role-profile rubrics out of salary answers', () => {

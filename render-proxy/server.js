@@ -11,6 +11,7 @@ import { pathToFileURL } from 'url';
 import { CVParser } from '../shared/cv-parser.js';
 import { JDParser } from '../shared/jd-parser.js';
 import { CVTailor } from '../shared/cv-tailor.js';
+import { evaluateAnswer, buildRegenerationFeedback } from '../shared/answer-evaluator.js';
 import {
   coercePositiveInteger,
   OpenRouterFreeModelCache,
@@ -24,6 +25,7 @@ const PORT = Number(process.env.PORT || 10000);
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const OPENROUTER_MODEL = (process.env.OPENROUTER_MODEL || '').trim();
 const OPENROUTER_SITE_URL = process.env.OPENROUTER_SITE_URL || 'https://draftapply.com';
 const OPENROUTER_APP_NAME = process.env.OPENROUTER_APP_NAME || 'DraftApply';
 const OPENROUTER_TAILOR_FALLBACK = !/^false$/i.test(process.env.OPENROUTER_TAILOR_FALLBACK || 'true');
@@ -309,7 +311,10 @@ async function callProviderChat(provider, {
 
 async function getOpenRouterFallbackModelOrder() {
   const models = await openRouterModelCache.getModels();
-  return buildOpenRouterFallbackModelOrder(models, PREFERRED_OPENROUTER_FREE_MODELS)
+  const preferred = OPENROUTER_MODEL
+    ? [OPENROUTER_MODEL, ...PREFERRED_OPENROUTER_FREE_MODELS.filter(model => model !== OPENROUTER_MODEL)]
+    : PREFERRED_OPENROUTER_FREE_MODELS;
+  return buildOpenRouterFallbackModelOrder(models, preferred)
     .slice(0, OPENROUTER_MAX_FALLBACK_MODELS);
 }
 
@@ -320,6 +325,9 @@ async function callOpenRouterFreeFallback(options, { callStart, fallbackFrom = '
   } catch (error) {
     throw new LLMProviderError('openrouter', 0, error.message || 'Could not load OpenRouter free model catalogue');
   }
+  if (Number.isFinite(Number(options.maxFallbackModels)) && Number(options.maxFallbackModels) > 0) {
+    orderedModels = orderedModels.slice(0, Number(options.maxFallbackModels));
+  }
   if (orderedModels.length === 0) {
     throw new LLMProviderError('openrouter', 0, 'No free OpenRouter text models are currently available');
   }
@@ -327,8 +335,7 @@ async function callOpenRouterFreeFallback(options, { callStart, fallbackFrom = '
   let lastError = null;
   for (let i = 0; i < orderedModels.length; i += 1) {
     const model = orderedModels[i];
-    const elapsed = Date.now() - callStart;
-    const timeoutMs = Math.max(8000, (options.timeoutMs || 60000) - elapsed);
+    const timeoutMs = Math.max(8000, options.fallbackTimeoutMs || options.timeoutMs || 60000);
     try {
       return {
         ...(await callProviderChat('openrouter', {
@@ -454,23 +461,25 @@ const DETERMINISTIC_EXTRACTORS = [
     const m = cv.match(/(?:\+\d[\d\s\-.()]{6,18}\d|\b\d{3}[\s\-.]\d{3}[\s\-.]\d{4}\b)/);
     return m ? m[0].trim() : null;
   }],
-  [/^linkedin(\s*(url|link|profile|page))?$/i, cv => {
-    const m = cv.match(/https?:\/\/(?:www\.)?linkedin\.com\/in\/[\w\-_%]+\/?/i);
-    return m?.[0] ?? null;
+  [/^linkedin(?:\s*(?:url|link|profile|page))*$/i, cv => {
+    const m = cv.match(/(?:https?:\/\/)?(?:www\.)?linkedin\.com\/in\/[\w\-_%]+\/?/i);
+    return m ? normalizeExtractedUrl(m[0]) : null;
   }],
-  [/^github(\s*(url|link|profile|page))?$/i, cv => {
-    const m = cv.match(/https?:\/\/(?:www\.)?github\.com\/[\w\-]+\/?/i);
-    return m?.[0] ?? null;
+  [/^github(?:\s*(?:url|link|profile|page))*$/i, cv => {
+    const m = cv.match(/(?:https?:\/\/)?(?:www\.)?github\.com\/[\w\-]+\/?/i);
+    return m ? normalizeExtractedUrl(m[0]) : null;
   }],
-  [/^(portfolio|personal\s*website?|personal\s*site|blog)(\s*(url|link))?$/i, cv => {
+  [/^(portfolio|personal\s*website?|personal\s*site|blog)(?:\s*(?:url|link|profile|page|website))*$/i, cv => {
     // Any URL that isn't LinkedIn/GitHub/Twitter
-    const m = cv.match(/https?:\/\/(?!(?:www\.)?(?:linkedin|github|twitter|x)\.com)[\w\-._~:/?#%@!$&'()*+,;=]+/i);
-    return m ? m[0].replace(/[.,;:)]+$/, '') : null;
+    const labeled = cv.match(/\b(?:portfolio|website|personal\s*site|blog)[:\s-]+((?:https?:\/\/|www\.)?[\w.-]+\.[a-z]{2,}(?:\/[\w\-._~:/?#%@!$&'()*+,;=]*)?)/i);
+    const m = labeled?.[1]
+           ?? cv.match(/(?:https?:\/\/|www\.)(?!(?:www\.)?(?:linkedin|github|twitter|x)\.com)[\w\-._~:/?#%@!$&'()*+,;=]+/i)?.[0];
+    return m ? normalizeExtractedUrl(m) : null;
   }],
-  [/^(twitter|x\.com|x)(\s*(handle|url|link|profile))?$/i, cv => {
-    const m = cv.match(/https?:\/\/(?:www\.)?(?:twitter|x)\.com\/[\w_]+/i)
+  [/^(twitter|x\.com|x)(?:\s*(?:handle|url|link|profile|page))*$/i, cv => {
+    const m = cv.match(/(?:https?:\/\/)?(?:www\.)?(?:twitter|x)\.com\/[\w_]+/i)
            ?? cv.match(/@[\w_]{2,30}/);
-    return m?.[0] ?? null;
+    return m ? (m[0].startsWith('@') ? m[0] : normalizeExtractedUrl(m[0])) : null;
   }],
   [/^(full\s*)?name$/i, cv => extractNameFromCV(cv)],
   [/^first\s*name$/i, cv => {
@@ -484,6 +493,13 @@ const DETERMINISTIC_EXTRACTORS = [
     return parts.length > 1 ? parts[parts.length - 1] : null;
   }],
 ];
+
+function normalizeExtractedUrl(raw) {
+  const cleaned = String(raw || '').trim().replace(/[.,;:)]+$/g, '');
+  if (!cleaned) return null;
+  if (/^https?:\/\//i.test(cleaned)) return cleaned;
+  return `https://${cleaned}`;
+}
 
 function tryDeterministicExtract(cleanedQuestion, cvText) {
   for (const [pattern, extractor] of DETERMINISTIC_EXTRACTORS) {
@@ -504,8 +520,10 @@ function tryDeterministicExtract(cleanedQuestion, cvText) {
 function cleanFieldLabel(raw) {
   return (raw || '')
     .trim()
-    .replace(/[*:?\u2217\u2731]+$/g, '')   // trailing *, :, ?, unicode asterisks
-    .replace(/^(please\s+(enter|provide|input|type|specify)\s+(your\s+)?)/i, '')
+    .replace(/[*:?.\u2217\u2731]+$/g, '')   // trailing *, :, ?, ., unicode asterisks
+    .replace(/^(please\s+)?(?:enter|provide|input|type|specify|share|add|include|paste)\s+(?:a\s+|the\s+)?(?:url|link)\s+(?:to|for)\s+(?:your\s+)?/i, '')
+    .replace(/^(please\s+)?link\s+(?:to\s+)?(?:your\s+)?/i, '')
+    .replace(/^(please\s+(enter|provide|input|type|specify|link|share|add|include|paste)\s+(your\s+)?)/i, '')
     .replace(/^(enter\s+(your\s+)?)/i, '')
     .replace(/^(your\s+)/i, '')
     .trim();
@@ -514,7 +532,7 @@ function cleanFieldLabel(raw) {
 app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
   const body = req.body || {};
 
-  let systemPrompt, userPrompt, temperature, maxTokens;
+  let systemPrompt, userPrompt, temperature, maxTokens, questionType;
 
   // Detect payload format:
   //   Structured (new): body.question exists  →  run through recipe
@@ -574,6 +592,7 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
       userPrompt   = result.userPrompt;
       temperature  = typeof result.temperature === 'number' ? result.temperature : 0.7;
       maxTokens    = typeof result.maxTokens === 'number' ? result.maxTokens : undefined;
+      questionType = result.questionType || undefined;
     } catch (err) {
       return res.status(500).json({ error: 'Recipe error', details: String(err.message).slice(0, 200) });
     }
@@ -639,8 +658,44 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
     }
 
     const data = await response.json();
-    const answer = data?.choices?.[0]?.message?.content;
+    let answer = data?.choices?.[0]?.message?.content;
     if (!answer?.trim()) return res.status(502).json({ error: 'No answer from provider' });
+
+    // Quality gate: one conditional regeneration attempt for low-scoring answers.
+    // Only runs for structured payloads (questionType set), never for streaming,
+    // and never for prefetch requests (skipEvaluation: true) — prefetch uses
+    // one LLM call so cached answers arrive faster.
+    if (questionType && !body.skipEvaluation) {
+      const evaluation = evaluateAnswer(answer, questionType);
+      if (evaluation.shouldRegenerate) {
+        try {
+          const retryTemp = Math.min(temperature + 0.15, 0.95);
+          const feedbackMsg = buildRegenerationFeedback(evaluation.flags);
+          const retry = await callChatCompletionWithFallback({
+            temperature: retryTemp,
+            maxTokens,
+            stream: false,
+            timeoutMs: 30000,
+            // Multi-turn: show the model its bad answer then explain exactly what to fix.
+            // This is far more effective than resending the same prompt at a higher temp.
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userPrompt },
+              { role: 'assistant', content: answer },
+              { role: 'user', content: feedbackMsg },
+            ],
+          });
+          const retryData = await retry.response.json();
+          const retryAnswer = retryData?.choices?.[0]?.message?.content;
+          if (retryAnswer?.trim()) {
+            const retryEval = evaluateAnswer(retryAnswer, questionType);
+            if (retryEval.score > evaluation.score) answer = retryAnswer;
+          }
+        } catch (_) {
+          // Regeneration failed — use original answer.
+        }
+      }
+    }
 
     res.json({ answer, provider: completion.provider, model: completion.model, fallbackFrom: completion.fallbackFrom || undefined });
   } catch (e) {
@@ -856,6 +911,80 @@ async function fetchLLMDomainSuggestions(jobTitle, jdTools) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// LLM JD enrichment cache
+// Keyed by a normalised hash of the JD text so the same role pasted multiple
+// times (whitespace variations, etc.) reuses the cached analysis.
+// Short TTL — entries expire after 20 minutes to handle rate-limit recovery.
+// ---------------------------------------------------------------------------
+
+const JD_ENRICHMENT_CACHE = new Map(); // key → { data, expiresAt }
+const JD_ENRICHMENT_TTL_MS = 20 * 60 * 1000;
+
+function normaliseJdKey(text) {
+  return (text || '').trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 4000);
+}
+
+function jdCacheGet(key) {
+  const entry = JD_ENRICHMENT_CACHE.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) { JD_ENRICHMENT_CACHE.delete(key); return null; }
+  return entry.data;
+}
+
+function jdCacheSet(key, data) {
+  // Evict if growing too large (> 100 entries) to avoid unbounded memory
+  if (JD_ENRICHMENT_CACHE.size >= 100) {
+    const firstKey = JD_ENRICHMENT_CACHE.keys().next().value;
+    JD_ENRICHMENT_CACHE.delete(firstKey);
+  }
+  JD_ENRICHMENT_CACHE.set(key, { data, expiresAt: Date.now() + JD_ENRICHMENT_TTL_MS });
+}
+
+/**
+ * Enrich a regex-parsed jdData object with LLM analysis.
+ * Returns the enriched jdData (or the original on any failure).
+ * Result is cached by normalised JD text hash.
+ * @param {object} jdParser  — JDParser instance
+ * @param {object} regexParsed — output of jdParser.parse()
+ * @param {string} jdText    — raw job description text
+ * @returns {{ jdData: object, source: 'llm'|'cache'|'regex' }}
+ */
+async function enrichJdData(jdParser, regexParsed, jdText) {
+  const cacheKey = normaliseJdKey(jdText);
+  const cached = jdCacheGet(cacheKey);
+  if (cached) return { jdData: cached, source: 'cache' };
+
+  const { systemPrompt: jdSysPrompt, userPrompt: jdUserPrompt } =
+    jdParser.buildLLMAnalysisPrompt(jdText);
+
+  try {
+    const { response } = await callChatCompletionWithFallback({
+      temperature: 0.1,
+      maxTokens: 900,
+      timeoutMs: 18000,
+      allowFallback: true,
+      messages: [
+        { role: 'system', content: jdSysPrompt },
+        { role: 'user',   content: jdUserPrompt },
+      ],
+    });
+    const data = await response.json();
+    const text = (data?.choices?.[0]?.message?.content || '').trim();
+    if (!text) return { jdData: regexParsed, source: 'regex' };
+
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) return { jdData: regexParsed, source: 'regex' };
+
+    const enriched = jdParser.mergeWithLLMAnalysis(regexParsed, JSON.parse(match[0]));
+    jdCacheSet(cacheKey, enriched);
+    return { jdData: enriched, source: 'llm' };
+  } catch (err) {
+    console.warn('[DraftApply] JD LLM enrichment failed, using regex fallback:', err.message);
+    return { jdData: regexParsed, source: 'regex' };
+  }
+}
+
 app.post('/api/cv/analyze', authRequired, generateLimiter, async (req, res) => {
   const { cvText, jobTitle = '', company = '', jobDescription, confirmedSkills = [] } = req.body || {};
 
@@ -867,19 +996,24 @@ app.post('/api/cv/analyze', authRequired, generateLimiter, async (req, res) => {
   }
 
   try {
-    const cvData = new CVParser().parse(cvText);
-    const jdData = new JDParser().parse(jobDescription, jobTitle, company);
-    const tailor  = new CVTailor();
+    const jdParser = new JDParser();
 
-    // Fire LLM domain call immediately so it runs in parallel with sync work below
-    const llmSuggestionsPromise = fetchLLMDomainSuggestions(jdData.jobTitle, jdData.tools);
+    // CV parse and regex JD parse are independent — run in parallel
+    const [cvData, jdDataRegex] = await Promise.all([
+      Promise.resolve(new CVParser().parse(cvText)),
+      Promise.resolve(jdParser.parse(jobDescription, jobTitle, company)),
+    ]);
 
-    // Sync work (fast — no LLM involved)
-    const matchMap        = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
-    const staticFallback  = tailor.suggestDomainSkills(jdData, cvData);
+    // LLM JD enrichment runs in parallel with domain suggestions
+    const [{ jdData, source: jdAnalysisSource }, llmSuggestionsResult] = await Promise.all([
+      enrichJdData(jdParser, jdDataRegex, jobDescription),
+      fetchLLMDomainSuggestions(jdDataRegex.jobTitle, jdDataRegex.tools).catch(() => null),
+    ]);
 
-    // Await the LLM domain call (already running in parallel)
-    const llmRaw = await llmSuggestionsPromise.catch(() => null);
+    const tailor = new CVTailor();
+    const matchMap       = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
+    const staticFallback = tailor.suggestDomainSkills(jdData, cvData);
+    const llmRaw = llmSuggestionsResult;
 
     // Filter LLM suggestions against what's already in the JD or CV
     let domainSuggestions = staticFallback;
@@ -909,6 +1043,7 @@ app.post('/api/cv/analyze', authRequired, generateLimiter, async (req, res) => {
       jobTitle: jdData.jobTitle,
       company:  jdData.company,
       domainSuggestions,
+      jdAnalysisSource,
     });
   } catch (e) {
     console.error('[DraftApply] Analyze error:', e.message);
@@ -926,20 +1061,31 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
     return res.status(400).json({ error: 'jobDescription must be at least 50 characters' });
   }
 
-  const cvData  = new CVParser().parse(cvText);
-  const jdParser = new JDParser();
-  const jdData   = jdParser.parse(jobDescription, jobTitle, company);
-
-  const tailor  = new CVTailor();
-  const matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
-
-  const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(cvData, jdData, matchMap);
-
   try {
+    const jdParser = new JDParser();
+
+    // CV parse and regex JD parse are independent — run in parallel
+    const [cvData, jdDataRegex] = await Promise.all([
+      Promise.resolve(new CVParser().parse(cvText)),
+      Promise.resolve(jdParser.parse(jobDescription, jobTitle, company)),
+    ]);
+
+    // LLM JD enrichment — sequential after regex parse so matchMap is built
+    // from the final enriched JD, not stale regex data
+    const { jdData, source: jdAnalysisSource } =
+      await enrichJdData(jdParser, jdDataRegex, jobDescription);
+
+    const tailor  = new CVTailor();
+    const matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
+
+    const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(cvData, jdData, matchMap);
+
     const completion = await callChatCompletionWithFallback({
       temperature: 0.3,
       maxTokens: 4000,
-      timeoutMs: 60000,
+      timeoutMs: 50000,
+      fallbackTimeoutMs: 50000,
+      maxFallbackModels: 2,
       allowFallback: OPENROUTER_TAILOR_FALLBACK,
       messages: [
         { role: 'system', content: systemPrompt },
@@ -948,7 +1094,11 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
     });
 
     const tailorProvider = completion.provider;
-    const data = await completion.response.json();
+    const data = await completion.response.json().catch(() => null);
+    if (!data) {
+      console.error(`[DraftApply] ${tailorProvider} tailor response body failed to parse`);
+      return res.status(502).json({ error: 'Unexpected response from AI provider. Please try again.' });
+    }
     let tailoredCvText = tailor.finalizeTailoredCV(data?.choices?.[0]?.message?.content, {
       cvData,
       jdData,
@@ -960,13 +1110,16 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
       return res.status(502).json({ error: 'No output from provider' });
     }
 
+    let auditSkipped = false;
     try {
       const { systemPrompt: auditSystemPrompt, userPrompt: auditUserPrompt, temperature: auditTemperature } =
         tailor.buildTailoredCvAuditPrompt(cvData, jdData, matchMap, tailoredCvText, confirmedSkills);
       const auditCompletion = await callChatCompletionWithFallback({
         temperature: auditTemperature,
-        maxTokens: 3500,
-        timeoutMs: 25000,
+        maxTokens: 4500,
+        timeoutMs: 30000,
+        fallbackTimeoutMs: 30000,
+        maxFallbackModels: 2,
         allowFallback: OPENROUTER_TAILOR_FALLBACK,
         messages: [
           { role: 'system', content: auditSystemPrompt },
@@ -974,16 +1127,25 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
         ],
       });
 
-      const auditData = await auditCompletion.response.json();
+      const auditData = await auditCompletion.response.json().catch(() => null);
       const auditedText = auditData?.choices?.[0]?.message?.content;
-      const finalizedAudit = tailor.finalizeTailoredCV(auditedText, {
-        cvData,
-        jdData,
-        matchMap,
-        confirmedSkills,
-      });
-      if (finalizedAudit?.trim()) tailoredCvText = finalizedAudit;
+      if (auditedText?.trim() && tailor.isValidCvOutput(auditedText)) {
+        const finalizedAudit = tailor.finalizeTailoredCV(auditedText, {
+          cvData,
+          jdData,
+          matchMap,
+          confirmedSkills,
+        });
+        if (finalizedAudit?.trim()) tailoredCvText = finalizedAudit;
+        else auditSkipped = true;
+      } else {
+        auditSkipped = true;
+        if (auditedText?.trim()) {
+          console.warn('[DraftApply] Audit output rejected: response does not look like a CV');
+        }
+      }
     } catch (e) {
+      auditSkipped = true;
       const detail = e instanceof LLMProviderError ? `${e.provider} ${e.status}` : e.message;
       console.warn('[DraftApply] Tailored CV audit skipped:', detail);
     }
@@ -1002,6 +1164,8 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
       warnings,
       confirmedSkills
     );
+    const { missingKeywords: atsKeywordGaps, coverage: atsKeywordCoverage } =
+      tailor.checkAtsKeywordCoverage(tailoredCvText, jdData);
 
     res.json({
       tailoredCvText,
@@ -1009,6 +1173,10 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
       recruiterReview,
       warnings,
       changedSections,
+      auditSkipped,
+      jdAnalysisSource,
+      atsKeywordGaps,
+      atsKeywordCoverage,
       provider: tailorProvider,
       model: completion.model,
       fallbackFrom: completion.fallbackFrom || undefined

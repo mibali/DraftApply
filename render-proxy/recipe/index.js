@@ -35,8 +35,10 @@ import { SalaryBenchmarkService } from '../../shared/salary-benchmark-service.js
 function cleanFieldLabel(raw) {
   return (raw || '')
     .trim()
-    .replace(/[*:?\u2217\u2731]+$/g, '')
-    .replace(/^(please\s+(enter|provide|input|type|specify)\s+(your\s+)?)/i, '')
+    .replace(/[*:?.\u2217\u2731]+$/g, '')
+    .replace(/^(please\s+)?(?:enter|provide|input|type|specify|share|add|include|paste)\s+(?:a\s+|the\s+)?(?:url|link)\s+(?:to|for)\s+(?:your\s+)?/i, '')
+    .replace(/^(please\s+)?link\s+(?:to\s+)?(?:your\s+)?/i, '')
+    .replace(/^(please\s+(enter|provide|input|type|specify|link|share|add|include|paste)\s+(your\s+)?)/i, '')
     .replace(/^(enter\s+(your\s+)?)/i, '')
     .replace(/^(your\s+)/i, '')
     .trim();
@@ -44,6 +46,7 @@ function cleanFieldLabel(raw) {
 
 /**
  * Include head + tail of CV to avoid recency bias when truncating.
+ * Used as a fallback when structured cvData is unavailable.
  */
 function getCvContext(rawText, maxChars) {
   const raw = rawText || '';
@@ -53,6 +56,111 @@ function getCvContext(rawText, maxChars) {
   const headLen = Math.floor(max * 0.6);
   const tailLen = max - headLen;
   return `${raw.slice(0, headLen)}\n\n...[snip]...\n\n${raw.slice(-tailLen)}`;
+}
+
+/**
+ * Build a structured markdown CV context from parsed cvData.
+ * This gives the model a well-organised view rather than a raw text dump,
+ * making evidence retrieval more reliable and reducing recency bias.
+ * Falls back to getCvContext(rawText) when cvData is absent or empty.
+ */
+function buildStructuredCvContext(cvData, rawText, maxRawChars = 40000) {
+  if (!cvData || !cvData.experience?.length) {
+    return getCvContext(rawText, maxRawChars);
+  }
+
+  const lines = [];
+
+  if (cvData.contactInfo?.name) {
+    lines.push(`**Candidate:** ${cvData.contactInfo.name}`);
+  }
+
+  // Seniority + recent roles as a quick orientation line
+  const recentRoles = (cvData.experience || [])
+    .slice(0, 2)
+    .map(e => [e.title, e.company].filter(Boolean).join(' at '))
+    .filter(Boolean);
+  if (recentRoles.length) {
+    lines.push(`**Recent roles:** ${recentRoles.join('; ')}`);
+  }
+  lines.push('');
+
+  if (cvData.summary) {
+    lines.push(`**PROFESSIONAL SUMMARY**\n${cvData.summary}`);
+    lines.push('');
+  }
+
+  if (cvData.experience?.length) {
+    lines.push('**WORK EXPERIENCE**');
+    for (const exp of cvData.experience) {
+      const header = [exp.title, exp.company, exp.dates]
+        .filter(Boolean).join(' | ');
+      lines.push(header);
+      // Cap bullets per role: more for recent, fewer for older
+      const cap = cvData.experience.indexOf(exp) < 2 ? 7 : 4;
+      for (const r of (exp.responsibilities || []).slice(0, cap)) {
+        lines.push(`  • ${r}`);
+      }
+      lines.push('');
+    }
+  }
+
+  if (cvData.achievements?.length) {
+    lines.push('**KEY EVIDENCE (quantified — use these as primary proof points)**');
+    for (const a of cvData.achievements.slice(0, 10)) {
+      lines.push(`  • ${a}`);
+    }
+    lines.push('');
+  }
+
+  if (cvData.skills?.length) {
+    lines.push(`**SKILLS**\n${cvData.skills.join(', ')}`);
+    lines.push('');
+  }
+
+  if (cvData.education?.length) {
+    lines.push('**EDUCATION**');
+    for (const e of cvData.education) {
+      lines.push(`  • ${[e.degree, e.institution, e.dates].filter(Boolean).join(', ')}`);
+    }
+    lines.push('');
+  }
+
+  if (cvData.certifications?.length) {
+    lines.push(`**CERTIFICATIONS**\n${cvData.certifications.join(', ')}`);
+    lines.push('');
+  }
+
+  const structured = lines.join('\n').trim();
+
+  // Sanity: if structured output is suspiciously short, fall back to raw
+  if (structured.length < 200) {
+    return getCvContext(rawText, maxRawChars);
+  }
+  return structured;
+}
+
+/**
+ * Build a pre-writing evidence selection step.
+ * Forces the model to identify and name specific CV evidence before writing,
+ * reducing generic output and anchoring claims to real experience.
+ * Skipped for question types where a story or career evidence is not the core ask.
+ */
+function buildPreWritingStep(qType, hasJobCtx) {
+  const skipTypes = new Set(['salary', 'short_factual', 'data_extraction']);
+  if (skipTypes.has(qType)) return '';
+
+  const jdLine = hasJobCtx
+    ? '\n3. Which 1–2 JD requirements does this question connect to? How does the CV evidence map to them?'
+    : '';
+
+  return `
+BEFORE WRITING — reason through this silently (do not include this analysis in your answer):
+1. What specific competency or quality is this question testing? Be precise — not just "leadership" but e.g. "recovering a project under pressure" or "influencing without authority".
+2. What is the single strongest piece of evidence from MY CV that proves it? Name the company, role, and outcome.${jdLine}
+
+Write the answer using that specific evidence. Anchor every substantive claim to something named.
+`;
 }
 
 /**
@@ -195,6 +303,7 @@ function detectQuestionType(question) {
   // Cover letter (format, not a topic — check first)
   if (
     q.includes('cover letter') || q.includes('coverletter') ||
+    q.includes('covering letter') || q.includes('coveringletter') ||
     q.includes('motivation letter') || q.includes('letter of interest') ||
     q.includes('application letter')
   ) return 'cover_letter';
@@ -380,12 +489,12 @@ Rules:
 - If the CV doesn't have this information, give a sensible professional default
 - Do NOT mention past jobs or career history`;
 
-  const cvContext = getCvContext(cvText, 40000);
+  const cvContext = getCvContext(cvText, 8000);
   const userPrompt = `CV:\n${cvContext}\n\nQuestion: ${question}\n\nAnswer in 1-2 sentences about the candidate's current situation.`;
   return { systemPrompt, userPrompt, temperature: 0.1, maxTokens: 120 };
 }
 
-function buildSalaryPrompt(cvText, question, jobCtx, jobTitle, salaryBenchmarkHint = '') {
+function buildSalaryPrompt(cvText, question, jobCtx, jobTitle, salaryBenchmarkHint = '', cvData = null) {
   const q = String(question || '').toLowerCase();
   const asksMonthly = /\b(monthly|per\s+month|\/\s*month|pcm)\b/.test(q);
   const asksAnnual = /\b(annual|annually|yearly|per\s+year|\/\s*year|base\s+salary)\b/.test(q);
@@ -418,7 +527,7 @@ Rules:
 - If salary benchmark context is provided, use it as the anchor.
 - If no salary benchmark context is provided, do not claim to have live, official, or real-time salary data. Still answer with a practical market-informed range and do not mention missing benchmark data to the employer.`;
 
-  const cvContext = getCvContext(cvText, 12000);
+  const cvContext = buildStructuredCvContext(cvData, cvText, 12000);
   let userPrompt = `MY CV, for seniority context only. Do not summarize it in the answer:\n${cvContext}\n\n`;
   if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
   if (salaryBenchmarkHint) userPrompt += `Salary benchmark context:\n${salaryBenchmarkHint}\n\n`;
@@ -433,7 +542,7 @@ Write only the answer to paste into the form. It must contain a concrete ${curre
   return { systemPrompt, userPrompt, temperature: 0.2, maxTokens: 90 };
 }
 
-function buildYesNoPrompt(cvText, question, jobCtx, candidateName, tone) {
+function buildYesNoPrompt(cvText, question, jobCtx, candidateName, tone, cvData = null) {
   const writingGuidance = getWritingGuidance(tone);
 
   const systemPrompt = `${identityPreamble(candidateName)}
@@ -448,14 +557,14 @@ HOW TO ANSWER:
 - If the CV doesn't clearly confirm the thing asked, be honest: "Not directly, but [closest relevant experience]"
 - Do NOT write an essay or career summary`;
 
-  const cvContext = getCvContext(cvText, 40000);
+  const cvContext = buildStructuredCvContext(cvData, cvText);
   let userPrompt = `MY CV:\n${cvContext}\n\n`;
   if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
   userPrompt += `Question: ${question}\n\nAnswer directly (max 3 sentences).`;
   return { systemPrompt, userPrompt, temperature: 0.3, maxTokens: 180 };
 }
 
-function buildBriefPrompt(cvText, question, jobCtx, candidateName, tone) {
+function buildBriefPrompt(cvText, question, jobCtx, candidateName, tone, cvData = null) {
   const writingGuidance = getWritingGuidance(tone);
 
   const systemPrompt = `${identityPreamble(candidateName)}
@@ -468,14 +577,14 @@ Additional rules for brevity:
 - Lead with the direct answer, not with setup
 - Use one specific, concrete detail from the CV`;
 
-  const cvContext = getCvContext(cvText, 40000);
+  const cvContext = buildStructuredCvContext(cvData, cvText);
   let userPrompt = `MY CV:\n${cvContext}\n\n`;
   if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
   userPrompt += `Question: ${question}\n\nAnswer concisely (max 50 words).`;
   return { systemPrompt, userPrompt, temperature: 0.5, maxTokens: 150 };
 }
 
-function buildBehavioralPrompt(cvText, question, length, jobCtx, candidateName, tone) {
+function buildBehavioralPrompt(cvText, question, length, jobCtx, candidateName, tone, cvData = null) {
   const words = { short: '80-120', medium: '160-220', long: '220-300' }[length] || '160-220';
   const maxTokens = { short: 260, medium: 480, long: 620 }[length] || 480;
   const writingGuidance = getWritingGuidance(tone);
@@ -503,18 +612,18 @@ Rules:
 - Include what YOU did personally, not what "the team" did
 - NEVER invent employers, dates, or metrics`;
 
-  const cvContext = getCvContext(cvText, 40000);
+  const cvContext = buildStructuredCvContext(cvData, cvText);
+  const preWriting = buildPreWritingStep('behavioral', !!jobCtx);
   let userPrompt = `MY CV:\n${cvContext}\n\n`;
-  if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
-  userPrompt += `Question: ${question}
-
-Before writing, think: what single experience in my background BEST answers exactly what this question is asking? Use that one.
+  if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n\n`;
+  userPrompt += `${preWriting}
+Question: ${question}
 
 Write a ${words}-word answer. First person, no preamble, no "Great question".`;
   return { systemPrompt, userPrompt, temperature: 0.75, maxTokens };
 }
 
-function buildTroubleshootingPrompt(cvText, question, length, jobCtx, candidateName, tone) {
+function buildTroubleshootingPrompt(cvText, question, length, jobCtx, candidateName, tone, cvData = null) {
   const words = { short: '70-105', medium: '115-165', long: '170-230' }[length] || '115-165';
   const maxTokens = { short: 240, medium: 380, long: 520 }[length] || 380;
   const writingGuidance = getWritingGuidance(tone);
@@ -525,37 +634,40 @@ You are answering a troubleshooting/process question for a job application.
 ${writingGuidance}${getBrevityInstruction(length)}
 
 WHAT GOOD LOOKS LIKE:
-- Open with the candidate's actual troubleshooting method, not a career summary.
-- Give a clear sequence: define/reproduce the issue, gather evidence, isolate variables, test hypotheses, fix, then prevent recurrence.
+- Open with the candidate's actual troubleshooting method, not a career summary and not a vague "structured approach" sentence.
+- The first sentence must name the sequence before any employer/example appears: define or reproduce the issue, gather evidence, isolate variables, test hypotheses, fix, then prevent recurrence.
 - Include ONE concrete example from the CV to prove the method is real.
 - Sound practical and calm under ambiguity.
 - If job context is provided, subtly align the method to what the role needs: production reliability, customer impact, logs, incidents, systems, automation, documentation, or cross-functional debugging.
 
 AVOID:
 - "I draw on my experience from various roles"
+- "I follow a structured approach" unless the same sentence immediately names the actual steps
 - Listing multiple employers without a clear method
 - Vague phrases like "break down complex problems" unless followed by the exact steps
 - Invented tools, incidents, metrics, or outcomes`;
 
-  const cvContext = getCvContext(cvText, 40000);
+  const cvContext = buildStructuredCvContext(cvData, cvText);
+  const preWriting = buildPreWritingStep('troubleshooting', !!jobCtx);
   let userPrompt = `MY CV:\n${cvContext}\n\n`;
-  if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
-  userPrompt += `Question: ${question}
+  if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n\n`;
+  userPrompt += `${preWriting}
+Question: ${question}
 
 Write a ${words}-word answer with this shape:
-1. First sentence: direct method for troubleshooting unknown issues.
-2. Middle: 3-5 practical steps in natural prose.
-3. Proof: one specific CV example, preferably from production support, incident response, RCA, log analysis, automation, or platform reliability.
-4. End: how this prevents repeat issues or improves future troubleshooting.
+1. First sentence: state the actual method as a sequence, e.g. "I start by reproducing the issue, gathering logs and user impact, isolating variables, testing the most likely failure points, then documenting the fix so it does not repeat."
+2. Second sentence: explain how you decide what to inspect first based on severity, customer impact, logs, metrics, or recent changes.
+3. Then give ONE specific CV example, preferably from production support, incident response, RCA, log analysis, automation, or platform reliability.
+4. End: how this process prevents repeat issues or improves future troubleshooting.
 
-First person, no preamble, no bullet list, no headers.`;
+First person, no preamble, no bullet list, no headers. Do not repeat the same sentence twice.`;
   return { systemPrompt, userPrompt, temperature: 0.6, maxTokens };
 }
 
 /**
  * Focused strength builder — does not mention weaknesses.
  */
-function buildStrengthPrompt(cvText, question, length, jobCtx, candidateName, tone) {
+function buildStrengthPrompt(cvText, question, length, jobCtx, candidateName, tone, cvData = null) {
   const words = { short: '30-55', medium: '90-130', long: '130-180' }[length] || '90-130';
   const maxTokens = { short: 140, medium: 300, long: 420 }[length] || 300;
   const writingGuidance = getWritingGuidance(tone);
@@ -574,17 +686,19 @@ HOW TO ANSWER:
 
 NEVER invent examples, employers, or metrics`;
 
-  const cvContext = getCvContext(cvText, 40000);
+  const cvContext = buildStructuredCvContext(cvData, cvText);
+  const preWriting = buildPreWritingStep('strength_weakness', !!jobCtx);
   let userPrompt = `MY CV:\n${cvContext}\n\n`;
-  if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
-  userPrompt += `Question: ${question}\n\nAnswer in approximately ${words} words. First person, no preamble.`;
+  if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n\n`;
+  userPrompt += `${preWriting}
+Question: ${question}\n\nAnswer in approximately ${words} words. First person, no preamble.`;
   return { systemPrompt, userPrompt, temperature: 0.65, maxTokens };
 }
 
 /**
  * Focused weakness builder — does not conflate with strengths or pivot away.
  */
-function buildWeaknessPrompt(cvText, question, length, jobCtx, candidateName, tone) {
+function buildWeaknessPrompt(cvText, question, length, jobCtx, candidateName, tone, cvData = null) {
   const words = { short: '30-55', medium: '90-130', long: '130-180' }[length] || '90-130';
   const maxTokens = { short: 140, medium: 300, long: 420 }[length] || 300;
   const writingGuidance = getWritingGuidance(tone);
@@ -603,14 +717,14 @@ HOW TO ANSWER:
 
 NEVER fabricate examples or claim you have no weaknesses`;
 
-  const cvContext = getCvContext(cvText, 40000);
+  const cvContext = buildStructuredCvContext(cvData, cvText);
   let userPrompt = `MY CV:\n${cvContext}\n\n`;
   if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
   userPrompt += `Question: ${question}\n\nAnswer in approximately ${words} words. First person, no preamble.`;
   return { systemPrompt, userPrompt, temperature: 0.65, maxTokens };
 }
 
-function buildMotivationPrompt(cvText, question, length, jobCtx, candidateName, tone) {
+function buildMotivationPrompt(cvText, question, length, jobCtx, candidateName, tone, cvData = null) {
   const words = { short: '35-60', medium: '100-150', long: '150-200' }[length] || '100-150';
   const maxTokens = { short: 160, medium: 340, long: 460 }[length] || 340;
   const hasJobCtx = !!jobCtx;
@@ -632,14 +746,16 @@ Do NOT:
 - Give a vague "I enjoy helping people" type answer
 - Write about the company being "amazing" or the "incredible opportunity"`;
 
-  const cvContext = getCvContext(cvText, 40000);
+  const cvContext = buildStructuredCvContext(cvData, cvText);
+  const preWriting = buildPreWritingStep('motivation', hasJobCtx);
   let userPrompt = `MY CV:\n${cvContext}\n\n`;
-  if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
-  userPrompt += `Question: ${question}\n\nAnswer in approximately ${words} words. First person, no preamble.`;
+  if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n\n`;
+  userPrompt += `${preWriting}
+Question: ${question}\n\nAnswer in approximately ${words} words. First person, no preamble.`;
   return { systemPrompt, userPrompt, temperature: 0.75, maxTokens };
 }
 
-function buildWhyCompanyPrompt(cvText, question, length, jobCtx, jobTitle, company, candidateName, tone) {
+function buildWhyCompanyPrompt(cvText, question, length, jobCtx, jobTitle, company, candidateName, tone, cvData = null) {
   const words = { short: '45-70', medium: '110-160', long: '160-220' }[length] || '110-160';
   const maxTokens = { short: 180, medium: 380, long: 520 }[length] || 380;
   const hasJobCtx = !!jobCtx;
@@ -661,10 +777,12 @@ CRITICAL:
 - This answer must be impossible to reuse for a different company — it must feel written specifically for THIS role
 ${!hasJobCtx ? '- No job description provided: open with what the company/role name clearly implies, then connect to your CV' : ''}`;
 
-  const cvContext = getCvContext(cvText, 40000);
+  const cvContext = buildStructuredCvContext(cvData, cvText);
+  const preWriting = buildPreWritingStep('why_company', hasJobCtx);
   let userPrompt = `MY CV:\n${cvContext}\n\n`;
-  if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
-  userPrompt += `Question: ${question}
+  if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n\n`;
+  userPrompt += `${preWriting}
+Question: ${question}
 
 Start your answer with something specific about ${company || 'the company'} or this role — NOT with your own background. Then connect it to your CV.
 
@@ -672,10 +790,11 @@ Answer in approximately ${words} words. First person, no preamble.`;
   return { systemPrompt, userPrompt, temperature: 0.75, maxTokens };
 }
 
-function buildCoverLetterPrompt(cvText, question, length, jobCtx, jobTitle, company, candidateName, tone) {
+function buildCoverLetterPrompt(cvText, question, length, jobCtx, jobTitle, company, candidateName, tone, cvData = null) {
   const words = { short: '120-170', medium: '250-350', long: '350-450' }[length] || '250-350';
   const maxTokens = { short: 420, medium: 800, long: 1100 }[length] || 800;
   const writingGuidance = getWritingGuidance(tone);
+  const hasJobCtx = !!jobCtx;
 
   const systemPrompt = `${identityPreamble(candidateName)}
 
@@ -684,26 +803,31 @@ ${writingGuidance}
 
 STRUCTURE (mandatory):
 1. "Dear Hiring Manager," (or "Dear [Company] team," if company name is known)
-2. Opening paragraph: ONE specific thing about this role that connects directly to your background — not generic enthusiasm
+2. Opening paragraph: ONE specific thing about the company/business/mission/product/team OR role that connects directly to your background — not generic enthusiasm
 3. 2-3 body paragraphs: map specific job requirements to specific CV evidence — use different roles/time periods when possible, don't just summarise your most recent job
 4. Closing: brief, confident, genuine — "I'd welcome the chance to discuss how I could contribute."
 5. Sign-off: "Sincerely,\n[Your Name]"
 
 Rules:
+- ${hasJobCtx ? 'The job context is provided. You MUST use one concrete company/business detail from it in the opening paragraph when available, such as what the company builds, who it serves, its mission, market, product, or operating environment.' : 'No job context is provided, so do not invent company mission, products, customers, funding, market, or culture.'}
+- Do not only repeat the job title and location; that is not company-specific enough
 - Reference at least 3 specific requirements from the job description if provided
 - Every paragraph should earn its place — no padding
 - NEVER invent employers, degrees, dates, or metrics
 - A generic letter that could be sent to any company is a failure — make it specific`;
 
-  const cvContext = getCvContext(cvText, 40000);
+  const cvContext = buildStructuredCvContext(cvData, cvText);
+  const preWriting = buildPreWritingStep('cover_letter', !!jobCtx);
   let userPrompt = `MY CV:\n${cvContext}\n\n`;
-  if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
-  userPrompt += `Write a cover letter for${jobTitle ? ` the ${jobTitle} role` : ' this role'}${company ? ` at ${company}` : ''}.
+  if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n\n`;
+  userPrompt += `${preWriting}
+Write a cover letter for${jobTitle ? ` the ${jobTitle} role` : ' this role'}${company ? ` at ${company}` : ''}.
+${hasJobCtx ? 'In the first paragraph, explicitly connect my background to one real company/business detail from the role context above. Do not settle for only naming the role.' : ''}
 Target length: ${words} words. Start with "Dear..." — no preamble before the letter.`;
   return { systemPrompt, userPrompt, temperature: 0.72, maxTokens };
 }
 
-function buildGeneralPrompt(cvText, question, length, jobCtx, candidateName, tone) {
+function buildGeneralPrompt(cvText, question, length, jobCtx, candidateName, tone, cvData = null) {
   const words = { short: '30-55', medium: '90-140', long: '150-220' }[length] || '90-140';
   const maxTokens = { short: 160, medium: 340, long: 520 }[length] || 340;
   const hasJobCtx = !!jobCtx;
@@ -725,15 +849,38 @@ If the question is broad: pick the angle from your background that's most releva
 
 ${hasJobCtx ? 'The job context is provided — use it to tailor your answer to what this specific role actually needs.' : ''}`;
 
-  const cvContext = getCvContext(cvText, 40000);
+  const cvContext = buildStructuredCvContext(cvData, cvText);
+  const preWriting = buildPreWritingStep('general', hasJobCtx);
   let userPrompt = `MY CV:\n${cvContext}\n\n`;
-  if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n`;
-  userPrompt += `Question: ${question}
-
-Think: what is this question specifically asking, and what in my background most directly answers it?
+  if (jobCtx) userPrompt += `Role I'm applying for:\n${jobCtx}\n\n`;
+  userPrompt += `${preWriting}
+Question: ${question}
 
 Answer in approximately ${words} words. First person, no preamble.`;
   return { systemPrompt, userPrompt, temperature: 0.75, maxTokens };
+}
+
+// ---------------------------------------------------------------------------
+// Match strength / confidence calibration
+// ---------------------------------------------------------------------------
+
+function calcMatchStrength(matchMap) {
+  if (!Array.isArray(matchMap) || matchMap.length === 0) return { level: 'unknown', score: 0, supportedCount: 0, totalCount: 0 };
+  const scoreable = matchMap.filter(m => m.type !== 'user_confirmed');
+  const total = scoreable.length;
+  if (total === 0) return { level: 'unknown', score: 0, supportedCount: 0, totalCount: 0 };
+  const supported = scoreable.filter(m => m.allowedToMention).length;
+  const score = supported / total;
+  const level = score >= 0.65 ? 'strong' : score >= 0.40 ? 'moderate' : 'weak';
+  return { level, score, supportedCount: supported, totalCount: total };
+}
+
+function buildConfidenceInstruction(matchStrength) {
+  return {
+    strong:   'MATCH LEVEL: STRONG — the CV covers most requirements for this role. Write with confidence and assertive, achievement-led language for supported claims.',
+    moderate: 'MATCH LEVEL: MODERATE — the CV covers some requirements. Write confidently where supported; frame gaps honestly as transferable experience.',
+    weak:     'MATCH LEVEL: WEAK — the CV has limited direct matches. Focus on genuine transferable evidence. Do not overstate. Be honest about what is supported.',
+  }[matchStrength.level] || '';
 }
 
 // ---------------------------------------------------------------------------
@@ -1025,44 +1172,44 @@ export function buildPrompts(input) {
   let result;
   switch (qType) {
     case 'salary':
-      result = buildSalaryPrompt(cvText, question, jobCtx, jobTitle, salaryBenchmarkHint);
+      result = buildSalaryPrompt(cvText, question, jobCtx, jobTitle, salaryBenchmarkHint, cvData);
       break;
     case 'short_factual':
       result = buildShortFactualPrompt(cvText, question);
       break;
     case 'yes_no':
-      result = buildYesNoPrompt(cvText, question, jobCtx, candidateName, tone);
+      result = buildYesNoPrompt(cvText, question, jobCtx, candidateName, tone, cvData);
       break;
     case 'brief':
-      result = buildBriefPrompt(cvText, question, jobCtx, candidateName, tone);
+      result = buildBriefPrompt(cvText, question, jobCtx, candidateName, tone, cvData);
       break;
     case 'behavioral':
-      result = buildBehavioralPrompt(cvText, question, length, jobCtx, candidateName, tone);
+      result = buildBehavioralPrompt(cvText, question, length, jobCtx, candidateName, tone, cvData);
       break;
     case 'troubleshooting':
-      result = buildTroubleshootingPrompt(cvText, question, length, jobCtx, candidateName, tone);
+      result = buildTroubleshootingPrompt(cvText, question, length, jobCtx, candidateName, tone, cvData);
       break;
     case 'strength_weakness': {
       const isWeakness = /weakness(es)?|areas?\s+(for|of|to)\s+improve(ment)?|development\s+area|improve\s+about\s+yourself/i.test(question);
       const isStrength = /\bstrength(s)?\b/i.test(question);
       result = (isStrength && isWeakness)
-        ? buildGeneralPrompt(cvText, question, length, jobCtx, candidateName, tone)
+        ? buildGeneralPrompt(cvText, question, length, jobCtx, candidateName, tone, cvData)
         : isWeakness
-          ? buildWeaknessPrompt(cvText, question, length, jobCtx, candidateName, tone)
-          : buildStrengthPrompt(cvText, question, length, jobCtx, candidateName, tone);
+          ? buildWeaknessPrompt(cvText, question, length, jobCtx, candidateName, tone, cvData)
+          : buildStrengthPrompt(cvText, question, length, jobCtx, candidateName, tone, cvData);
       break;
     }
     case 'motivation':
-      result = buildMotivationPrompt(cvText, question, length, jobCtx, candidateName, tone);
+      result = buildMotivationPrompt(cvText, question, length, jobCtx, candidateName, tone, cvData);
       break;
     case 'why_company':
-      result = buildWhyCompanyPrompt(cvText, question, length, jobCtx, jobTitle, company, candidateName, tone);
+      result = buildWhyCompanyPrompt(cvText, question, length, jobCtx, jobTitle, company, candidateName, tone, cvData);
       break;
     case 'cover_letter':
-      result = buildCoverLetterPrompt(cvText, question, length, jobCtx, jobTitle, company, candidateName, tone);
+      result = buildCoverLetterPrompt(cvText, question, length, jobCtx, jobTitle, company, candidateName, tone, cvData);
       break;
     default:
-      result = buildGeneralPrompt(cvText, question, length, jobCtx, candidateName, tone);
+      result = buildGeneralPrompt(cvText, question, length, jobCtx, candidateName, tone, cvData);
   }
 
   // Inject structured-data hints for question types where structured context
@@ -1072,6 +1219,17 @@ export function buildPrompts(input) {
     'behavioral', 'troubleshooting', 'strength_weakness',
     'motivation', 'why_company', 'cover_letter', 'general', 'yes_no', 'brief',
   ]);
+
+  // Inject confidence calibration into the system prompt so the model knows
+  // how assertively to write based on how well the CV covers the role.
+  if (result && Array.isArray(matchMap) && matchMap.length > 0 && HINT_TYPES.has(qType)) {
+    const matchStrength = calcMatchStrength(matchMap);
+    const confidenceInstruction = buildConfidenceInstruction(matchStrength);
+    if (confidenceInstruction) {
+      result = { ...result, systemPrompt: `${result.systemPrompt}\n\n${confidenceInstruction}` };
+    }
+  }
+
   if (result && HINT_TYPES.has(qType)) {
     const evidenceHint = buildEvidenceHint(cvData, question);
     const jdFocusBlock = buildJdFocusBlock(enrichedJdData, qType);
@@ -1090,5 +1248,5 @@ export function buildPrompts(input) {
     result.userPrompt += `\n\nHARD LIMIT: This form field accepts a maximum of ${maxChars} characters. Your entire answer must be ${maxChars} characters or fewer (including spaces). Write concisely to stay within this limit.`;
   }
 
-  return result;
+  return result ? { ...result, questionType: qType } : result;
 }

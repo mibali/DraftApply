@@ -226,6 +226,25 @@ Position: Senior Technical Support Engineer IC4`);
     expect(html).toContain('class="cv-job-title">Senior Technical Support Engineer IC4</p>');
   });
 
+  it('keeps split date ranges together in experience sections', () => {
+    const formatCvToHtml = loadFormatter();
+    const html = formatCvToHtml(`Jane Doe
+jane@example.com
+Senior Engineer
+
+Professional Experience
+Semgrep, USA
+February 2024 -
+June 2025
+Senior Customer Success Engineer (IC4)
+
+- Resolved complex support issues`);
+
+    expect(html).toContain('class="cv-entry-dates">February 2024 - June 2025</span>');
+    expect(html).toContain('class="cv-job-title">Senior Customer Success Engineer (IC4)</p>');
+    expect(html).not.toContain('class="cv-date-line">June 2025</p>');
+  });
+
   it('renders Focus lines distinctly without replacing the official job title', () => {
     const formatCvToHtml = loadFormatter();
     const html = formatCvToHtml(`Jane Doe
@@ -262,6 +281,24 @@ TechCorp`);
     expect(html).not.toMatch(/4\+ years of experience/i);
     expect(html).not.toMatch(/Bachelor.*related field/i);
     expect(html).not.toMatch(/highly preferred/i);
+  });
+
+  it('renders long labelled Core Competencies lines as bullets', () => {
+    const formatCvToHtml = loadFormatter();
+    const html = formatCvToHtml(`Jane Doe
+jane@example.com
+AI Solution Architect
+
+Core Competencies
+Cloud & Platform Engineering: AWS, Azure, GCP, Production Systems Engineering & Platform Operations, Debugging & Service Reliability, Azure DevOps, Azure Machine Learning
+Programming & Automation: Python
+
+Professional Experience
+TechCorp`);
+
+    expect(html).toContain('<li>Cloud &amp; Platform Engineering: AWS, Azure, GCP, Production Systems Engineering &amp; Platform Operations, Debugging &amp; Service Reliability, Azure DevOps</li>');
+    expect(html).toContain('<li>Cloud &amp; Platform Engineering: Azure Machine Learning</li>');
+    expect(html).not.toContain('class="cv-body">Cloud &amp; Platform Engineering');
   });
 
   it('builds an editable Word-compatible document from the rendered CV HTML', () => {

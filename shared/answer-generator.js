@@ -83,7 +83,9 @@ export class AnswerGenerator {
       length,
       {
         jobTitle: options.jobTitle,
-        company: options.company
+        company: options.company,
+        jobDescription: options.jobDescription,
+        tone: options.tone,
       }
     );
 
@@ -122,7 +124,9 @@ export class AnswerGenerator {
       length,
       {
         jobTitle: options.jobTitle,
-        company: options.company
+        company: options.company,
+        jobDescription: options.jobDescription,
+        tone: options.tone,
       }
     );
 

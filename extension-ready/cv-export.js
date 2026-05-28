@@ -44,7 +44,7 @@
 
 const SECTION_RE = /^(professional\s+summary|core\s+competenc(?:y|ies)|professional\s+experience|technical\s+skills?|certifications?\s*(?:&|and)\s*awards?|technical\s+leadership(?:,\s*achievements?\s*(?:&|and)\s*innovation)?|experience|employment|work\s*history|education|academic|qualifications|skills|technologies|competencies|expertise|summary|profile|about|objective|certifications?|licenses?|credentials|achievements?|awards?|projects?|publications?|languages?|interests?|hobbies|references?|contact|links?)s?\s*[:\-]?\s*$/i;
 
-const DATE_RE = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d{4}|present|current|to\s*date|now)\b/i;
+const DATE_RE = /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|\d{4}|present|current|to\s*date|now)\b/i;
 
 // Strip LLM-inserted label prefixes from job title lines, e.g. "Position: Senior Engineer"
 function stripJobTitleLabel(line) {
@@ -85,6 +85,38 @@ function isLocationLine(line) {
 
 function isDateLine(line) {
   return line.length < 60 && DATE_RE.test(line) && (line.match(/\d{4}/g) || []).length >= 1;
+}
+
+function normaliseExportLines(text) {
+  const source = String(text || '').split('\n');
+  const output = [];
+
+  for (let i = 0; i < source.length; i++) {
+    const current = source[i];
+    const line = current.trim();
+    const nextLine = source[i + 1]?.trim() || '';
+
+    // LLMs sometimes split ranges as:
+    // "February 2024 -"
+    // "June 2025"
+    // Keep the export parser from rendering the end date far away as a
+    // standalone right-aligned date.
+    if (
+      line &&
+      nextLine &&
+      isDateLine(line) &&
+      isDateLine(nextLine) &&
+      /(?:-|–|—|\bto\b)\s*$/i.test(line)
+    ) {
+      output.push(`${line} ${nextLine}`);
+      i++;
+      continue;
+    }
+
+    output.push(current);
+  }
+
+  return output;
 }
 
 function linkify(html) {
@@ -320,13 +352,16 @@ function splitSkillLine(line) {
 
   const labelled = [...text.matchAll(/(?:^|[.;,]\s*)([A-Z][A-Za-z/& ]{2,40}):\s*([\s\S]*?)(?=(?:[.;,]\s*[A-Z][A-Za-z/& ]{2,40}:)|$)/g)];
   if (labelled.length >= 2) {
-    return labelled.map(([, label, value]) => cleanSkillItem(`${label.trim()}: ${value.trim()}`)).filter(isUsefulSkillItem);
+    return labelled
+      .flatMap(([, label, value]) => splitLongSkillItem(cleanSkillItem(`${label.trim()}: ${value.trim()}`)))
+      .filter(isUsefulSkillItem);
   }
 
   return text
     .split(/\s*(?:;|\n|•)\s*/)
     .flatMap(part => part.split(/\s*,\s+(?=[A-Z][A-Za-z/& ]{2,40}:)/))
     .map(cleanSkillItem)
+    .flatMap(splitLongSkillItem)
     .filter(isUsefulSkillItem);
 }
 
@@ -347,13 +382,39 @@ function cleanSkillItem(item) {
 
 function isUsefulSkillItem(item) {
   const text = String(item || '').trim();
-  if (!text || text.length < 2 || text.length > 140) return false;
+  if (!text || text.length < 2 || text.length > 160) return false;
   if (/\b\d+\+?\s+years?\s+of\s+experience\b/i.test(text)) return false;
   if (/\bat least\s+\d+\s+years?\b/i.test(text)) return false;
   if (/:\s*\(?\d+\s*(?:year|yr|month)/i.test(text)) return false;
   if (/\b(highly preferred|required|minimum qualifications?|related field)\b/i.test(text)) return false;
   if (/\b(?:bachelor|master|degree|education:|advanced degrees?)\b/i.test(text)) return false;
   return /[A-Za-z]/.test(text);
+}
+
+function splitLongSkillItem(item) {
+  const text = String(item || '').trim();
+  if (text.length <= 160) return [text];
+
+  const match = text.match(/^([A-Z][A-Za-z/& ]{2,40}):\s+(.+)$/);
+  if (!match) return [text];
+
+  const [, label, rest] = match;
+  const skills = rest.split(/\s*,\s*/).map(s => s.trim()).filter(Boolean);
+  const chunks = [];
+  let current = '';
+
+  for (const skill of skills) {
+    const next = current ? `${current}, ${skill}` : skill;
+    if (`${label}: ${next}`.length <= 160) {
+      current = next;
+      continue;
+    }
+    if (current) chunks.push(`${label}: ${current}`);
+    current = skill;
+  }
+  if (current) chunks.push(`${label}: ${current}`);
+
+  return chunks.length ? chunks : [text];
 }
 
 function formatCvToHtml(rawText, fallbackContactUrls = {}) {
@@ -368,7 +429,7 @@ function formatCvToHtml(rawText, fallbackContactUrls = {}) {
   const knownSocialUrls = new Set(Object.values(socialUrls).filter(Boolean).map(normalizeUrl));
   const emailDomains = extractEmailDomains(rawText);
   const mainText = rawText.replace(/\n\nLinks:\n[\s\S]+$/i, '').trim();
-  const lines = mainText.split('\n');
+  const lines = normaliseExportLines(mainText);
 
   let html = '';
   let nameSet = false;
@@ -531,6 +592,15 @@ function formatCvToHtml(rawText, fallbackContactUrls = {}) {
         continue;
       }
 
+      // Pending company + this is a date line → complete entry row.
+      // Keep this before the inline company/date parser so a standalone date
+      // range such as "February 2024 - June 2025" is not mistaken for a
+      // company called "February 2024 -".
+      if (pendingCompany !== null && isDateLine(line)) {
+        flushPendingCompany(line);
+        continue;
+      }
+
       // "Company Name Month Year – Month Year" on one line without pipe (OpenRouter format)
       const inlineDateMatch = line.match(
         /^(.{3,60}?)\s+((?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{4}.{0,40})$/i
@@ -538,12 +608,6 @@ function formatCvToHtml(rawText, fallbackContactUrls = {}) {
       if (inlineDateMatch && !isSectionHeader(inlineDateMatch[1].trim())) {
         flushPendingCompany(null);
         emitEntryRow(inlineDateMatch[1].trim(), inlineDateMatch[2].trim());
-        continue;
-      }
-
-      // Pending company + this is a date line → complete entry row
-      if (pendingCompany !== null && isDateLine(line)) {
-        flushPendingCompany(line);
         continue;
       }
 

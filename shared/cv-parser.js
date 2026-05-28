@@ -23,18 +23,19 @@ export class CVParser {
    */
   parse(text) {
     this.rawText = text;
-    
+    const experience = this.extractExperience(text);
+
     this.structured = {
       contactInfo: this.extractContactInfo(text),
       summary: this.extractSummary(text),
-      experience: this.extractExperience(text),
+      experience,
       education: this.extractEducation(text),
       skills: this.extractSkills(text),
-      achievements: this.extractAchievements(text),
+      achievements: this.extractAchievements(text, experience),
       certifications: this.extractCertifications(text),
       rawText: text
     };
-    
+
     return this.structured;
   }
 
@@ -138,7 +139,7 @@ export class CVParser {
           continue;
         }
 
-        if (currentExp && !currentExp.title && this._isLikelyJobTitle(line)) {
+        if (currentExp && !currentExp.title && this._isLikelyJobTitle(line) && !this._isLikelySentenceFragment(line)) {
           currentExp.title = line;
           continue;
         }
@@ -148,7 +149,7 @@ export class CVParser {
           continue;
         }
 
-        if (!this._isLikelyNoiseExperienceLine(line)) {
+        if (!this._isLikelyNoiseExperienceLine(line) && !this._isLikelySentenceFragment(line)) {
           headerBuffer.push(line);
           headerBuffer = headerBuffer.slice(-3);
         }
@@ -194,7 +195,10 @@ export class CVParser {
   }
 
   extractSkills(text) {
-    const skillsSection = text.match(/(?:skills|technologies|competencies|expertise)[:\s]*\n([\s\S]*?)(?=\n\s*(?:experience|education|certifications|projects|$))/i);
+    // Lookahead: stop at next section header OR end-of-string.
+    // The $ is placed outside the \n\s* group so that end-of-string is matched
+    // without requiring a trailing newline (common in uploaded CV files).
+    const skillsSection = text.match(/(?:skills|technologies|competencies|expertise)[:\s]*\n([\s\S]*?)(?=\n\s*(?:experience|education|certifications|projects)|$)/i);
     
     if (skillsSection) {
       const skillsText = skillsSection[1];
@@ -208,23 +212,56 @@ export class CVParser {
     return [];
   }
 
-  extractAchievements(text) {
-    const achievements = [];
-    
-    // Look for quantified achievements anywhere in the CV
-    const metricPatterns = [
-      /(?:increased|improved|reduced|grew|saved|generated|managed|led|delivered)[^.]*\d+[%$kmb]?[^.]*/gi,
-      /\d+[%$kmb]?[^.]*(?:increase|improvement|reduction|growth|savings|revenue|budget)/gi
-    ];
-    
-    for (const pattern of metricPatterns) {
-      const matches = text.match(pattern);
-      if (matches) {
-        achievements.push(...matches.map(m => m.trim()));
+  /**
+   * Extract quantified achievements from two sources:
+   *   1. A dedicated Achievements / Accomplishments section (high confidence)
+   *   2. Experience bullets that contain measurable evidence (metrics, scale, outcomes)
+   *
+   * Passing the already-parsed `experience` array avoids re-parsing and lets
+   * the metric scan operate on clean bullet strings rather than raw CV text.
+   *
+   * @param {string} text - Raw CV text
+   * @param {Array}  experience - Already-parsed experience array from extractExperience()
+   */
+  extractAchievements(text, experience = []) {
+    const achievements = new Set();
+
+    // Pattern that matches a bullet containing a quantified signal
+    const METRIC_RE = /(?:[\$£€][\d,.]+[kmb]?\b|\b\d[\d,.]*\s*(?:%|percent\b|x\b|×|k\b|m\b|bn\b|users?|customers?|clients?|engineers?|countries|markets?|months?|weeks?|days?|hours?|minutes?|ms\b|requests?\s+per|rpm\b|rps\b)|\btimes?\s+faster\b|\b\d+\s*(?:people|reports?|team members?|headcount|accounts?)\b|\b(?:doubled|tripled|halved|quadrupled)\b)/i;
+
+    // 1. Dedicated achievements / accomplishments section
+    const achieveSection = text.match(
+      /(?:key\s+achievements?|accomplishments?|highlights?|notable\s+results?)[:\s]*\n([\s\S]*?)(?=\n\s*(?:experience|education|skills|certifications|projects|$))/i
+    );
+    if (achieveSection) {
+      for (const line of achieveSection[1].split('\n')) {
+        const cleaned = line.replace(/^[\s•\-\*\d.]+/, '').trim();
+        if (cleaned.length > 10 && cleaned.length < 300) achievements.add(cleaned);
       }
     }
-    
-    return [...new Set(achievements)];
+
+    // 2. Experience bullets that contain a measurable signal
+    for (const exp of experience) {
+      for (const bullet of (exp.responsibilities || [])) {
+        if (METRIC_RE.test(bullet)) {
+          achievements.add(bullet.trim());
+        }
+      }
+    }
+
+    // 3. Fallback: scan raw text when no structured experience was parsed
+    if (experience.length === 0) {
+      const legacyPatterns = [
+        /(?:increased|improved|reduced|grew|saved|generated|delivered)[^.]*\d+[%$kmb]?[^.]*/gi,
+        /\d+[%$kmb]?[^.]*(?:increase|improvement|reduction|growth|savings|revenue|budget)/gi,
+      ];
+      for (const re of legacyPatterns) {
+        const matches = text.match(re);
+        if (matches) matches.forEach(m => achievements.add(m.trim()));
+      }
+    }
+
+    return [...achievements].filter(a => a.length > 10 && a.length < 300);
   }
 
   extractCertifications(text) {
@@ -297,6 +334,7 @@ export class CVParser {
       .map(line => this._cleanExperienceHeader(line))
       .filter(Boolean)
       .filter(line => !this._isLikelyNoiseExperienceLine(line))
+      .filter(line => !this._isLikelySentenceFragment(line))
       .slice(-3);
 
     if (clean.length >= 2) {
@@ -348,9 +386,29 @@ export class CVParser {
       .trim();
   }
 
+  _isLikelyCorporateName(text) {
+    const t = String(text || '').trim();
+    if (/\b(Ltd\.?|Limited|Inc\.?|Incorporated|Corp\.?|Corporation|LLC|LLP|GmbH|PLC|Pty|Pvt)\b/i.test(t)) return true;
+    if (/\b(Solutions|Technologies|Holdings|Ventures)\s*$/i.test(t)) return true;
+    if (/,\s*(USA|UK|US|UAE|India|Canada|Australia|Nigeria|Ghana|Kenya|South Africa|Singapore)\s*$/i.test(t)) return true;
+    return false;
+  }
+
+  _isLikelySentenceFragment(text) {
+    const t = String(text || '').trim();
+    if (!t) return false;
+    if (/[.!?]$/.test(t)) return true;
+    if (/^(and|or|with|for|to|in|of|at|by|from|that|which|who|when|where)\s+/i.test(t) && /^[a-z]/.test(t)) return true;
+    if (/^[a-z]/.test(t) && !/[A-Z]/.test(t.slice(1)) && t.split(/\s+/).length >= 2) return true;
+    return false;
+  }
+
   _isLikelyJobTitle(line) {
     const text = String(line || '').trim();
     if (!text || text.length > 120 || this._cleanBullet(text)) return false;
+    if (this._isLikelyCorporateName(text)) return false;
+    if (/^(position|title|role|job|occupation)\s*:/i.test(text)) return false;
+    if (/^(and|or|with|for|to|in|of|at|by|from)\s+/i.test(text) && /^[a-z]/.test(text)) return false;
     return /\b(engineer|developer|architect|manager|lead|director|consultant|analyst|designer|scientist|specialist|officer|coordinator|administrator|advisor|associate|executive|representative|support|success|product|sales|marketing|finance|operations|devops|platform|cloud|data|software|security|solution|solutions|technical|principal|staff|head)\b/i.test(text);
   }
 

@@ -386,6 +386,37 @@ app.post('/api/cv/text', (req, res) => {
   });
 });
 
+// Simple in-process JD enrichment cache (shared with tailor route)
+const _backendJdCache = new Map();
+const _backendJdCacheTtl = 20 * 60 * 1000;
+function _backendJdCacheKey(text) {
+  return (text || '').trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 4000);
+}
+async function _backendEnrichJd(jdParser, regexParsed, jdText) {
+  const key = _backendJdCacheKey(jdText);
+  const hit = _backendJdCache.get(key);
+  if (hit && Date.now() < hit.exp) return { jdData: hit.data, source: 'cache' };
+
+  const { systemPrompt: sp, userPrompt: up } = jdParser.buildLLMAnalysisPrompt(jdText);
+  try {
+    const result = await generateWithFallback(FALLBACK_CHAIN,
+      [{ role: 'system', content: sp }, { role: 'user', content: up }],
+      { temperature: 0.1, max_tokens: 900 }
+    );
+    const text = result?.answer?.trim();
+    if (!text) return { jdData: regexParsed, source: 'regex' };
+    const m = text.match(/\{[\s\S]*\}/);
+    if (!m) return { jdData: regexParsed, source: 'regex' };
+    const enriched = jdParser.mergeWithLLMAnalysis(regexParsed, JSON.parse(m[0]));
+    if (_backendJdCache.size >= 100) _backendJdCache.delete(_backendJdCache.keys().next().value);
+    _backendJdCache.set(key, { data: enriched, exp: Date.now() + _backendJdCacheTtl });
+    return { jdData: enriched, source: 'llm' };
+  } catch (err) {
+    console.warn('[backend] JD LLM enrichment failed, using regex fallback:', err.message);
+    return { jdData: regexParsed, source: 'regex' };
+  }
+}
+
 app.post('/api/cv/analyze', async (req, res) => {
   try {
     const { cvText, jobTitle = '', company = '', jobDescription, confirmedSkills = [] } = req.body || {};
@@ -397,8 +428,14 @@ app.post('/api/cv/analyze', async (req, res) => {
       return res.status(400).json({ error: 'jobDescription must be at least 50 characters' });
     }
 
-    const cvData = new CVParser().parse(cvText);
-    const jdData = new JDParser().parse(jobDescription, jobTitle, company);
+    const jdParser = new JDParser();
+    const [cvData, jdDataRegex] = await Promise.all([
+      Promise.resolve(new CVParser().parse(cvText)),
+      Promise.resolve(jdParser.parse(jobDescription, jobTitle, company)),
+    ]);
+    const { jdData, source: jdAnalysisSource } =
+      await _backendEnrichJd(jdParser, jdDataRegex, jobDescription);
+
     const tailor = new CVTailor();
     const matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
 
@@ -406,6 +443,7 @@ app.post('/api/cv/analyze', async (req, res) => {
       matchReport: tailor.buildMatchSummary(matchMap),
       jobTitle: jdData.jobTitle,
       company: jdData.company,
+      jdAnalysisSource,
     });
   } catch (error) {
     console.error('CV analyze error:', error);
@@ -427,9 +465,13 @@ app.post('/api/cv/tailor', async (req, res) => {
       return res.status(400).json({ error: 'jobDescription must be at least 50 characters' });
     }
 
-    const cvData = new CVParser().parse(cvText);
     const jdParser = new JDParser();
-    const jdData = jdParser.parse(jobDescription, jobTitle, company);
+    const [cvData, jdDataRegex] = await Promise.all([
+      Promise.resolve(new CVParser().parse(cvText)),
+      Promise.resolve(jdParser.parse(jobDescription, jobTitle, company)),
+    ]);
+    const { jdData, source: jdAnalysisSource } =
+      await _backendEnrichJd(jdParser, jdDataRegex, jobDescription);
 
     const tailor = new CVTailor();
     const matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
@@ -441,7 +483,7 @@ app.post('/api/cv/tailor', async (req, res) => {
       { role: 'user',   content: userPrompt   }
     ];
 
-    const result = await generate(PROVIDER_NAME, PROVIDER_CONFIG, messages, {
+    const result = await generateWithFallback(FALLBACK_CHAIN, messages, {
       temperature: 0.3,
       max_tokens: 4000
     });
@@ -456,21 +498,32 @@ app.post('/api/cv/tailor', async (req, res) => {
       return res.status(502).json({ error: 'No output from provider' });
     }
 
+    let auditSkipped = false;
     try {
       const { systemPrompt: auditSystemPrompt, userPrompt: auditUserPrompt, temperature: auditTemperature } =
         tailor.buildTailoredCvAuditPrompt(cvData, jdData, matchMap, tailoredCvText, confirmedSkills);
-      const auditResult = await generate(PROVIDER_NAME, PROVIDER_CONFIG, [
+      const auditResult = await generateWithFallback(FALLBACK_CHAIN, [
         { role: 'system', content: auditSystemPrompt },
         { role: 'user',   content: auditUserPrompt },
       ], { temperature: auditTemperature, max_tokens: 4500 });
-      const finalizedAudit = tailor.finalizeTailoredCV(auditResult.answer, {
-        cvData,
-        jdData,
-        matchMap,
-        confirmedSkills,
-      });
-      if (finalizedAudit?.trim()) tailoredCvText = finalizedAudit;
+      const auditedText = auditResult.answer;
+      if (auditedText?.trim() && tailor.isValidCvOutput(auditedText)) {
+        const finalizedAudit = tailor.finalizeTailoredCV(auditedText, {
+          cvData,
+          jdData,
+          matchMap,
+          confirmedSkills,
+        });
+        if (finalizedAudit?.trim()) tailoredCvText = finalizedAudit;
+        else auditSkipped = true;
+      } else {
+        auditSkipped = true;
+        if (auditedText?.trim()) {
+          console.warn('[DraftApply] Audit output rejected: response does not look like a CV');
+        }
+      }
     } catch (e) {
+      auditSkipped = true;
       console.warn('[Tailored CV audit] LLM verification failed, using deterministic cleanup only:', e.message);
     }
 
@@ -489,7 +542,10 @@ app.post('/api/cv/tailor', async (req, res) => {
       confirmedSkills
     );
 
-    res.json({ tailoredCvText, matchReport, recruiterReview, warnings, changedSections });
+    const { missingKeywords: atsKeywordGaps, coverage: atsKeywordCoverage } =
+      tailor.checkAtsKeywordCoverage(tailoredCvText, jdData);
+
+    res.json({ tailoredCvText, matchReport, recruiterReview, warnings, changedSections, auditSkipped, jdAnalysisSource, atsKeywordGaps, atsKeywordCoverage });
   } catch (error) {
     console.error('CV tailor error:', error);
     res.status(500).json({ error: 'Failed to tailor CV', details: error.message });
