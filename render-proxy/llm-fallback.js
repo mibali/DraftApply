@@ -7,6 +7,12 @@ export const PREFERRED_OPENROUTER_FREE_MODELS = [
 const DEFAULT_CACHE_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_STALE_TTL_MS = 6 * 60 * 60 * 1000;
 
+export function coercePositiveInteger(value, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 1) return fallback;
+  return Math.max(1, Math.floor(parsed));
+}
+
 function priceIsFree(value) {
   if (value == null || value === '') return true;
   return Number(value) === 0;

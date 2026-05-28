@@ -12,6 +12,7 @@ import { CVParser } from '../shared/cv-parser.js';
 import { JDParser } from '../shared/jd-parser.js';
 import { CVTailor } from '../shared/cv-tailor.js';
 import {
+  coercePositiveInteger,
   OpenRouterFreeModelCache,
   PREFERRED_OPENROUTER_FREE_MODELS,
   buildOpenRouterFallbackModelOrder,
@@ -27,7 +28,7 @@ const OPENROUTER_SITE_URL = process.env.OPENROUTER_SITE_URL || 'https://draftapp
 const OPENROUTER_APP_NAME = process.env.OPENROUTER_APP_NAME || 'DraftApply';
 const OPENROUTER_TAILOR_FALLBACK = !/^false$/i.test(process.env.OPENROUTER_TAILOR_FALLBACK || 'true');
 const OPENROUTER_MODEL_CACHE_TTL_MS = Number(process.env.OPENROUTER_MODEL_CACHE_TTL_MS || 10 * 60 * 1000);
-const OPENROUTER_MAX_FALLBACK_MODELS = Math.max(1, Number(process.env.OPENROUTER_MAX_FALLBACK_MODELS || 6));
+const OPENROUTER_MAX_FALLBACK_MODELS = coercePositiveInteger(process.env.OPENROUTER_MAX_FALLBACK_MODELS, 6);
 const TOKEN_SECRET = process.env.TOKEN_SECRET;
 
 // Recipe module – default is the bundled open-source recipe. Set RECIPE_PATH to override.

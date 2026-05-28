@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  coercePositiveInteger,
   OpenRouterFreeModelCache,
   buildOpenRouterFallbackModelOrder,
   isOpenRouterFreeTextModel,
@@ -14,6 +15,14 @@ const freeModel = id => ({
 });
 
 describe('OpenRouter free-model fallback ordering', () => {
+  it('falls back to the default model cap when OPENROUTER_MAX_FALLBACK_MODELS is invalid', () => {
+    expect(coercePositiveInteger(undefined, 6)).toBe(6);
+    expect(coercePositiveInteger('not-a-number', 6)).toBe(6);
+    expect(coercePositiveInteger('0', 6)).toBe(6);
+    expect(coercePositiveInteger('-3', 6)).toBe(6);
+    expect(coercePositiveInteger('4.9', 6)).toBe(4);
+  });
+
   it('keeps the Groq success path on Groq by not falling back without an error', () => {
     expect(shouldUseOpenRouterFallback(null, {
       primary: 'groq',
