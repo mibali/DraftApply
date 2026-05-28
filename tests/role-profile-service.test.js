@@ -26,6 +26,13 @@ describe('RoleProfileService', () => {
     expect(service.classify({ jobTitle: 'Systems Administrator' })?.id).toBe('systems_administrator');
   });
 
+  it('classifies QA/testing job titles into the software QA role profile', () => {
+    expect(service.classify({ jobTitle: 'QA Engineer' })?.id).toBe('software_qa');
+    expect(service.classify({ jobTitle: 'Quality Assurance Analyst' })?.id).toBe('software_qa');
+    expect(service.classify({ jobTitle: 'Software Test Engineer' })?.id).toBe('software_qa');
+    expect(service.enrichJDData({ jobTitle: 'QA Analyst' }).domain).toBe('software_quality');
+  });
+
   it('classifies data-engineering job titles into the data engineering role profile', () => {
     expect(service.classify({ jobTitle: 'Data Engineer' })?.id).toBe('data_engineer');
     expect(service.classify({ jobTitle: 'Database Architect' })?.id).toBe('data_engineer');
