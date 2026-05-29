@@ -37,7 +37,15 @@ describe('RoleProfileService', () => {
     expect(service.classify({ jobTitle: 'Data Engineer' })?.id).toBe('data_engineer');
     expect(service.classify({ jobTitle: 'Database Architect' })?.id).toBe('data_engineer');
     expect(service.classify({ jobTitle: 'ETL Developer' })?.id).toBe('data_engineer');
+    expect(service.classify({ jobTitle: 'Data Warehouse Architect' })?.id).toBe('data_engineer');
     expect(service.enrichJDData({ jobTitle: 'Data Engineer' }).domain).toBe('data_engineering');
+  });
+
+  it('classifies analytics job titles into the data analytics role profile', () => {
+    expect(service.classify({ jobTitle: 'Data Analyst' })?.id).toBe('data_analytics');
+    expect(service.classify({ jobTitle: 'Business Intelligence Analyst' })?.id).toBe('data_analytics');
+    expect(service.classify({ jobTitle: 'BI Consultant' })?.id).toBe('data_analytics');
+    expect(service.enrichJDData({ jobTitle: 'Business Intelligence Analyst' }).domain).toBe('data_science');
   });
 
   it('enriches JD data for security and IT operations roles with consistent domains', () => {
