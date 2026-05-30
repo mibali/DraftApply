@@ -33,6 +33,13 @@ describe('RoleProfileService', () => {
     expect(service.enrichJDData({ jobTitle: 'QA Analyst' }).domain).toBe('software_quality');
   });
 
+  it('classifies DevOps/SRE/platform job titles into the DevOps role profile', () => {
+    expect(service.classify({ jobTitle: 'DevOps Engineer' })?.id).toBe('devops_sre');
+    expect(service.classify({ jobTitle: 'Development Operations Engineer' })?.id).toBe('devops_sre');
+    expect(service.classify({ jobTitle: 'Network and Infrastructure Engineer' })?.id).toBe('devops_sre');
+    expect(service.enrichJDData({ jobTitle: 'Site Reliability Engineer' }).domain).toBe('devops');
+  });
+
   it('classifies data-engineering job titles into the data engineering role profile', () => {
     expect(service.classify({ jobTitle: 'Data Engineer' })?.id).toBe('data_engineer');
     expect(service.classify({ jobTitle: 'Database Architect' })?.id).toBe('data_engineer');
