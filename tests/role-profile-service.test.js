@@ -60,6 +60,20 @@ describe('RoleProfileService', () => {
     expect(service.enrichJDData({ jobTitle: 'Network Administrator' }).domain).toBe('it_operations');
   });
 
+  it('classifies customer support job titles into the customer success/support role profile', () => {
+    expect(service.classify({ jobTitle: 'Customer Support Representative' })?.id).toBe('customer_success');
+    expect(service.classify({ jobTitle: 'Client Services Representative' })?.id).toBe('customer_success');
+    expect(service.classify({ jobTitle: 'Call Center Representative' })?.id).toBe('customer_success');
+    expect(service.classify({ jobTitle: 'Customer Care Representative' })?.id).toBe('customer_success');
+  });
+
+  it('classifies IT support/helpdesk job titles into the systems administrator role profile', () => {
+    expect(service.classify({ jobTitle: 'IT Support Specialist' })?.id).toBe('systems_administrator');
+    expect(service.classify({ jobTitle: 'Help Desk Analyst' })?.id).toBe('systems_administrator');
+    expect(service.classify({ jobTitle: 'Service Desk Analyst' })?.id).toBe('systems_administrator');
+    expect(service.classify({ jobTitle: 'Desktop Support Technician' })?.id).toBe('systems_administrator');
+  });
+
   it('enriches parsed JD data with positioning, credibility signals, risks, and skill categories', () => {
     const enriched = service.enrichJDData({
       jobTitle: 'Product Manager',
