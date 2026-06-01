@@ -19,6 +19,7 @@ function duplicates(values) {
 describe('RoleProfileService', () => {
   it('classifies non-tech job titles into standardized role profiles', () => {
     expect(service.classify({ jobTitle: 'Finance Analyst' })?.id).toBe('finance');
+    expect(service.classify({ jobTitle: 'Financial Planning and Analysis Analyst' })?.id).toBe('finance');
     expect(service.classify({ jobTitle: 'Digital Marketing Manager' })?.id).toBe('marketing');
     expect(service.classify({ jobTitle: 'HR Business Partner' })?.id).toBe('hr_people');
     expect(service.classify({ jobTitle: 'Healthcare Administrator' })?.id).toBe('healthcare_admin');
@@ -93,6 +94,12 @@ describe('RoleProfileService', () => {
     const guidance = service.buildCredibilityGuidance({ jobTitle: 'Operations Manager' });
     expect(guidance).toContain('Role family: Operations / Project Management');
     expect(guidance).toContain('High-risk claims');
+  });
+
+  it('classifies operations/project roles into the operations role profile', () => {
+    expect(service.classify({ jobTitle: 'Project Coordinator' })?.id).toBe('operations');
+    expect(service.classify({ jobTitle: 'Project Management Specialist' })?.id).toBe('operations');
+    expect(service.enrichJDData({ jobTitle: 'Project Coordinator' }).domain).toBe('operations');
   });
 
   it('warns when a tailored CV claims a role identity without role-family proof', () => {
