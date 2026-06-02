@@ -27,6 +27,13 @@ describe('RoleProfileService', () => {
     expect(service.classify({ jobTitle: 'Systems Administrator' })?.id).toBe('systems_administrator');
   });
 
+  it('classifies official HR occupation variants into the HR role profile', () => {
+    expect(service.classify({ jobTitle: 'Human Resources Specialist' })?.id).toBe('hr_people');
+    expect(service.classify({ jobTitle: 'Benefits Specialist' })?.id).toBe('hr_people');
+    expect(service.classify({ jobTitle: 'Personnel Specialist' })?.id).toBe('hr_people');
+    expect(service.enrichJDData({ jobTitle: 'Human Resources Coordinator' }).domain).toBe('hr');
+  });
+
   it('classifies QA/testing job titles into the software QA role profile', () => {
     expect(service.classify({ jobTitle: 'QA Engineer' })?.id).toBe('software_qa');
     expect(service.classify({ jobTitle: 'Quality Assurance Analyst' })?.id).toBe('software_qa');
@@ -100,6 +107,20 @@ describe('RoleProfileService', () => {
     expect(service.classify({ jobTitle: 'Project Coordinator' })?.id).toBe('operations');
     expect(service.classify({ jobTitle: 'Project Management Specialist' })?.id).toBe('operations');
     expect(service.enrichJDData({ jobTitle: 'Project Coordinator' }).domain).toBe('operations');
+  });
+
+  it('classifies official healthcare administration variants into the healthcare admin profile', () => {
+    expect(service.classify({ jobTitle: 'Medical Office Manager' })?.id).toBe('healthcare_admin');
+    expect(service.classify({ jobTitle: 'Health Information Manager' })?.id).toBe('healthcare_admin');
+    expect(service.classify({ jobTitle: 'Practice Administrator' })?.id).toBe('healthcare_admin');
+    expect(service.enrichJDData({ jobTitle: 'Health Services Manager' }).domain).toBe('healthcare');
+  });
+
+  it('classifies official training and development variants into the education/training profile', () => {
+    expect(service.classify({ jobTitle: 'Learning and Development Specialist' })?.id).toBe('education_training');
+    expect(service.classify({ jobTitle: 'Training and Development Specialist' })?.id).toBe('education_training');
+    expect(service.classify({ jobTitle: 'Corporate Trainer' })?.id).toBe('education_training');
+    expect(service.enrichJDData({ jobTitle: 'Technical Trainer' }).domain).toBe('education');
   });
 
   it('warns when a tailored CV claims a role identity without role-family proof', () => {
