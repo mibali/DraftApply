@@ -75,6 +75,20 @@ describe('RoleProfileService', () => {
     expect(service.classify({ jobTitle: 'Customer Care Representative' })?.id).toBe('customer_success');
   });
 
+  it('classifies official sales occupation variants into the sales role profile', () => {
+    expect(service.classify({ jobTitle: 'Regional Sales Manager' })?.id).toBe('sales');
+    expect(service.classify({ jobTitle: 'Sales Operations Manager' })?.id).toBe('sales');
+    expect(service.classify({ jobTitle: 'Business Development Representative' })?.id).toBe('sales');
+    expect(service.enrichJDData({ jobTitle: 'Territory Manager' }).domain).toBe('sales');
+  });
+
+  it('classifies official marketing occupation variants into the marketing role profile', () => {
+    expect(service.classify({ jobTitle: 'Marketing Coordinator' })?.id).toBe('marketing');
+    expect(service.classify({ jobTitle: 'Market Research Analyst' })?.id).toBe('marketing');
+    expect(service.classify({ jobTitle: 'Search Marketing Strategist' })?.id).toBe('marketing');
+    expect(service.enrichJDData({ jobTitle: 'Market Research Consultant' }).domain).toBe('marketing');
+  });
+
   it('classifies IT support/helpdesk job titles into the systems administrator role profile', () => {
     expect(service.classify({ jobTitle: 'IT Support Specialist' })?.id).toBe('systems_administrator');
     expect(service.classify({ jobTitle: 'Help Desk Analyst' })?.id).toBe('systems_administrator');
