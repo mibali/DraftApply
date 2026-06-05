@@ -69,6 +69,8 @@ describe('RoleProfileService', () => {
   });
 
   it('classifies customer support job titles into the customer success/support role profile', () => {
+    expect(service.classify({ jobTitle: 'Customer Service Representative' })?.id).toBe('customer_success');
+    expect(service.classify({ jobTitle: 'Customer Service Specialist' })?.id).toBe('customer_success');
     expect(service.classify({ jobTitle: 'Customer Support Representative' })?.id).toBe('customer_success');
     expect(service.classify({ jobTitle: 'Client Services Representative' })?.id).toBe('customer_success');
     expect(service.classify({ jobTitle: 'Call Center Representative' })?.id).toBe('customer_success');
@@ -120,7 +122,16 @@ describe('RoleProfileService', () => {
   it('classifies operations/project roles into the operations role profile', () => {
     expect(service.classify({ jobTitle: 'Project Coordinator' })?.id).toBe('operations');
     expect(service.classify({ jobTitle: 'Project Management Specialist' })?.id).toBe('operations');
+    expect(service.classify({ jobTitle: 'Project Support Officer' })?.id).toBe('operations');
     expect(service.enrichJDData({ jobTitle: 'Project Coordinator' }).domain).toBe('operations');
+  });
+
+  it('classifies official legal and compliance occupation variants into the legal profile', () => {
+    expect(service.classify({ jobTitle: 'Compliance Manager' })?.id).toBe('legal_compliance');
+    expect(service.classify({ jobTitle: 'Regulatory Affairs Specialist' })?.id).toBe('legal_compliance');
+    expect(service.classify({ jobTitle: 'Legal Administrative Assistant' })?.id).toBe('legal_compliance');
+    expect(service.classify({ jobTitle: 'Data Protection Officer' })?.id).toBe('legal_compliance');
+    expect(service.enrichJDData({ jobTitle: 'Data Compliance Officer' }).domain).toBe('legal');
   });
 
   it('classifies official healthcare administration variants into the healthcare admin profile', () => {
