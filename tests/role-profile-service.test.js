@@ -27,6 +27,14 @@ describe('RoleProfileService', () => {
     expect(service.classify({ jobTitle: 'Systems Administrator' })?.id).toBe('systems_administrator');
   });
 
+  it('classifies official budget-analysis occupation variants into the finance role profile', () => {
+    expect(service.classify({ jobTitle: 'Budget Analyst' })?.id).toBe('finance');
+    expect(service.classify({ jobTitle: 'Budget Officer' })?.id).toBe('finance');
+    expect(service.classify({ jobTitle: 'Cost Analyst' })?.id).toBe('finance');
+    expect(service.classify({ jobTitle: 'Fiscal Budget Analyst' })?.id).toBe('finance');
+    expect(service.enrichJDData({ jobTitle: 'Budget and Policy Analyst' }).domain).toBe('finance');
+  });
+
   it('classifies official HR occupation variants into the HR role profile', () => {
     expect(service.classify({ jobTitle: 'Human Resources Specialist' })?.id).toBe('hr_people');
     expect(service.classify({ jobTitle: 'Benefits Specialist' })?.id).toBe('hr_people');
