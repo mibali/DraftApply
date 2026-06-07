@@ -134,6 +134,14 @@ describe('RoleProfileService', () => {
     expect(service.enrichJDData({ jobTitle: 'Project Coordinator' }).domain).toBe('operations');
   });
 
+  it('classifies official logistics, supply-chain, and procurement variants into the operations role profile', () => {
+    expect(service.classify({ jobTitle: 'Logistics Analyst' })?.id).toBe('operations');
+    expect(service.classify({ jobTitle: 'Supply Chain Manager' })?.id).toBe('operations');
+    expect(service.classify({ jobTitle: 'Purchasing Agent' })?.id).toBe('operations');
+    expect(service.classify({ jobTitle: 'Transportation Manager' })?.id).toBe('operations');
+    expect(service.enrichJDData({ jobTitle: 'Procurement Specialist' }).domain).toBe('operations');
+  });
+
   it('classifies official legal and compliance occupation variants into the legal profile', () => {
     expect(service.classify({ jobTitle: 'Compliance Manager' })?.id).toBe('legal_compliance');
     expect(service.classify({ jobTitle: 'Regulatory Affairs Specialist' })?.id).toBe('legal_compliance');
