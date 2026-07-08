@@ -392,6 +392,30 @@ async function callEmbeddingEndpoint(texts, {
   }
 }
 
+// Opt-in liveness check for /api/health?probe=embedding. Makes one real
+// embedding call so operators can distinguish "env var is set" from "the
+// endpoint actually works" (right host shape, token, and a responding model),
+// without every health hit paying for an external round-trip.
+async function probeEmbeddingLiveness() {
+  if (!LOCAL_EMBEDDING_BASE_URL) {
+    return { configured: false, status: 'not_configured' };
+  }
+  const startedAt = Date.now();
+  try {
+    const vectors = await callEmbeddingEndpoint(['DraftApply embedding liveness probe.']);
+    const dimensions = Array.isArray(vectors?.[0]) ? vectors[0].length : 0;
+    if (!dimensions) {
+      return { configured: true, status: 'error', reason: 'Endpoint returned no usable vector.', elapsedMs: Date.now() - startedAt };
+    }
+    return { configured: true, status: 'live', model: LOCAL_EMBEDDING_MODEL, dimensions, elapsedMs: Date.now() - startedAt };
+  } catch (error) {
+    const reason = error?.name === 'AbortError'
+      ? `Timed out after ${LOCAL_EMBEDDING_TIMEOUT_MS}ms.`
+      : String(error?.message || error).slice(0, 200);
+    return { configured: true, status: 'error', reason, elapsedMs: Date.now() - startedAt };
+  }
+}
+
 async function callProviderChat(provider, {
   messages,
   temperature = 0.7,
@@ -625,7 +649,7 @@ function authRequired(req, res, next) {
   next();
 }
 
-app.get('/api/health', (req, res) => {
+app.get('/api/health', async (req, res) => {
   const applicationRoute = selectModelRoute('application_answer', {
     hasLocal: Boolean(LOCAL_LLM_BASE_URL),
     hasHosted: Boolean(GROQ_API_KEY || OPENROUTER_API_KEY),
@@ -641,6 +665,9 @@ app.get('/api/health', (req, res) => {
     hasEmbedding: Boolean(LOCAL_EMBEDDING_BASE_URL),
     embeddingModel: LOCAL_EMBEDDING_MODEL,
   });
+  // Only make a live embedding call when explicitly requested, so the default
+  // health check stays fast and free.
+  const embeddingLiveness = req.query.probe === 'embedding' ? await probeEmbeddingLiveness() : undefined;
   const qualityMode = deploymentQualityMode();
 
   res.json({
@@ -660,6 +687,7 @@ app.get('/api/health', (req, res) => {
         promote: Number.isFinite(LOCAL_EMBEDDING_PROMOTE_THRESHOLD) ? LOCAL_EMBEDDING_PROMOTE_THRESHOLD : 0.60,
         enrich: Number.isFinite(LOCAL_EMBEDDING_ENRICH_THRESHOLD) ? LOCAL_EMBEDDING_ENRICH_THRESHOLD : 0.50,
       },
+      ...(embeddingLiveness ? { embeddingLiveness } : {}),
     },
     agentChains: WORKFLOW_AGENT_CHAINS,
     fallbackProvider: GROQ_API_KEY && OPENROUTER_API_KEY ? 'openrouter' : null,

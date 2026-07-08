@@ -61,8 +61,11 @@ export function buildEvidenceRetrievalInputs(candidateEvidenceMap = {}, roleRequ
 }
 
 export function rerankMatchMapWithEmbeddings(matchMap = [], retrievalInputs = {}, embeddings = [], {
-  promoteThreshold = 0.68,
-  enrichThreshold = 0.54,
+  // Defaults recalibrated for mxbai-embed-large-v1 - see
+  // docs/embedding-model-evaluation.md. Callers (server.js) pass explicit
+  // values from LOCAL_EMBEDDING_*_THRESHOLD; these are the fallback.
+  promoteThreshold = 0.60,
+  enrichThreshold = 0.50,
   maxEvidencePerRequirement = 3,
   provider = 'local-openai-embeddings',
   model = '',
