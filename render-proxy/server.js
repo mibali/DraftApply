@@ -13,6 +13,15 @@ import { JDParser } from '../shared/jd-parser.js';
 import { CVTailor } from '../shared/cv-tailor.js';
 import { evaluateAnswer, buildRegenerationFeedback } from '../shared/answer-evaluator.js';
 import {
+  rebuildTailoredCvAgentContext,
+  runApplicationAnswerAgents,
+  runTailoredCvAgents,
+} from '../shared/agent-workflows.js';
+import {
+  buildEvidenceRetrievalInputs,
+  rerankMatchMapWithEmbeddings,
+} from '../shared/evidence-retrieval.js';
+import {
   coercePositiveInteger,
   OpenRouterFreeModelCache,
   PREFERRED_OPENROUTER_FREE_MODELS,
@@ -20,6 +29,14 @@ import {
   isRetryableOpenRouterModelError,
   shouldUseOpenRouterFallback,
 } from './llm-fallback.js';
+import {
+  DEFAULT_LIGHTWEIGHT_CHAT_MODEL,
+  LIGHTWEIGHT_MODEL_RECOMMENDATION,
+  WORKFLOW_AGENT_CHAINS,
+  DEFAULT_LIGHTWEIGHT_EMBEDDING_MODEL,
+  selectEmbeddingRoute,
+  selectModelRoute,
+} from './model-router.js';
 
 const PORT = Number(process.env.PORT || 10000);
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
@@ -31,6 +48,16 @@ const OPENROUTER_APP_NAME = process.env.OPENROUTER_APP_NAME || 'DraftApply';
 const OPENROUTER_TAILOR_FALLBACK = !/^false$/i.test(process.env.OPENROUTER_TAILOR_FALLBACK || 'true');
 const OPENROUTER_MODEL_CACHE_TTL_MS = Number(process.env.OPENROUTER_MODEL_CACHE_TTL_MS || 10 * 60 * 1000);
 const OPENROUTER_MAX_FALLBACK_MODELS = coercePositiveInteger(process.env.OPENROUTER_MAX_FALLBACK_MODELS, 6);
+const LOCAL_LLM_BASE_URL = (process.env.LOCAL_LLM_BASE_URL || '').trim();
+const LOCAL_LLM_API_KEY = process.env.LOCAL_LLM_API_KEY || 'local';
+const LOCAL_LLM_MODEL = (process.env.LOCAL_LLM_MODEL || DEFAULT_LIGHTWEIGHT_CHAT_MODEL).trim();
+const LOCAL_LLM_PREFER_FOR_GENERATION = /^true$/i.test(process.env.LOCAL_LLM_PREFER_FOR_GENERATION || 'false');
+const LOCAL_EMBEDDING_BASE_URL = (process.env.LOCAL_EMBEDDING_BASE_URL || '').trim();
+const LOCAL_EMBEDDING_API_KEY = process.env.LOCAL_EMBEDDING_API_KEY || LOCAL_LLM_API_KEY;
+const LOCAL_EMBEDDING_MODEL = (process.env.LOCAL_EMBEDDING_MODEL || DEFAULT_LIGHTWEIGHT_EMBEDDING_MODEL).trim();
+const LOCAL_EMBEDDING_TIMEOUT_MS = coercePositiveInteger(process.env.LOCAL_EMBEDDING_TIMEOUT_MS, 12000);
+const LOCAL_EMBEDDING_PROMOTE_THRESHOLD = Number(process.env.LOCAL_EMBEDDING_PROMOTE_THRESHOLD || 0.68);
+const LOCAL_EMBEDDING_ENRICH_THRESHOLD = Number(process.env.LOCAL_EMBEDDING_ENRICH_THRESHOLD || 0.54);
 const TOKEN_SECRET = process.env.TOKEN_SECRET;
 
 // Recipe module – default is the bundled open-source recipe. Set RECIPE_PATH to override.
@@ -46,8 +73,8 @@ try {
   recipe = await import('./recipe/index.js');
 }
 
-if ((!GROQ_API_KEY && !OPENROUTER_API_KEY) || !TOKEN_SECRET) {
-  console.error('Missing required env vars: TOKEN_SECRET and at least one LLM key (GROQ_API_KEY or OPENROUTER_API_KEY) must be set. Exiting.');
+if ((!GROQ_API_KEY && !OPENROUTER_API_KEY && !LOCAL_LLM_BASE_URL) || !TOKEN_SECRET) {
+  console.error('Missing required env vars: TOKEN_SECRET and at least one LLM route (GROQ_API_KEY, OPENROUTER_API_KEY, or LOCAL_LLM_BASE_URL) must be set. Exiting.');
   process.exit(1);
 }
 
@@ -229,6 +256,16 @@ function llmErrorResponse(error, context = {}) {
 }
 
 function llmProviderConfig(provider, model) {
+  if (provider === 'local-openai') {
+    return {
+      provider,
+      apiKey: LOCAL_LLM_API_KEY,
+      model: model || LOCAL_LLM_MODEL,
+      url: localChatCompletionsUrl(LOCAL_LLM_BASE_URL),
+      headers: {},
+    };
+  }
+
   if (provider === 'groq') {
     return {
       provider,
@@ -249,6 +286,87 @@ function llmProviderConfig(provider, model) {
       'X-Title': OPENROUTER_APP_NAME,
     },
   };
+}
+
+function localChatCompletionsUrl(rawBaseUrl) {
+  const base = String(rawBaseUrl || '').trim().replace(/\/+$/, '');
+  if (!base) return '';
+  if (/\/chat\/completions$/i.test(base)) return base;
+  if (/\/v1$/i.test(base)) return `${base}/chat/completions`;
+  return `${base}/v1/chat/completions`;
+}
+
+function localEmbeddingsUrl(rawBaseUrl) {
+  const base = String(rawBaseUrl || '').trim().replace(/\/+$/, '');
+  if (!base) return '';
+  if (/\/embeddings$/i.test(base)) return base;
+  if (/\/v1$/i.test(base)) return `${base}/embeddings`;
+  return `${base}/v1/embeddings`;
+}
+
+async function callEmbeddingEndpoint(texts, {
+  timeoutMs = LOCAL_EMBEDDING_TIMEOUT_MS,
+  model = LOCAL_EMBEDDING_MODEL,
+} = {}) {
+  const input = (Array.isArray(texts) ? texts : [])
+    .map(text => String(text || '').trim())
+    .filter(Boolean);
+  if (!LOCAL_EMBEDDING_BASE_URL || input.length === 0) return null;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const startedAt = Date.now();
+  try {
+    const response = await fetch(localEmbeddingsUrl(LOCAL_EMBEDDING_BASE_URL), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${LOCAL_EMBEDDING_API_KEY}`,
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model,
+        input,
+      }),
+    });
+
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      throw new LLMProviderError('local-openai-embeddings', response.status, detail.slice(0, 500), null, model);
+    }
+
+    const data = await response.json();
+    const embeddings = (data?.data || [])
+      .sort((a, b) => Number(a.index || 0) - Number(b.index || 0))
+      .map(item => item.embedding);
+
+    if (embeddings.length !== input.length) {
+      throw new LLMProviderError('local-openai-embeddings', 502, 'Embedding count mismatch', null, model);
+    }
+
+    logLLMAttempt({
+      provider: 'local-openai-embeddings',
+      model,
+      attempt: 1,
+      outcome: 'success',
+      elapsedMs: Date.now() - startedAt,
+    });
+
+    return embeddings;
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      logLLMAttempt({
+        provider: 'local-openai-embeddings',
+        model,
+        attempt: 1,
+        outcome: 'timeout',
+        elapsedMs: Date.now() - startedAt,
+      });
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function callProviderChat(provider, {
@@ -359,11 +477,35 @@ async function callOpenRouterFreeFallback(options, { callStart, fallbackFrom = '
 }
 
 async function callChatCompletionWithFallback(options) {
+  const route = selectModelRoute(options.workflow || 'application_answer', {
+    hasLocal: Boolean(LOCAL_LLM_BASE_URL),
+    hasHosted: Boolean(GROQ_API_KEY || OPENROUTER_API_KEY),
+    preferLocalForGeneration: LOCAL_LLM_PREFER_FOR_GENERATION,
+    localModel: LOCAL_LLM_MODEL,
+  });
+
+  if (route.provider === 'local-openai') {
+    try {
+      return {
+        ...(await callProviderChat('local-openai', {
+          ...options,
+          model: route.model,
+          attempt: 1,
+        })),
+        fallbackFrom: null,
+        route,
+      };
+    } catch (error) {
+      if (!GROQ_API_KEY && !OPENROUTER_API_KEY) throw error;
+      console.warn(`[DraftApply] Local lightweight model ${route.model} failed (${error.status || error.name || 'error'}); falling back to hosted proxy path.`);
+    }
+  }
+
   const primary = GROQ_API_KEY ? 'groq' : 'openrouter';
   const callStart = Date.now();
   try {
-    if (primary === 'openrouter') return { ...(await callOpenRouterFreeFallback(options, { callStart, fallbackFrom: null })), fallbackFrom: null };
-    return { ...(await callProviderChat(primary, { ...options, attempt: 1 })), fallbackFrom: null };
+    if (primary === 'openrouter') return { ...(await callOpenRouterFreeFallback(options, { callStart, fallbackFrom: null })), fallbackFrom: null, route };
+    return { ...(await callProviderChat(primary, { ...options, attempt: 1 })), fallbackFrom: null, route };
   } catch (error) {
     const canFallback = shouldUseOpenRouterFallback(error, {
       primary,
@@ -373,7 +515,7 @@ async function callChatCompletionWithFallback(options) {
     if (!canFallback) throw error;
 
     console.warn(`[DraftApply] Groq ${error.status || error.name || 'error'}; falling back to OpenRouter free models.`);
-    return callOpenRouterFreeFallback(options, { callStart, fallbackFrom: primary });
+    return { ...(await callOpenRouterFreeFallback(options, { callStart, fallbackFrom: primary })), route };
   }
 }
 
@@ -405,10 +547,39 @@ function authRequired(req, res, next) {
 }
 
 app.get('/api/health', (req, res) => {
+  const applicationRoute = selectModelRoute('application_answer', {
+    hasLocal: Boolean(LOCAL_LLM_BASE_URL),
+    hasHosted: Boolean(GROQ_API_KEY || OPENROUTER_API_KEY),
+    preferLocalForGeneration: LOCAL_LLM_PREFER_FOR_GENERATION,
+    localModel: LOCAL_LLM_MODEL,
+  });
+  const extractionRoute = selectModelRoute('jd_extract', {
+    hasLocal: Boolean(LOCAL_LLM_BASE_URL),
+    hasHosted: Boolean(GROQ_API_KEY || OPENROUTER_API_KEY),
+    localModel: LOCAL_LLM_MODEL,
+  });
+  const embeddingRoute = selectEmbeddingRoute({
+    hasEmbedding: Boolean(LOCAL_EMBEDDING_BASE_URL),
+    embeddingModel: LOCAL_EMBEDDING_MODEL,
+  });
+
   res.json({
     ok: true,
-    provider: GROQ_API_KEY ? 'groq' : 'openrouter',
-    model: GROQ_API_KEY ? GROQ_MODEL : 'openrouter-free-dynamic',
+    provider: GROQ_API_KEY ? 'groq' : OPENROUTER_API_KEY ? 'openrouter' : 'local-openai',
+    model: GROQ_API_KEY ? GROQ_MODEL : OPENROUTER_API_KEY ? 'openrouter-free-dynamic' : LOCAL_LLM_MODEL,
+    modelRouter: {
+      applicationAnswer: applicationRoute,
+      lightweightExtraction: extractionRoute,
+      evidenceRetrieval: embeddingRoute,
+      recommendation: LIGHTWEIGHT_MODEL_RECOMMENDATION,
+      localConfigured: Boolean(LOCAL_LLM_BASE_URL),
+      embeddingConfigured: Boolean(LOCAL_EMBEDDING_BASE_URL),
+      embeddingThresholds: {
+        promote: Number.isFinite(LOCAL_EMBEDDING_PROMOTE_THRESHOLD) ? LOCAL_EMBEDDING_PROMOTE_THRESHOLD : 0.68,
+        enrich: Number.isFinite(LOCAL_EMBEDDING_ENRICH_THRESHOLD) ? LOCAL_EMBEDDING_ENRICH_THRESHOLD : 0.54,
+      },
+    },
+    agentChains: WORKFLOW_AGENT_CHAINS,
     fallbackProvider: GROQ_API_KEY && OPENROUTER_API_KEY ? 'openrouter' : null,
     fallbackModel: GROQ_API_KEY && OPENROUTER_API_KEY ? 'openrouter-free-dynamic' : null,
     fallbackModelPreference: GROQ_API_KEY && OPENROUTER_API_KEY ? PREFERRED_OPENROUTER_FREE_MODELS : [],
@@ -513,6 +684,161 @@ function tryDeterministicExtract(cleanedQuestion, cvText) {
   return null;
 }
 
+function summarizeAgentRun(context = {}) {
+  if (!context) return undefined;
+  return {
+    workflow: context.workflow,
+    agentChain: context.agentChain,
+    questionType: context.questionType,
+    evidenceCount: context.candidateEvidenceMap?.evidenceItems?.length,
+    relevantEvidenceCount: context.relevantEvidence?.length,
+    requirementCount: context.roleRequirementMap?.requirements?.length,
+    matchedRequirementCount: context.matchedRequirements?.length,
+    missingRequirementCount: context.gapAnalysis?.missingRequirements?.length,
+    supportedKeywordCount: context.keywordOptimisation?.supportedKeywords?.length,
+    riskyKeywordCount: context.keywordOptimisation?.riskyKeywords?.length,
+  };
+}
+
+function compactText(value, max = 160) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (text.length <= max) return text;
+  return `${text.slice(0, max - 1).trim()}…`;
+}
+
+function buildAgentInsights(context = {}) {
+  if (!context) return undefined;
+
+  const base = {
+    workflow: context.workflow,
+    agentChain: context.agentChain,
+    questionType: context.questionType,
+  };
+
+  if (context.workflow === 'applicationAnswer') {
+    return {
+      ...base,
+      evidence: (context.relevantEvidence || []).slice(0, 4).map(item => ({
+        type: item.type,
+        label: compactText(item.label, 80),
+        text: compactText(item.text, 180),
+      })),
+      matchedRequirements: (context.matchedRequirements || []).slice(0, 4).map(item => ({
+        requirement: compactText(item.requirement, 90),
+        status: item.status,
+        supported: Boolean(item.allowedToMention),
+        evidenceCount: Array.isArray(item.evidence) ? item.evidence.length : 0,
+      })),
+      truthfulness: {
+        unsupportedCount: context.truthfulness?.unsupportedClaims?.length || 0,
+        allowedCount: context.truthfulness?.allowedClaims?.length || 0,
+      },
+    };
+  }
+
+  if (context.workflow === 'tailoredCv') {
+    return {
+      ...base,
+      gapAnalysis: {
+        missingRequirements: (context.gapAnalysis?.missingRequirements || []).slice(0, 8).map(item => compactText(item, 80)),
+        transferableRequirements: (context.gapAnalysis?.transferableRequirements || []).slice(0, 8).map(item => compactText(item, 80)),
+        confirmedAdditions: (context.gapAnalysis?.confirmedAdditions || []).slice(0, 8).map(item => compactText(item, 80)),
+      },
+      keywordOptimisation: {
+        supportedKeywords: (context.keywordOptimisation?.supportedKeywords || []).slice(0, 12).map(item => compactText(item, 60)),
+        riskyKeywords: (context.keywordOptimisation?.riskyKeywords || []).slice(0, 12).map(item => compactText(item, 60)),
+      },
+      atsFormatting: {
+        targetTitle: compactText(context.atsFormatting?.targetTitle, 80),
+        requiredVisibleEvidence: (context.atsFormatting?.requiredVisibleEvidence || []).slice(0, 8).map(item => compactText(item, 80)),
+      },
+      evidenceRetrieval: context.evidenceRetrieval ? {
+        provider: context.evidenceRetrieval.provider,
+        model: context.evidenceRetrieval.model,
+        status: context.evidenceRetrieval.status,
+        promotedCount: context.evidenceRetrieval.promotedCount,
+        enrichedCount: context.evidenceRetrieval.enrichedCount,
+      } : undefined,
+      truthfulness: {
+        unsupportedCount: context.truthfulness?.unsupportedClaims?.length || 0,
+        allowedCount: context.truthfulness?.allowedClaims?.length || 0,
+      },
+    };
+  }
+
+  return base;
+}
+
+async function applyEmbeddingRetrieval(tailorAgentContext, tailor = new CVTailor()) {
+  const embeddingRoute = selectEmbeddingRoute({
+    hasEmbedding: Boolean(LOCAL_EMBEDDING_BASE_URL),
+    embeddingModel: LOCAL_EMBEDDING_MODEL,
+  });
+
+  if (!LOCAL_EMBEDDING_BASE_URL) {
+    return {
+      ...tailorAgentContext,
+      evidenceRetrieval: {
+        ...embeddingRoute,
+        status: 'deterministic',
+      },
+    };
+  }
+
+  const retrievalInputs = buildEvidenceRetrievalInputs(
+    tailorAgentContext.candidateEvidenceMap,
+    tailorAgentContext.roleRequirementMap,
+  );
+
+  if (retrievalInputs.texts.length === 0) {
+    return {
+      ...tailorAgentContext,
+      evidenceRetrieval: {
+        ...embeddingRoute,
+        status: 'skipped',
+        reason: 'No CV evidence or JD requirements available.',
+      },
+    };
+  }
+
+  try {
+    const embeddings = await callEmbeddingEndpoint(retrievalInputs.texts);
+    const { matchMap, retrieval } = rerankMatchMapWithEmbeddings(
+      tailorAgentContext.matchMap,
+      retrievalInputs,
+      embeddings,
+      {
+        provider: embeddingRoute.provider,
+        model: embeddingRoute.model,
+        promoteThreshold: Number.isFinite(LOCAL_EMBEDDING_PROMOTE_THRESHOLD)
+          ? LOCAL_EMBEDDING_PROMOTE_THRESHOLD
+          : 0.68,
+        enrichThreshold: Number.isFinite(LOCAL_EMBEDDING_ENRICH_THRESHOLD)
+          ? LOCAL_EMBEDDING_ENRICH_THRESHOLD
+          : 0.54,
+      },
+    );
+
+    return {
+      ...rebuildTailoredCvAgentContext(tailorAgentContext, matchMap, tailor),
+      evidenceRetrieval: {
+        ...embeddingRoute,
+        ...retrieval,
+      },
+    };
+  } catch (error) {
+    console.warn('[DraftApply] Embedding retrieval skipped:', String(error.message || error).slice(0, 160));
+    return {
+      ...tailorAgentContext,
+      evidenceRetrieval: {
+        ...embeddingRoute,
+        status: 'fallback',
+        reason: 'Embedding endpoint failed; deterministic matching was used.',
+      },
+    };
+  }
+}
+
 /**
  * Strip common form-field artifacts (*, :, ?) so recipe patterns match cleanly.
  * This runs engine-side so every recipe benefits without duplicating the logic.
@@ -533,6 +859,7 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
   const body = req.body || {};
 
   let systemPrompt, userPrompt, temperature, maxTokens, questionType;
+  let answerAgentContext = null;
 
   // Detect payload format:
   //   Structured (new): body.question exists  →  run through recipe
@@ -555,19 +882,17 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
       return res.json({ answer: deterministicAnswer, provider: 'deterministic' });
     }
 
-    // Parse CV and JD into structured data to enrich prompts with a
-    // requirements bridge and relevance-ranked evidence hints.
-    // Both operations are fast synchronous JS — no network, no LLM.
-    // Any parsing failure is silenced; generation falls back to raw-text mode.
-    let cvData;
-    let jdData;
-    let matchMap = [];
+    // Deterministic stage-2 agents parse CV/JD, build the candidate evidence
+    // map, construct the role requirement map, and score supported/missing
+    // requirements before the recipe builds the final prompt.
     try {
-      cvData = new CVParser().parse(body.cvText);
-      if (body.jobDescription && cvData) {
-        jdData = new JDParser().parse(body.jobDescription, body.jobTitle || '', body.company || '');
-        matchMap = new CVTailor().buildMatchMap(cvData, jdData);
-      }
+      answerAgentContext = runApplicationAnswerAgents({
+        question: cleanedQuestion,
+        cvText: body.cvText,
+        jobDescription: body.jobDescription || '',
+        jobTitle: body.jobTitle || '',
+        company: body.company || '',
+      });
     } catch (_) {}
 
     try {
@@ -576,10 +901,10 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
         length:         body.length || 'medium',
         tone:           body.tone || 'natural',
         cvText:         body.cvText,
-        cvData:         cvData,
-        jdData:         jdData,
-        matchMap:       matchMap.length > 0 ? matchMap : undefined,
-        roleProfile:    jdData?.roleProfile || undefined,
+        cvData:         answerAgentContext?.cvData,
+        jdData:         answerAgentContext?.jdData,
+        matchMap:       answerAgentContext?.matchMap?.length > 0 ? answerAgentContext.matchMap : undefined,
+        roleProfile:    answerAgentContext?.jdData?.roleProfile || undefined,
         jobTitle:       body.jobTitle || undefined,
         company:        body.company || undefined,
         jobDescription: body.jobDescription || undefined,
@@ -593,6 +918,7 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
       temperature  = typeof result.temperature === 'number' ? result.temperature : 0.7;
       maxTokens    = typeof result.maxTokens === 'number' ? result.maxTokens : undefined;
       questionType = result.questionType || undefined;
+      if (answerAgentContext && result.questionType) answerAgentContext.questionType = result.questionType;
     } catch (err) {
       return res.status(500).json({ error: 'Recipe error', details: String(err.message).slice(0, 200) });
     }
@@ -620,6 +946,7 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
 
   try {
     const completion = await callChatCompletionWithFallback({
+      workflow: 'application_answer',
       temperature,
       maxTokens,
       stream: useStream,
@@ -637,7 +964,21 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
       res.setHeader('Connection', 'keep-alive');
       res.setHeader('X-DraftApply-Provider', completion.provider);
       res.setHeader('X-DraftApply-Model', completion.model);
+      res.setHeader('X-DraftApply-Workflow', completion.route?.workflow || 'applicationAnswer');
+      res.setHeader('X-DraftApply-Agent-Chain', (completion.route?.agentChain || WORKFLOW_AGENT_CHAINS.applicationAnswer).join(' > '));
       if (completion.fallbackFrom) res.setHeader('X-DraftApply-Fallback-From', completion.fallbackFrom);
+
+      res.write(`data: ${JSON.stringify({
+        draftapplyMeta: {
+          provider: completion.provider,
+          model: completion.model,
+          fallbackFrom: completion.fallbackFrom || undefined,
+          workflow: completion.route?.workflow || 'applicationAnswer',
+          agentChain: completion.route?.agentChain || WORKFLOW_AGENT_CHAINS.applicationAnswer,
+          agentRun: summarizeAgentRun(answerAgentContext),
+          agentInsights: buildAgentInsights(answerAgentContext),
+        }
+      })}\n\n`);
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -672,6 +1013,7 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
           const retryTemp = Math.min(temperature + 0.15, 0.95);
           const feedbackMsg = buildRegenerationFeedback(evaluation.flags);
           const retry = await callChatCompletionWithFallback({
+            workflow: 'application_answer',
             temperature: retryTemp,
             maxTokens,
             stream: false,
@@ -697,7 +1039,16 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
       }
     }
 
-    res.json({ answer, provider: completion.provider, model: completion.model, fallbackFrom: completion.fallbackFrom || undefined });
+    res.json({
+      answer,
+      provider: completion.provider,
+      model: completion.model,
+      fallbackFrom: completion.fallbackFrom || undefined,
+      workflow: completion.route?.workflow || 'applicationAnswer',
+      agentChain: completion.route?.agentChain || WORKFLOW_AGENT_CHAINS.applicationAnswer,
+      agentRun: summarizeAgentRun(answerAgentContext),
+      agentInsights: buildAgentInsights(answerAgentContext),
+    });
   } catch (e) {
     if (e?.name === 'AbortError') {
       return res.status(504).json({ error: 'AI service timed out. Please try again.' });
@@ -832,6 +1183,7 @@ Remove completely:
 Preserve the original bullet point structure and section headings. Output only the extracted content with no preamble, no commentary, and no markdown code fences.`;
 
     const completion = await callChatCompletionWithFallback({
+      workflow: 'jd_extract',
       temperature: 0.1,
       maxTokens: 2000,
       timeoutMs: 30000,
@@ -847,7 +1199,14 @@ Preserve the original bullet point structure and section headings. Output only t
       return res.status(502).json({ error: 'No output from provider' });
     }
 
-    res.json({ extractedText, provider: completion.provider, fallbackFrom: completion.fallbackFrom || undefined });
+    res.json({
+      extractedText,
+      provider: completion.provider,
+      model: completion.model,
+      fallbackFrom: completion.fallbackFrom || undefined,
+      workflow: completion.route?.workflow || 'tailoredCv',
+      agentChain: completion.route?.agentChain || WORKFLOW_AGENT_CHAINS.tailoredCv,
+    });
   } catch (e) {
     if (e?.name === 'AbortError') {
       return res.status(504).json({ error: 'Job description extraction timed out. Please try again.' });
@@ -876,6 +1235,7 @@ async function fetchLLMDomainSuggestions(jobTitle, jdTools) {
 
   try {
     const { response } = await callChatCompletionWithFallback({
+      workflow: 'domain_suggestions',
       temperature: 0.2,
       maxTokens: 300,
       timeoutMs: 8000,
@@ -960,6 +1320,7 @@ async function enrichJdData(jdParser, regexParsed, jdText) {
 
   try {
     const { response } = await callChatCompletionWithFallback({
+      workflow: 'jd_enrichment',
       temperature: 0.1,
       maxTokens: 900,
       timeoutMs: 18000,
@@ -1011,7 +1372,17 @@ app.post('/api/cv/analyze', authRequired, generateLimiter, async (req, res) => {
     ]);
 
     const tailor = new CVTailor();
-    const matchMap       = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
+    let tailorAgentContext = runTailoredCvAgents({
+      cvText,
+      jobDescription,
+      jobTitle,
+      company,
+      confirmedSkills,
+      cvData,
+      jdData,
+      tailor,
+    });
+    tailorAgentContext = await applyEmbeddingRetrieval(tailorAgentContext, tailor);
     const staticFallback = tailor.suggestDomainSkills(jdData, cvData);
     const llmRaw = llmSuggestionsResult;
 
@@ -1039,11 +1410,25 @@ app.post('/api/cv/analyze', authRequired, generateLimiter, async (req, res) => {
     }
 
     return res.json({
-      matchReport: tailor.buildMatchSummary(matchMap),
+      matchReport: tailorAgentContext.matchReport,
       jobTitle: jdData.jobTitle,
       company:  jdData.company,
       domainSuggestions,
       jdAnalysisSource,
+      workflow: 'tailoredCv',
+      agentChain: WORKFLOW_AGENT_CHAINS.tailoredCv,
+      gapAnalysis: tailorAgentContext.gapAnalysis,
+      keywordOptimisation: tailorAgentContext.keywordOptimisation,
+      atsFormatting: tailorAgentContext.atsFormatting,
+      truthfulness: tailorAgentContext.truthfulness,
+      evidenceRetrieval: tailorAgentContext.evidenceRetrieval,
+      agentRun: summarizeAgentRun(tailorAgentContext),
+      agentInsights: buildAgentInsights(tailorAgentContext),
+      modelRouter: selectModelRoute('jd_enrichment', {
+        hasLocal: Boolean(LOCAL_LLM_BASE_URL),
+        hasHosted: Boolean(GROQ_API_KEY || OPENROUTER_API_KEY),
+        localModel: LOCAL_LLM_MODEL,
+      }),
     });
   } catch (e) {
     console.error('[DraftApply] Analyze error:', e.message);
@@ -1076,11 +1461,23 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
       await enrichJdData(jdParser, jdDataRegex, jobDescription);
 
     const tailor  = new CVTailor();
-    const matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
+    let tailorAgentContext = runTailoredCvAgents({
+      cvText,
+      jobDescription,
+      jobTitle,
+      company,
+      confirmedSkills,
+      cvData,
+      jdData,
+      tailor,
+    });
+    tailorAgentContext = await applyEmbeddingRetrieval(tailorAgentContext, tailor);
+    const matchMap = tailorAgentContext.matchMap;
 
     const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(cvData, jdData, matchMap);
 
     const completion = await callChatCompletionWithFallback({
+      workflow: 'cv_tailor',
       temperature: 0.3,
       maxTokens: 4000,
       timeoutMs: 50000,
@@ -1115,6 +1512,7 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
       const { systemPrompt: auditSystemPrompt, userPrompt: auditUserPrompt, temperature: auditTemperature } =
         tailor.buildTailoredCvAuditPrompt(cvData, jdData, matchMap, tailoredCvText, confirmedSkills);
       const auditCompletion = await callChatCompletionWithFallback({
+        workflow: 'cv_tailor',
         temperature: auditTemperature,
         maxTokens: 4500,
         timeoutMs: 30000,
@@ -1155,7 +1553,7 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
       ...tailor.validateTailoringQuality(cvData, jdData, matchMap, tailoredCvText, confirmedSkills),
     ];
     const changedSections = tailor.detectChangedSections(cvText, tailoredCvText);
-    const matchReport     = tailor.buildMatchSummary(matchMap);
+    const matchReport     = tailorAgentContext.matchReport;
     const recruiterReview = tailor.buildRecruiterReview(
       cvData,
       jdData,
@@ -1179,7 +1577,16 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
       atsKeywordCoverage,
       provider: tailorProvider,
       model: completion.model,
-      fallbackFrom: completion.fallbackFrom || undefined
+      fallbackFrom: completion.fallbackFrom || undefined,
+      workflow: completion.route?.workflow || 'tailoredCv',
+      agentChain: completion.route?.agentChain || WORKFLOW_AGENT_CHAINS.tailoredCv,
+      gapAnalysis: tailorAgentContext.gapAnalysis,
+      keywordOptimisation: tailorAgentContext.keywordOptimisation,
+      atsFormatting: tailorAgentContext.atsFormatting,
+      truthfulness: tailorAgentContext.truthfulness,
+      evidenceRetrieval: tailorAgentContext.evidenceRetrieval,
+      agentRun: summarizeAgentRun(tailorAgentContext),
+      agentInsights: buildAgentInsights(tailorAgentContext),
     });
   } catch (e) {
     if (e?.name === 'AbortError') {

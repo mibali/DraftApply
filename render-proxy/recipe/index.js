@@ -27,6 +27,7 @@
  */
 
 import { SalaryBenchmarkService } from '../../shared/salary-benchmark-service.js';
+import { withAgentPromptHeader } from '../model-router.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1248,5 +1249,6 @@ export function buildPrompts(input) {
     result.userPrompt += `\n\nHARD LIMIT: This form field accepts a maximum of ${maxChars} characters. Your entire answer must be ${maxChars} characters or fewer (including spaces). Write concisely to stay within this limit.`;
   }
 
-  return result ? { ...result, questionType: qType } : result;
+  const orchestrated = withAgentPromptHeader(result, 'applicationAnswer');
+  return orchestrated ? { ...orchestrated, questionType: qType } : orchestrated;
 }

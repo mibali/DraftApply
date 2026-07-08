@@ -120,13 +120,23 @@ If `RECIPE_PATH` is not set (or fails to load), the proxy uses the bundled recip
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `GROQ_API_KEY` | Yes, unless `OPENROUTER_API_KEY` is set | — | Groq API key; used as the primary LLM provider when present |
+| `GROQ_API_KEY` | Yes, unless `OPENROUTER_API_KEY` or `LOCAL_LLM_BASE_URL` is set | — | Groq API key; used as the primary hosted LLM provider when present |
 | `OPENROUTER_API_KEY` | No | — | OpenRouter API key; used as fallback when Groq is rate-limited, times out, or returns a transient error. Free fallback models are discovered from OpenRouter's official models API. |
 | `OPENROUTER_MAX_FALLBACK_MODELS` | No | `6` | Maximum OpenRouter free models to try per request after Groq fails |
 | `OPENROUTER_MODEL_CACHE_TTL_MS` | No | `600000` | How long to cache OpenRouter's official models catalogue in memory |
 | `OPENROUTER_TAILOR_FALLBACK` | No | `true` | Tailor CV generation/audit falls back to OpenRouter by default when `OPENROUTER_API_KEY` is set. Set to `false` only if you want Tailor CV to hard-fail rather than use OpenRouter as backup. |
 | `OPENROUTER_SITE_URL` | No | `https://draftapply.com` | Optional OpenRouter attribution header |
 | `OPENROUTER_APP_NAME` | No | `DraftApply` | Optional OpenRouter attribution header |
+| `LOCAL_LLM_BASE_URL` | No | — | Optional OpenAI-compatible local/lightweight model endpoint, e.g. Ollama/vLLM/LM Studio. When set, extraction-style workflows route here first. |
+| `LOCAL_LLM_API_KEY` | No | `local` | Bearer token sent to `LOCAL_LLM_BASE_URL`; many local servers ignore it. |
+| `LOCAL_LLM_MODEL` | No | `Qwen/Qwen3-4B-Instruct-2507` | Recommended lightweight chat model for local agent steps. |
+| `LOCAL_LLM_PREFER_FOR_GENERATION` | No | `false` | Set to `true` only if you want final answer/CV generation to prefer the local lightweight route before hosted fallback. |
+| `LOCAL_EMBEDDING_BASE_URL` | No | — | Optional OpenAI-compatible embeddings endpoint used for CV/JD evidence retrieval and reranking. |
+| `LOCAL_EMBEDDING_API_KEY` | No | `LOCAL_LLM_API_KEY` or `local` | Bearer token for the embeddings endpoint. |
+| `LOCAL_EMBEDDING_MODEL` | No | `Qwen/Qwen3-Embedding-0.6B` | Recommended lightweight embedding model for CV/JD evidence matching. |
+| `LOCAL_EMBEDDING_TIMEOUT_MS` | No | `12000` | Timeout for the optional embeddings call. On failure, DraftApply falls back to deterministic matching. |
+| `LOCAL_EMBEDDING_PROMOTE_THRESHOLD` | No | `0.68` | Minimum cosine similarity to promote a missing requirement to transferable/partial evidence. |
+| `LOCAL_EMBEDDING_ENRICH_THRESHOLD` | No | `0.54` | Minimum cosine similarity to enrich already-supported requirements with better evidence snippets. |
 | `TOKEN_SECRET` | Yes | — | Random long string for signing install tokens |
 | `GROQ_MODEL` | No | `llama-3.3-70b-versatile` | Groq model identifier |
 | `RECIPE_PATH` | No | `./recipe/index.js` | Path to recipe module (optional override) |
@@ -142,6 +152,46 @@ If `RECIPE_PATH` is not set (or fails to load), the proxy uses the bundled recip
 4. Build command: `npm install`
 5. Start command: `npm start`
 6. Add env vars: `GROQ_API_KEY`, `TOKEN_SECRET`. Optionally add `OPENROUTER_API_KEY` for fallback. Leave `OPENROUTER_TAILOR_FALLBACK` unset to allow Tailor CV fallback, or set it to `false` if you deliberately want Tailor CV to fail rather than use OpenRouter. No need to set `RECIPE_PATH` unless you use a custom recipe.
+
+### Lightweight model router
+
+DraftApply now exposes a conservative model-router policy:
+
+- Final application answers and tailored CV generation stay on the hosted quality path by default.
+- JD extraction, JD enrichment, and domain suggestion steps can use a configured local OpenAI-compatible endpoint first.
+- Recommended lightweight local chat model: `Qwen/Qwen3-4B-Instruct-2507`.
+- Recommended evidence matching / retrieval model: `Qwen/Qwen3-Embedding-0.6B`.
+- `/api/health` reports whether the optional embedding endpoint is configured and shows the active retrieval thresholds.
+- If `LOCAL_EMBEDDING_BASE_URL` is set, Tailor CV analysis/generation uses embeddings to rerank CV evidence against JD requirements. If embeddings fail, time out, or return malformed data, deterministic matching remains active.
+
+This keeps the browser extension unchanged and privacy-first while letting operators evaluate smaller open models for lower-risk agent steps.
+
+A free way to run the local chat model: [`hf-space-local-llm/`](../hf-space-local-llm/) is a
+`llama.cpp`-based Hugging Face Space (Docker SDK, free CPU tier) behind an OpenAI-compatible API.
+`Qwen/Qwen3-4B-Instruct-2507` measured too slow on that free CPU tier (~0.2-0.5 tok/s); the Space
+currently pulls `Qwen/Qwen3-1.7B` instead, pending a speed benchmark on the same hardware. Deploy
+it as its own Space, then point `LOCAL_LLM_BASE_URL` at it — see that directory's README for setup,
+the required `LLM_API_KEY` secret, and current benchmark notes.
+
+### Stage-2/3/4 agents, UI insights, and retrieval
+
+The proxy also runs a shared deterministic agent layer before final model calls:
+
+- Application answers: question classification, CV grounding, job-context matching, truthfulness guard metadata.
+- Tailored CVs: JD analysis, CV parsing, match scoring, gap analysis, keyword optimisation, ATS formatting hints, truthfulness guard metadata.
+
+These agents live in `shared/agent-workflows.js`. They do not add extra LLM calls; they turn existing parser/matcher output into stable workflow packages that the recipe, Tailor CV flow, and UI can consume safely. Stage 3 exposes compact `agentInsights` to the extension so users can see evidence, gaps, supported keywords, ATS hints, and truthfulness-guard counts without sending prompts from the browser.
+
+Stage 4 adds optional embedding retrieval in `shared/evidence-retrieval.js`. When `LOCAL_EMBEDDING_BASE_URL` is configured, the proxy embeds compact CV evidence snippets and JD requirements, reranks evidence, and may promote high-confidence missing requirements to transferable partial matches. The promotion threshold is deliberately conservative, and any embedding failure falls back to deterministic matching.
+
+For production validation, run:
+
+```bash
+npm test
+npm run verify:architecture
+```
+
+`verify:architecture` is a dependency-light syntax gate for the extension/proxy architecture files. It is useful on machines where native Vitest dependencies such as `esbuild` are blocked, but it does not replace the full test suite.
 
 ---
 
