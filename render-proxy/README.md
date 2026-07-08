@@ -137,10 +137,10 @@ If `RECIPE_PATH` is not set (or fails to load), the proxy uses the bundled recip
 | `LOCAL_LLM_PREFER_FOR_GENERATION` | No | `false` | Set to `true` only if you want final answer/CV generation to prefer the local lightweight route before hosted fallback. |
 | `LOCAL_EMBEDDING_BASE_URL` | No | — | Optional OpenAI-compatible embeddings endpoint used for CV/JD evidence retrieval and reranking. |
 | `LOCAL_EMBEDDING_API_KEY` | No | `LOCAL_LLM_API_KEY` or `local` | Bearer token for the embeddings endpoint. |
-| `LOCAL_EMBEDDING_MODEL` | No | `Qwen/Qwen3-Embedding-0.6B` | Recommended lightweight embedding model for CV/JD evidence matching. |
+| `LOCAL_EMBEDDING_MODEL` | No | `mixedbread-ai/mxbai-embed-large-v1` | Live-benchmarked embedding model for CV/JD evidence matching (see below). |
 | `LOCAL_EMBEDDING_TIMEOUT_MS` | No | `12000` | Timeout for the optional embeddings call. On failure, DraftApply falls back to deterministic matching. |
-| `LOCAL_EMBEDDING_PROMOTE_THRESHOLD` | No | `0.68` | Minimum cosine similarity to promote a missing requirement to transferable/partial evidence. |
-| `LOCAL_EMBEDDING_ENRICH_THRESHOLD` | No | `0.54` | Minimum cosine similarity to enrich already-supported requirements with better evidence snippets. |
+| `LOCAL_EMBEDDING_PROMOTE_THRESHOLD` | No | `0.60` | Minimum cosine similarity to promote a missing requirement to transferable/partial evidence. |
+| `LOCAL_EMBEDDING_ENRICH_THRESHOLD` | No | `0.50` | Minimum cosine similarity to enrich already-supported requirements with better evidence snippets. |
 | `TOKEN_SECRET` | Yes | — | Random long string for signing install tokens |
 | `GROQ_MODEL` | No | `llama-3.3-70b-versatile` | Groq model identifier |
 | `RECIPE_PATH` | No | `./recipe/index.js` | Path to recipe module (optional override) |
@@ -164,7 +164,9 @@ DraftApply now exposes a conservative model-router policy:
 - Final application answers and tailored CV generation stay on the hosted quality path by default.
 - JD extraction, JD enrichment, and domain suggestion steps can use a configured local OpenAI-compatible endpoint first.
 - Recommended lightweight local chat model: `Qwen/Qwen3-4B-Instruct-2507`.
-- Recommended evidence matching / retrieval model: `Qwen/Qwen3-Embedding-0.6B`.
+- Recommended evidence matching / retrieval model: `mixedbread-ai/mxbai-embed-large-v1`, reachable free via Hugging
+  Face's `hf-inference` provider at `https://router.huggingface.co/hf-inference` (see
+  [`docs/embedding-model-evaluation.md`](../docs/embedding-model-evaluation.md) for how this was chosen).
 - `/api/health` reports whether the optional embedding endpoint is configured and shows the active retrieval thresholds.
 - `/api/health` also reports `qualityMode`, so operators can tell whether the deployment is on hosted primary, local private, configured OpenRouter, or best-effort free fallback.
 - If `LOCAL_EMBEDDING_BASE_URL` is set, Tailor CV analysis/generation uses embeddings to rerank CV evidence against JD requirements. If embeddings fail, time out, or return malformed data, deterministic matching remains active.
@@ -172,9 +174,11 @@ DraftApply now exposes a conservative model-router policy:
 Run `npm run eval:evidence-retrieval` to check whether embedding-reranked matching actually beats deterministic
 keyword matching on a hand-labeled fixture (`shared/evidence-retrieval-eval-fixtures.js`). Without
 `LOCAL_EMBEDDING_BASE_URL` set, it runs on a bag-of-words fallback purely so the script executes — that mode
-cannot prove real quality and says so explicitly. Set `LOCAL_EMBEDDING_BASE_URL` to a live
-Qwen3-Embedding-0.6B-compatible endpoint to get a real precision/recall/F1 comparison, and the script exits
-non-zero if the live embedding path is worse than the deterministic baseline.
+cannot prove real quality and says so explicitly. Set `LOCAL_EMBEDDING_BASE_URL` to a live embedding endpoint
+(e.g. `https://router.huggingface.co/hf-inference`) to get a real precision/recall/F1 comparison; the script
+exits non-zero if the live embedding path underperforms the deterministic baseline at the *configured*
+thresholds, and separately reports the best F1 achievable at any threshold so a bad result can be told apart
+from a miscalibrated one.
 
 This keeps the browser extension unchanged and privacy-first while letting operators evaluate smaller open models for lower-risk agent steps.
 

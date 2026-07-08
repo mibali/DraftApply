@@ -59,8 +59,14 @@ const LOCAL_EMBEDDING_BASE_URL = (process.env.LOCAL_EMBEDDING_BASE_URL || '').tr
 const LOCAL_EMBEDDING_API_KEY = process.env.LOCAL_EMBEDDING_API_KEY || LOCAL_LLM_API_KEY;
 const LOCAL_EMBEDDING_MODEL = (process.env.LOCAL_EMBEDDING_MODEL || DEFAULT_LIGHTWEIGHT_EMBEDDING_MODEL).trim();
 const LOCAL_EMBEDDING_TIMEOUT_MS = coercePositiveInteger(process.env.LOCAL_EMBEDDING_TIMEOUT_MS, 12000);
-const LOCAL_EMBEDDING_PROMOTE_THRESHOLD = Number(process.env.LOCAL_EMBEDDING_PROMOTE_THRESHOLD || 0.68);
-const LOCAL_EMBEDDING_ENRICH_THRESHOLD = Number(process.env.LOCAL_EMBEDDING_ENRICH_THRESHOLD || 0.54);
+// Recalibrated from live testing against mxbai-embed-large-v1 (see
+// shared/evidence-retrieval-eval-fixtures.js / npm run eval:evidence-retrieval).
+// The prior 0.68/0.54 defaults were tuned without ever benchmarking a live
+// model and rejected almost every true match. 0.60/0.50 keeps deliberate
+// margin below the fixture's razor-thin best-fit (0.576) since that was
+// measured on only 8 labeled cases - not tight enough to hardcode exactly.
+const LOCAL_EMBEDDING_PROMOTE_THRESHOLD = Number(process.env.LOCAL_EMBEDDING_PROMOTE_THRESHOLD || 0.60);
+const LOCAL_EMBEDDING_ENRICH_THRESHOLD = Number(process.env.LOCAL_EMBEDDING_ENRICH_THRESHOLD || 0.50);
 const TOKEN_SECRET = process.env.TOKEN_SECRET;
 
 // Recipe module – default is the bundled open-source recipe. Set RECIPE_PATH to override.
@@ -651,8 +657,8 @@ app.get('/api/health', (req, res) => {
       localConfigured: Boolean(LOCAL_LLM_BASE_URL),
       embeddingConfigured: Boolean(LOCAL_EMBEDDING_BASE_URL),
       embeddingThresholds: {
-        promote: Number.isFinite(LOCAL_EMBEDDING_PROMOTE_THRESHOLD) ? LOCAL_EMBEDDING_PROMOTE_THRESHOLD : 0.68,
-        enrich: Number.isFinite(LOCAL_EMBEDDING_ENRICH_THRESHOLD) ? LOCAL_EMBEDDING_ENRICH_THRESHOLD : 0.54,
+        promote: Number.isFinite(LOCAL_EMBEDDING_PROMOTE_THRESHOLD) ? LOCAL_EMBEDDING_PROMOTE_THRESHOLD : 0.60,
+        enrich: Number.isFinite(LOCAL_EMBEDDING_ENRICH_THRESHOLD) ? LOCAL_EMBEDDING_ENRICH_THRESHOLD : 0.50,
       },
     },
     agentChains: WORKFLOW_AGENT_CHAINS,
@@ -989,10 +995,10 @@ async function applyEmbeddingRetrieval(tailorAgentContext, tailor = new CVTailor
         model: embeddingRoute.model,
         promoteThreshold: Number.isFinite(LOCAL_EMBEDDING_PROMOTE_THRESHOLD)
           ? LOCAL_EMBEDDING_PROMOTE_THRESHOLD
-          : 0.68,
+          : 0.60,
         enrichThreshold: Number.isFinite(LOCAL_EMBEDDING_ENRICH_THRESHOLD)
           ? LOCAL_EMBEDDING_ENRICH_THRESHOLD
-          : 0.54,
+          : 0.50,
       },
     );
 

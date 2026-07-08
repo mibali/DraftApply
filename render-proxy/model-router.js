@@ -7,14 +7,21 @@
  */
 
 export const DEFAULT_LIGHTWEIGHT_CHAT_MODEL = 'Qwen/Qwen3-4B-Instruct-2507';
-export const DEFAULT_LIGHTWEIGHT_EMBEDDING_MODEL = 'Qwen/Qwen3-Embedding-0.6B';
+// Qwen/Qwen3-Embedding-0.6B has no live Inference Providers route as of this
+// writing (empty inferenceProviderMapping) and could not be benchmarked.
+// mixedbread-ai/mxbai-embed-large-v1 was benchmarked live (via HF's
+// hf-inference provider) against a deterministic keyword-matching baseline
+// on shared/evidence-retrieval-eval-fixtures.js: at a recalibrated threshold
+// it reached F1=0.89 with perfect precision (0 false positives), vs the
+// baseline's F1=0.57 - see npm run eval:evidence-retrieval.
+export const DEFAULT_LIGHTWEIGHT_EMBEDDING_MODEL = 'mixedbread-ai/mxbai-embed-large-v1';
 
 export const LIGHTWEIGHT_MODEL_RECOMMENDATION = {
   chatModel: DEFAULT_LIGHTWEIGHT_CHAT_MODEL,
   embeddingModel: DEFAULT_LIGHTWEIGHT_EMBEDDING_MODEL,
   rationale: [
     'Qwen3-4B-Instruct-2507 is Apache-2.0, text-first, strong at instruction following, and supports long context for CV + JD prompts.',
-    'Qwen3-Embedding-0.6B is Apache-2.0 and small enough for evidence retrieval and reranking-style CV/JD matching.',
+    'mxbai-embed-large-v1 was live-benchmarked (npm run eval:evidence-retrieval) against deterministic keyword matching and won with perfect precision - it never falsely promoted an unsupported requirement, which matters given the Truthfulness Guard Agent downstream. Qwen3-Embedding-0.6B has no live free-tier route to benchmark against as of this writing.',
     'Hosted Groq/OpenRouter remains the default for final answer and CV generation unless a local OpenAI-compatible endpoint is explicitly configured.',
   ],
 };

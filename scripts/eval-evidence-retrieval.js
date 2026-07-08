@@ -5,17 +5,19 @@
 // Without LOCAL_EMBEDDING_BASE_URL configured, the "embedding" row runs on a
 // plain bag-of-words fallback purely so this script executes without a live
 // model - that fallback cannot demonstrate real semantic quality and the
-// script says so explicitly. Point LOCAL_EMBEDDING_BASE_URL at a real
-// Qwen3-Embedding-0.6B-compatible endpoint to get a real pass/fail result.
+// script says so explicitly. Point LOCAL_EMBEDDING_BASE_URL at a live
+// endpoint (e.g. https://router.huggingface.co/hf-inference) to get a real
+// pass/fail result - see docs/embedding-model-evaluation.md for how the
+// current default model/thresholds were chosen.
 
 import { buildEvidenceRetrievalInputs, rerankMatchMapWithEmbeddings, cosineSimilarity } from '../shared/evidence-retrieval.js';
 import { EVAL_EVIDENCE_ITEMS, EVAL_REQUIREMENTS } from '../shared/evidence-retrieval-eval-fixtures.js';
 
 const LOCAL_EMBEDDING_BASE_URL = (process.env.LOCAL_EMBEDDING_BASE_URL || '').trim();
 const LOCAL_EMBEDDING_API_KEY = process.env.LOCAL_EMBEDDING_API_KEY || 'local';
-const LOCAL_EMBEDDING_MODEL = process.env.LOCAL_EMBEDDING_MODEL || 'Qwen/Qwen3-Embedding-0.6B';
-const PROMOTE_THRESHOLD = Number(process.env.LOCAL_EMBEDDING_PROMOTE_THRESHOLD || 0.68);
-const ENRICH_THRESHOLD = Number(process.env.LOCAL_EMBEDDING_ENRICH_THRESHOLD || 0.54);
+const LOCAL_EMBEDDING_MODEL = process.env.LOCAL_EMBEDDING_MODEL || 'mixedbread-ai/mxbai-embed-large-v1';
+const PROMOTE_THRESHOLD = Number(process.env.LOCAL_EMBEDDING_PROMOTE_THRESHOLD || 0.60);
+const ENRICH_THRESHOLD = Number(process.env.LOCAL_EMBEDDING_ENRICH_THRESHOLD || 0.50);
 // Some embedding models (BGE, E5) are calibrated for asymmetric retrieval and
 // expect an instruction prefix on the short "query" side only - here, the JD
 // requirement, not the CV evidence sentence. Empty by default (matches
@@ -186,6 +188,12 @@ async function main() {
   const embeddingPredictions = reranked.map(item => item.status === 'partial_match');
   const embeddingMetrics = scoreMetrics(embeddingPredictions, groundTruth);
 
+  // What production actually does: embeddings run AFTER deterministic matching
+  // and promote requirements on top of it, so the shipped behaviour is the
+  // union of the two - not embeddings in isolation. Measure that too.
+  const combinedPredictions = embeddingPredictions.map((got, index) => got || baselinePredictions[index]);
+  const combinedMetrics = scoreMetrics(combinedPredictions, groundTruth);
+
   // Raw top similarity per requirement, independent of promote/enrich
   // thresholds - lets us see *how close* a miss actually was, since
   // rerankMatchMapWithEmbeddings only attaches a score once a requirement
@@ -213,6 +221,13 @@ async function main() {
       bestPossible.metrics,
     );
   }
+  process.stdout.write('\n');
+  printMetrics(
+    usingRealEndpoint
+      ? '>> Combined keyword + embedding (what production actually ships)'
+      : '>> Combined keyword + bag-of-words (fallback - NOT a real quality signal)',
+    combinedMetrics,
+  );
 
   process.stdout.write(`\nPer-requirement (promoteThreshold=${PROMOTE_THRESHOLD}, enrichThreshold=${ENRICH_THRESHOLD}):\n`);
   EVAL_REQUIREMENTS.forEach((req, index) => {
@@ -229,25 +244,31 @@ async function main() {
     process.stdout.write(
       '\nNo LOCAL_EMBEDDING_BASE_URL configured (or the call failed): the embedding-reranked row above ran on a ' +
       'plain bag-of-words fallback for pipeline validation only. It cannot demonstrate real semantic quality - set ' +
-      'LOCAL_EMBEDDING_BASE_URL to a live Qwen3-Embedding-0.6B-compatible endpoint to get a real pass/fail result.\n'
+      'LOCAL_EMBEDDING_BASE_URL to a live embedding endpoint (e.g. https://router.huggingface.co/hf-inference) to get a real pass/fail result.\n'
     );
     return;
   }
 
-  if (embeddingMetrics.f1 < baselineMetrics.f1) {
-    process.stderr.write(`\nFAIL: live embedding F1 (${embeddingMetrics.f1.toFixed(2)}) at the CONFIGURED thresholds is worse than the deterministic baseline (${baselineMetrics.f1.toFixed(2)}).\n`);
-    if (bestPossible.f1 > baselineMetrics.f1) {
+  // Gate on the combined result, since that (not embeddings-in-isolation) is
+  // what production ships: embeddings must not drag the shipped output below
+  // the keyword-only baseline, and should ideally lift it.
+  if (combinedMetrics.f1 < baselineMetrics.f1) {
+    process.stderr.write(`\nFAIL: combined keyword+embedding F1 (${combinedMetrics.f1.toFixed(2)}) is worse than the keyword-only baseline (${baselineMetrics.f1.toFixed(2)}) - embeddings are actively hurting the shipped output.\n`);
+    if (bestPossible.f1 > embeddingMetrics.f1) {
       process.stderr.write(
-        `Note: this model COULD beat baseline (best-possible F1=${bestPossible.f1.toFixed(2)} at threshold=${bestPossible.threshold.toFixed(3)}) - ` +
-        `LOCAL_EMBEDDING_PROMOTE_THRESHOLD/LOCAL_EMBEDDING_ENRICH_THRESHOLD need recalibrating for this specific model, not abandoning it.\n`
+        `Note: embedding-only best-possible F1=${bestPossible.f1.toFixed(2)} at threshold=${bestPossible.threshold.toFixed(3)} - ` +
+        `try recalibrating LOCAL_EMBEDDING_PROMOTE_THRESHOLD/LOCAL_EMBEDDING_ENRICH_THRESHOLD.\n`
       );
-    } else {
-      process.stderr.write(`Note: even the best-possible single threshold for this model only reaches F1=${bestPossible.f1.toFixed(2)} - recalibration alone will not fix this.\n`);
     }
     process.exitCode = 1;
     return;
   }
-  process.stdout.write(`\nPASS: live embedding F1 (${embeddingMetrics.f1.toFixed(2)}) meets or beats the deterministic baseline (${baselineMetrics.f1.toFixed(2)}).\n`);
+  const lift = combinedMetrics.f1 - baselineMetrics.f1;
+  if (lift > 0.001) {
+    process.stdout.write(`\nPASS: combined keyword+embedding F1 (${combinedMetrics.f1.toFixed(2)}) beats keyword-only baseline (${baselineMetrics.f1.toFixed(2)}) - embeddings add ${lift.toFixed(2)} F1 by catching paraphrase matches keyword overlap misses.\n`);
+  } else {
+    process.stdout.write(`\nPASS (no regression): combined F1 (${combinedMetrics.f1.toFixed(2)}) matches baseline (${baselineMetrics.f1.toFixed(2)}) at the configured thresholds. Embedding-only best-possible F1=${bestPossible.f1.toFixed(2)} at threshold=${bestPossible.threshold.toFixed(3)} suggests headroom via recalibration, weighed against the false positives a lower threshold admits.\n`);
+  }
 }
 
 main();

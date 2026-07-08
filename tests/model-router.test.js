@@ -15,7 +15,7 @@ describe('model router', () => {
     expect(LIGHTWEIGHT_MODEL_RECOMMENDATION.chatModel).toBe(DEFAULT_LIGHTWEIGHT_CHAT_MODEL);
     expect(LIGHTWEIGHT_MODEL_RECOMMENDATION.embeddingModel).toBe(DEFAULT_LIGHTWEIGHT_EMBEDDING_MODEL);
     expect(DEFAULT_LIGHTWEIGHT_CHAT_MODEL).toBe('Qwen/Qwen3-4B-Instruct-2507');
-    expect(DEFAULT_LIGHTWEIGHT_EMBEDDING_MODEL).toBe('Qwen/Qwen3-Embedding-0.6B');
+    expect(DEFAULT_LIGHTWEIGHT_EMBEDDING_MODEL).toBe('mixedbread-ai/mxbai-embed-large-v1');
     expect(LIGHTWEIGHT_MODEL_RECOMMENDATION.rationale.join(' ')).toMatch(/hosted Groq\/OpenRouter remains the default/i);
   });
 
