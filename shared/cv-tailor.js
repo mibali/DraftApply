@@ -406,9 +406,10 @@ HARVARD FORMAT — apply this structure exactly:
 INSTRUCTION
 1. HEADER: Job title on line 2 immediately below the candidate name, before any contact lines.
 2. Rewrite the professional summary so it clearly positions the candidate for this exact role and domain without saying it was tailored for a company or application. It must mention only supported evidence from the CV.
-3. CORE COMPETENCIES: MANDATORY — output exactly 5–7 named categories (never fewer than 5 for senior roles). Each category on its own line, NO bullet prefix, NO dash, format exactly: "Category Label: Skill A, Skill B, Skill C, Skill D" — aim for 3–6 skills per category. Cover both technical and business domains appropriate to the role (e.g. for a Solution Architect: Pre-Sales Execution, Cloud & Architecture, Integration & APIs, DevOps & Delivery, Sales Methodology, Stakeholder Engagement, Programming & Scripting). Do NOT use an "Additional Relevant Skills" or "Additional Skills" section. No duplicate skills across categories.
-4. For each relevant role: preserve the official job title exactly, then add one short "Focus:" line below it when the original responsibilities support the target role.
-5. For each role: preserve ALL original bullets — do not drop any. Rewrite each bullet using JD vocabulary (same meaning, aligned language) and reorder them so the strongest target-role evidence comes first. A senior role with only 1–2 bullets will fail a recruiter screen; include every bullet the original CV has for that role.
+3. CORE COMPETENCIES: MANDATORY — output exactly 5–7 named categories (never fewer than 5 for senior roles). Each category on its own line, NO bullet prefix, NO dash, format exactly: "Category Label: Skill A, Skill B, Skill C, Skill D" — aim for 3–6 skills per category. Cover both technical and business domains appropriate to the role (e.g. for a Solution Architect: Pre-Sales Execution, Cloud & Architecture, Integration & APIs, DevOps & Delivery, Sales Methodology, Stakeholder Engagement, Programming & Scripting). Every category label must be UNIQUE and descriptive — never repeat a label, and never use catch-all labels such as "Additional Technical Skills", "Additional Relevant Skills", "Additional Skills", "Other Skills", or "Miscellaneous". If skills do not fit an existing category, name a specific new category for them (e.g. "Data Quality & Validation", "Observability & Monitoring"). No duplicate skills across categories.
+4. For each relevant role: preserve the official job title exactly, then add one short "Focus:" line when the original responsibilities support the target role. The "Focus:" line must sit IMMEDIATELY below the job title line, ABOVE the first bullet — never after or between bullets.
+5. For each role: preserve ALL original bullets — do not drop any. Rewrite each bullet using JD vocabulary (same meaning, aligned language) and reorder them so the strongest target-role evidence comes first. A senior role with only 1–2 bullets will fail a recruiter screen; include every bullet the original CV has for that role. If a role still has fewer than 3 bullets, split its densest original bullet into separate bullets — one fact per bullet, same facts, no invented claims — so every relevant role shows at least 3 bullets wherever the original content honestly supports it.
+5b. LINE DISCIPLINE: every bullet, competency category, and summary sentence must be output on ONE single line — never hard-wrap, never split a sentence or hyphenated word across lines (the renderer handles wrapping).
 6. Include every user-confirmed addition in the skills/core competencies section as concise skill names. You may also use them in the summary when natural, but do not attach them to a specific employer, project, metric, certification, or achievement unless that context exists in the original CV.
 7. Preserve all locked fields exactly — same spelling, capitalisation, and punctuation.
 8. The final CV must read like a polished CV for "${jdData.jobTitle || 'the target role'}", not like a generic CV and not like generated marketing copy.
@@ -449,6 +450,11 @@ ALWAYS PRESERVE:
 - Every locked fact: names, employers, historical job titles, dates, education, certifications, contact details.
 - Every experience bullet from the ORIGINAL CV must remain. Do not remove a bullet because it was reworded; only remove a bullet if it contains a specific metric, tool, or claim that does not exist anywhere in the ORIGINAL CV and is not in the SUPPORTED REQUIREMENTS list.
 - Skills sections must contain short skill phrases only — not sentences, years-of-experience requirements, location requirements, education requirements, or prose like "track record of...".
+
+FORMATTING (preserve exactly while auditing):
+- Every bullet, competency category, and sentence stays on ONE line — never hard-wrap or split a sentence or word across lines.
+- "Focus:" lines stay immediately below their job title line, above the first bullet.
+- Competency category labels stay unique — never emit two categories with the same label and never use catch-all labels like "Additional Technical Skills".
 
 Return the complete corrected CV text only.`;
 
@@ -629,7 +635,11 @@ Do not add anything new. Return the complete corrected CV.`;
   }
 
   finalizeTailoredCV(rawText, { cvData, jdData, matchMap = [], confirmedSkills = [] } = {}) {
-    const withCoreCompetencies = this._ensureCoreCompetencies(rawText, matchMap, confirmedSkills, jdData);
+    // Repair hard-wrapped lines first: LLMs copy the original CV's PDF-extracted
+    // line wrapping ("cloud-\nnative"), which every downstream step would
+    // otherwise treat as separate lines.
+    const unwrapped = this.repairHardWrappedLines(rawText);
+    const withCoreCompetencies = this._ensureCoreCompetencies(unwrapped, matchMap, confirmedSkills, jdData);
     const cleaned = this.cleanSkillsSection(
       this.ensureRoleFocusLines(
         this.ensureConfirmedSkillsIncluded(
@@ -651,12 +661,154 @@ Do not add anything new. Return the complete corrected CV.`;
       this.restoreLockedExperienceDates(cleaned, cvData),
       cvData
     );
-    return this.ensureExperienceDepth(
+    const deepened = this.ensureExperienceDepth(
       this.consolidateSkillsSections(normalised),
       cvData,
       jdData,
       matchMap
     );
+    // Parser-independent catch-alls: normaliseRoleFocusPlacement above is
+    // anchored to parsed cvData titles, which can miss composite pipe titles
+    // ("Cloud Support Engineer | Cloud Service SME"); this pass fixes any
+    // Focus: line still stranded below its bullet run, then merges duplicate
+    // "Label: skill, skill" category lines the LLM emitted despite the prompt.
+    return this.mergeDuplicateSkillCategoryLines(
+      this.repositionOrphanFocusLines(deepened)
+    );
+  }
+
+  /**
+   * Join lines that were hard-wrapped mid-sentence or mid-word. PDF extraction
+   * wraps the original CV text at a fixed width, and the tailoring LLM often
+   * preserves those breaks verbatim ("cloud-\nnative model serving").
+   * Conservative by design: only joins when the current line is long enough to
+   * look wrapped, ends mid-word/mid-clause, and the next line is a lowercase
+   * continuation that is not a bullet, header, date, label, or contact line.
+   */
+  repairHardWrappedLines(text) {
+    if (!text) return text;
+
+    const lines = String(text).split('\n');
+    const output = [];
+    const BULLET_RE = /^[-•*●▪◦–—]\s/;
+    const LABEL_RE = /^[A-Za-z][A-Za-z0-9 &/+.\-]{0,48}:\s/;
+
+    const isContinuation = (line) => {
+      const trimmed = String(line || '').trim();
+      if (!trimmed) return false;
+      if (BULLET_RE.test(trimmed)) return false;
+      if (LABEL_RE.test(trimmed)) return false;
+      if (this._isLikelySectionHeader(trimmed)) return false;
+      if (this._looksLikeDateLine(trimmed)) return false;
+      if (this._isHeaderContactLine(trimmed)) return false;
+      return /^[a-z]/.test(trimmed);
+    };
+
+    for (const line of lines) {
+      const prev = output.length ? output[output.length - 1] : '';
+      const prevTrimmed = String(prev || '').trimEnd();
+
+      if (prevTrimmed.length >= 40 && isContinuation(line)) {
+        // Word broken across lines with a hyphen: "cloud-" + "native" —
+        // rejoin with no space so the hyphenated word survives intact.
+        if (/[a-z]-$/.test(prevTrimmed)) {
+          output[output.length - 1] = `${prevTrimmed}${String(line).trim()}`;
+          continue;
+        }
+        // Sentence wrapped mid-clause: ends in a letter or comma with no
+        // terminal punctuation — rejoin with a single space.
+        if (/[a-z,]$/i.test(prevTrimmed) && !/[.!?:;]$/.test(prevTrimmed)) {
+          output[output.length - 1] = `${prevTrimmed} ${String(line).trim()}`;
+          continue;
+        }
+      }
+      output.push(line);
+    }
+
+    return output.join('\n');
+  }
+
+  /**
+   * Move any "Focus:" line that ended up below a bullet run to just above that
+   * run. Unlike normaliseRoleFocusPlacement this needs no parsed cvData, so it
+   * still works when composite pipe titles defeat title matching.
+   */
+  repositionOrphanFocusLines(text) {
+    if (!text) return text;
+
+    const lines = String(text).split('\n');
+    const BULLET_RE = /^[-•*●▪◦–—]\s/;
+
+    for (let i = 0; i < lines.length; i++) {
+      if (!/^focus\s*:/i.test(String(lines[i] || '').trim())) continue;
+
+      // Walk back over the contiguous bullet run directly above this line.
+      let runStart = i;
+      while (runStart > 0 && BULLET_RE.test(String(lines[runStart - 1] || '').trim())) {
+        runStart--;
+      }
+      if (runStart === i) continue; // no bullets above — already placed correctly
+
+      const [focusLine] = lines.splice(i, 1);
+      lines.splice(runStart, 0, focusLine);
+    }
+
+    return lines.join('\n');
+  }
+
+  /**
+   * Merge duplicate "Label: skill, skill, ..." category lines within a section
+   * (e.g. two "Additional Technical Skills:" lines) into one line with the
+   * union of their items. Only touches lines that look like comma-separated
+   * skill lists, so prose and contact labels are never affected.
+   */
+  mergeDuplicateSkillCategoryLines(text) {
+    if (!text) return text;
+
+    const lines = String(text).split('\n');
+    const CATEGORY_RE = /^([-•*●▪◦–—]\s*)?([A-Za-z][A-Za-z0-9 &/+.\-]{2,48}):\s*(.+)$/;
+    const seen = new Map(); // normalised label -> line index of first occurrence
+    const removals = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      const trimmed = String(lines[i] || '').trim();
+      if (this._isLikelySectionHeader(trimmed)) {
+        seen.clear();
+        continue;
+      }
+
+      const match = trimmed.match(CATEGORY_RE);
+      if (!match) continue;
+      const [, , label, value] = match;
+      if (/^focus$/i.test(label.trim())) continue;
+      if (!value.includes(',')) continue; // not a skill list — leave alone
+
+      const key = this._normaliseText(label);
+      if (!seen.has(key)) {
+        seen.set(key, i);
+        continue;
+      }
+
+      // Duplicate label in the same section: merge unique items into the first.
+      const firstIdx = seen.get(key);
+      const firstMatch = String(lines[firstIdx] || '').trim().match(CATEGORY_RE);
+      if (!firstMatch) continue;
+      const existingItems = firstMatch[3].split(',').map(s => s.trim()).filter(Boolean);
+      const existingKeys = new Set(existingItems.map(s => this._normaliseText(s)));
+      const newItems = value.split(',').map(s => s.trim()).filter(Boolean)
+        .filter(item => !existingKeys.has(this._normaliseText(item)));
+
+      if (newItems.length > 0) {
+        lines[firstIdx] = `${firstMatch[1] || ''}${firstMatch[2]}: ${[...existingItems, ...newItems].join(', ')}`;
+      }
+      removals.push(i);
+    }
+
+    for (const idx of removals.reverse()) {
+      lines.splice(idx, 1);
+    }
+
+    return lines.join('\n');
   }
 
   restoreLockedExperienceDates(tailoredText, cvData = {}) {
@@ -1862,16 +2014,37 @@ Do not add anything new. Return the complete corrected CV.`;
   }
 
   _findTitleLineIndex(lines, title, start = 0) {
-    const titleKey = this._normaliseText(title);
-    if (!titleKey) return -1;
-    for (let i = Math.max(0, start); i < lines.length; i++) {
-      const line = this._normaliseText(lines[i]);
-      if (!line) continue;
-      if (line === titleKey) return i;
-      if (line === this._normaliseText(`Position: ${title}`)) return i;
-      if (/^position\s+/.test(line) && line.includes(titleKey)) return i;
-      if (line.startsWith(titleKey) && line.length <= titleKey.length + 80) return i;
-      if (line.includes(titleKey) && line.length <= titleKey.length + 20) return i;
+    const scan = (titleKey) => {
+      if (!titleKey) return -1;
+      for (let i = Math.max(0, start); i < lines.length; i++) {
+        const raw = String(lines[i] || '');
+        const line = this._normaliseText(raw);
+        if (!line) continue;
+        if (line === titleKey) return i;
+        if (line === this._normaliseText(`Position: ${titleKey}`)) return i;
+        if (/^position\s+/.test(line) && line.includes(titleKey)) return i;
+        if (line.startsWith(titleKey) && line.length <= titleKey.length + 80) return i;
+        if (line.includes(titleKey) && line.length <= titleKey.length + 20) return i;
+        // Composite pipe titles ("Cloud Support Engineer | Cloud Service SME"):
+        // match when any pipe-separated segment equals the title exactly.
+        if (raw.includes('|') && raw.split('|').some(seg => this._normaliseText(seg) === titleKey)) {
+          return i;
+        }
+      }
+      return -1;
+    };
+
+    const fullKey = this._normaliseText(title);
+    const direct = scan(fullKey);
+    if (direct !== -1) return direct;
+
+    // Parsed title itself may be composite while the LLM rendered only the
+    // primary segment — retry with the first pipe segment when substantial.
+    if (String(title || '').includes('|')) {
+      const primary = this._normaliseText(String(title).split('|')[0]);
+      if (primary && primary.length >= 8 && primary !== fullKey) {
+        return scan(primary);
+      }
     }
     return -1;
   }
