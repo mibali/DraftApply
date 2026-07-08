@@ -2,7 +2,9 @@ import fs from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const contentJs = fs.readFileSync(new URL('../extension-ready/content.js', import.meta.url), 'utf8');
+const contentCss = fs.readFileSync(new URL('../extension-ready/content.css', import.meta.url), 'utf8');
 const pageExtractorJs = fs.readFileSync(new URL('../extension-ready/page-extractor.js', import.meta.url), 'utf8');
+const popupHtml = fs.readFileSync(new URL('../extension-ready/popup.html', import.meta.url), 'utf8');
 const popupJs = fs.readFileSync(new URL('../extension-ready/popup.js', import.meta.url), 'utf8');
 const backgroundJs = fs.readFileSync(new URL('../extension-ready/background.js', import.meta.url), 'utf8');
 
@@ -127,5 +129,39 @@ describe('extension critical modal behavior', () => {
     expect(contentJs).toContain("if (message.type === 'STREAM_META')");
     expect(contentJs).toContain('const model = result.model ? `: ${result.model}` :');
     expect(contentJs).toContain('DraftApply used OpenRouter fallback${model}.');
+  });
+
+  it('renders a compact model badge for generated answer output', () => {
+    expect(contentJs).toContain('id="da-model-badge"');
+    expect(contentJs).toContain('renderModelBadge');
+    expect(contentJs).toContain('this.shortModelName(model)');
+    expect(contentJs).toContain('qualityModeReason');
+    expect(contentCss).toContain('.da-model-badge');
+    expect(contentCss).toContain('.da-model-badge-fallback');
+  });
+
+  it('accepts both legacy unsupportedRequirements and API-contract missingSkills in Tailor CV reports', () => {
+    expect(popupJs).toContain('function normalizeMissingSkills');
+    expect(popupJs).toContain('matchReport.unsupportedRequirements');
+    expect(popupJs).toContain('matchReport.missingSkills');
+    expect(popupJs).toContain("item?.skill || item?.requirement || item?.name");
+  });
+
+  it('passes through workflow metadata from streamed proxy responses without changing modal behavior', () => {
+    expect(backgroundJs).toContain("response.headers.get('X-DraftApply-Workflow')");
+    expect(backgroundJs).toContain("response.headers.get('X-DraftApply-Agent-Chain')");
+    expect(backgroundJs).toContain('json.draftapplyMeta');
+    expect(backgroundJs).toContain('workflow,');
+    expect(backgroundJs).toContain('agentChain');
+  });
+
+  it('renders stage-3 architecture insights only when proxy metadata is available', () => {
+    expect(contentJs).toContain('id="da-agent-insights"');
+    expect(contentJs).toContain('renderAgentInsights');
+    expect(contentJs).toContain('CV evidence used');
+    expect(popupHtml).toContain('id="tailor-agent-insights"');
+    expect(popupJs).toContain('renderTailorAgentInsights');
+    expect(popupJs).toContain('Supported keywords');
+    expect(popupJs).toContain('retrieval.status');
   });
 });

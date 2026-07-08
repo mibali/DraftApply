@@ -70,6 +70,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     matchMissingChips:     document.getElementById('match-missing-chips'),
     matchDomain:           document.getElementById('match-domain'),
     matchDomainChips:      document.getElementById('match-domain-chips'),
+    tailorAgentInsights:   document.getElementById('tailor-agent-insights'),
     tailorWarningsBox:     document.getElementById('tailor-warnings-box'),
     tailorOutputWrap:      document.getElementById('tailor-output-wrap'),
     tailorOutput:          document.getElementById('tailor-output'),
@@ -209,7 +210,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       const status = await chrome.runtime.sendMessage({ type: 'CHECK_PROXY' });
       if (status && !status.error) {
         elements.proxyStatusDot.classList.add('ready');
-        elements.proxyStatusText.textContent = `Proxy: ${status.provider || 'Online'}`;
+        elements.proxyStatusText.textContent = `Proxy: ${providerLabel(status.provider || 'online')}${status.model ? ` · ${shortModelName(status.model)}` : ''}`;
+        elements.proxyStatusText.title = [
+          status.qualityMode ? `${qualityModeLabel(status.qualityMode)}: ${status.qualityModeReason || ''}` : '',
+          status.modelRouter?.applicationAnswer?.reason || status.model || '',
+        ].filter(Boolean).join('\n');
         proxyUrl = status.proxyUrl;
       } else {
         elements.proxyStatusDot.classList.add('error');
@@ -336,6 +341,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.tailorOutputWrap.hidden = true;
     elements.tailorActionRow.hidden = true;
     elements.tailorWarningsBox.hidden = true;
+    if (elements.tailorAgentInsights) {
+      elements.tailorAgentInsights.hidden = true;
+      elements.tailorAgentInsights.textContent = '';
+    }
     elements.tailorResults.hidden = true;
     elements.tailorAnalyzeBtn.hidden = false;
     elements.tailorAnalyzeBtn.disabled = false;
@@ -737,6 +746,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       displayMatchReport(result.matchReport, { reviewMode: true, domainSuggestions: result.domainSuggestions || [] });
+      renderTailorAgentInsights(result.agentInsights || result);
       await saveTailorDraft();
       elements.tailorAnalyzeBtn.hidden = true;
       elements.tailorReanalyzeBtn.style.display = 'block';
@@ -834,13 +844,19 @@ document.addEventListener('DOMContentLoaded', async () => {
   function displayTailorResults(result) {
     const { tailoredCvText, matchReport, warnings, provider, fallbackFrom, model, auditSkipped } = result;
     displayMatchReport(matchReport, { reviewMode: false, domainSuggestions: [] });
+    renderTailorAgentInsights(result.agentInsights || result);
 
     const badge = document.getElementById('tailor-provider-badge');
     if (badge) {
       if (provider) {
+        const label = providerLabel(provider);
+        const modelLabel = shortModelName(model);
         badge.textContent = fallbackFrom
-          ? `${provider === 'openrouter' ? 'OpenRouter' : provider} fallback from ${fallbackFrom === 'groq' ? 'Groq' : fallbackFrom}${model ? ` (${model})` : ''}`
-          : (provider === 'openrouter' ? 'OpenRouter' : 'Groq');
+          ? `${label} fallback${modelLabel ? `: ${modelLabel}` : ''}`
+          : `${label}${modelLabel ? `: ${modelLabel}` : ''}`;
+        badge.title = fallbackFrom
+          ? `Fallback from ${providerLabel(fallbackFrom)}. Model: ${model || 'unknown'}`
+          : `Model: ${model || 'unknown'}`;
         badge.style.background = provider === 'openrouter' ? '#fef3c7' : '#d1fae5';
         badge.style.color = provider === 'openrouter' ? '#92400e' : '#065f46';
         badge.style.display = 'inline-block';
@@ -981,7 +997,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       elements.matchConfirmed.hidden = true;
     }
 
-    const missing = matchReport?.unsupportedRequirements || [];
+    const missing = normalizeMissingSkills(matchReport);
     if (missing.length > 0) {
       if (reviewMode) {
         renderMissingSkillChecks(missing);
@@ -1022,6 +1038,73 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
+  function renderTailorAgentInsights(insights = {}) {
+    const box = elements.tailorAgentInsights;
+    if (!box) return;
+
+    const workflow = insights.workflow;
+    const chain = Array.isArray(insights.agentChain) ? insights.agentChain : [];
+    const gap = insights.gapAnalysis || {};
+    const keywords = insights.keywordOptimisation || {};
+    const ats = insights.atsFormatting || {};
+    const truth = insights.truthfulness || {};
+    const retrieval = insights.evidenceRetrieval || {};
+    const missing = Array.isArray(gap.missingRequirements) ? gap.missingRequirements : [];
+    const transferable = Array.isArray(gap.transferableRequirements) ? gap.transferableRequirements : [];
+    const supported = Array.isArray(keywords.supportedKeywords) ? keywords.supportedKeywords : [];
+    const risky = Array.isArray(keywords.riskyKeywords) ? keywords.riskyKeywords : [];
+    const visibleEvidence = Array.isArray(ats.requiredVisibleEvidence) ? ats.requiredVisibleEvidence : [];
+
+    if (!workflow && missing.length === 0 && transferable.length === 0 && supported.length === 0 && risky.length === 0 && visibleEvidence.length === 0) {
+      box.hidden = true;
+      box.textContent = '';
+      return;
+    }
+
+    const sections = [];
+    const meta = [
+      workflow === 'tailoredCv' ? 'Tailored CV workflow' : workflow,
+      chain.length ? `${chain.length} agents` : null,
+      retrieval.status ? `retrieval ${retrieval.status}` : null,
+      Number.isFinite(Number(truth.unsupportedCount)) ? `${Number(truth.unsupportedCount)} held back` : null,
+    ].filter(Boolean).join(' · ');
+
+    sections.push(`<div class="agent-insights-title"><span>Architecture run</span><small>${esc(meta || 'Workflow active')}</small></div>`);
+
+    if (supported.length > 0) {
+      sections.push(renderInsightChipGroup('Supported keywords', supported, 'agent-chip-ok'));
+    }
+
+    if (transferable.length > 0) {
+      sections.push(renderInsightChipGroup('Transferable gaps', transferable, 'agent-chip-info'));
+    }
+
+    if (missing.length > 0) {
+      sections.push(renderInsightChipGroup('Needs confirmation', missing, 'agent-chip-muted'));
+    }
+
+    if (risky.length > 0) {
+      sections.push(renderInsightChipGroup('Held back unless confirmed', risky, 'agent-chip-warn'));
+    }
+
+    if (visibleEvidence.length > 0) {
+      sections.push(renderInsightChipGroup('ATS evidence to keep visible', visibleEvidence, 'agent-chip-info'));
+    }
+
+    box.innerHTML = sections.join('');
+    box.hidden = false;
+  }
+
+  function renderInsightChipGroup(label, values, chipClass = '') {
+    return `
+      <div class="agent-insights-group">
+        <div class="agent-insights-label">${esc(label)}</div>
+        <div class="agent-insights-chips">
+          ${values.slice(0, 10).map(value => `<span class="agent-chip ${chipClass}">${esc(value)}</span>`).join('')}
+        </div>
+      </div>`;
+  }
+
   function renderMissingSkillChecks(missing) {
     elements.matchMissingChips.textContent = '';
     for (const skill of missing) {
@@ -1039,6 +1122,49 @@ document.addEventListener('DOMContentLoaded', async () => {
       label.append(checkbox, text);
       elements.matchMissingChips.append(label);
     }
+  }
+
+  function normalizeMissingSkills(matchReport = {}) {
+    const source = Array.isArray(matchReport.unsupportedRequirements) && matchReport.unsupportedRequirements.length > 0
+      ? matchReport.unsupportedRequirements
+      : Array.isArray(matchReport.missingSkills)
+        ? matchReport.missingSkills
+        : [];
+
+    return source
+      .map(item => typeof item === 'string' ? item : item?.skill || item?.requirement || item?.name)
+      .filter(Boolean);
+  }
+
+  function providerLabel(provider = '') {
+    if (provider === 'openrouter') return 'OpenRouter';
+    if (provider === 'groq') return 'Groq';
+    if (provider === 'local-openai') return 'Local';
+    if (provider === 'local-openai-embeddings') return 'Local embeddings';
+    return provider || 'Model';
+  }
+
+  function qualityModeLabel(mode = '') {
+    if (mode === 'hosted_primary') return 'Hosted primary';
+    if (mode === 'hosted_primary_with_openrouter_fallback') return 'Hosted primary + fallback';
+    if (mode === 'local_private') return 'Local private';
+    if (mode === 'configured_openrouter') return 'Configured OpenRouter';
+    if (mode === 'openrouter_fallback') return 'OpenRouter fallback';
+    if (mode === 'best_effort_free_fallback') return 'Best-effort free fallback';
+    if (mode === 'deterministic_local') return 'Deterministic local';
+    return mode || 'Quality mode';
+  }
+
+  function shortModelName(model = '') {
+    const raw = String(model || '').trim();
+    if (!raw) return '';
+    return raw
+      .replace(/^openrouter\//, '')
+      .replace(/:free$/, ' free')
+      .split('/')
+      .slice(-1)[0]
+      .replace(/-/g, ' ')
+      .slice(0, 34);
   }
 
   function getConfirmedMissingSkills() {

@@ -282,6 +282,7 @@ class DraftApplyExtension {
           <img class="da-modal-logo" src="${chrome.runtime.getURL('icons/icon128.png')}" alt="">
           <span class="da-header-name">DraftApply</span>
           <span class="da-context-badge" id="da-context-badge">No context</span>
+          <span class="da-model-badge" id="da-model-badge" hidden></span>
           <button class="da-modal-close" type="button" aria-label="Close">&times;</button>
         </div>
         <div class="da-modal-body">
@@ -298,6 +299,7 @@ class DraftApplyExtension {
           <div class="da-answer-label">Generated Answer <span id="da-char-hint" class="da-char-hint"></span></div>
           <textarea class="da-answer-output" id="da-answer-output" placeholder="Your answer will appear here. You can edit it before inserting."></textarea>
           <div id="da-char-counter" class="da-char-counter" hidden></div>
+          <div id="da-agent-insights" class="da-agent-insights" hidden></div>
           <input type="hidden" id="da-length-select" value="medium">
           <input type="hidden" id="da-tone-select" value="natural">
         </div>
@@ -585,7 +587,9 @@ class DraftApplyExtension {
 
       if (message.type === 'STREAM_META') {
         if (this.currentRequestId === message.requestId) {
+          this.renderModelBadge(message);
           this._showFallbackNotice(message);
+          this.renderAgentInsights(message.agentInsights || message);
         }
         return;
       }
@@ -1210,6 +1214,8 @@ class DraftApplyExtension {
     loading.hidden = false;
     stopBtn.disabled = false;
     output.value = '';
+    this.renderAgentInsights(null);
+    this.renderModelBadge(null);
     if (statusEl) statusEl.textContent = 'Generating answer...';
 
     const startTime = Date.now();
@@ -1292,6 +1298,8 @@ class DraftApplyExtension {
           this.lastAnswer = output.value;
           this._updateCharCounter();
           this._showFallbackNotice(fallback);
+          this.renderModelBadge(fallback);
+          this.renderAgentInsights(fallback.agentInsights || fallback);
         } else if (fallback?.error) {
           output.value = `Error: ${fallback.error}`;
         } else {
@@ -1348,6 +1356,8 @@ class DraftApplyExtension {
           this.lastAnswer = output.value;
           this._updateCharCounter();
           this._showFallbackNotice(fallback);
+          this.renderModelBadge(fallback);
+          this.renderAgentInsights(fallback.agentInsights || fallback);
         } else if (fallback?.error) {
           output.value = `Error: ${fallback.error}`;
         } else {
@@ -1391,6 +1401,120 @@ class DraftApplyExtension {
       const model = result.model ? `: ${result.model}` : '';
       this.showNotification(`Groq is busy, so DraftApply used OpenRouter fallback${model}.`);
     }
+  }
+
+  renderModelBadge(meta) {
+    const badge = this.modal?.querySelector('#da-model-badge');
+    if (!badge) return;
+    const provider = meta?.provider || meta?.openRouterMetadata?.endpoints?.available?.find?.(item => item.selected)?.provider;
+    const model = meta?.model || meta?.openRouterMetadata?.model || meta?.openRouterMetadata?.requested;
+    const fallbackFrom = meta?.fallbackFrom;
+    if (!provider && !model) {
+      badge.hidden = true;
+      badge.textContent = '';
+      badge.className = 'da-model-badge';
+      badge.removeAttribute('title');
+      return;
+    }
+
+    const providerLabel = provider === 'openrouter'
+      ? 'OpenRouter'
+      : provider === 'groq'
+        ? 'Groq'
+        : provider === 'local-openai'
+          ? 'Local'
+          : provider || 'Model';
+    const modelLabel = model ? this.shortModelName(model) : '';
+    badge.textContent = modelLabel ? `${providerLabel}: ${modelLabel}` : providerLabel;
+    badge.className = `da-model-badge ${provider === 'openrouter' || fallbackFrom ? 'da-model-badge-fallback' : ''}`;
+    badge.title = [meta?.qualityModeReason, model].filter(Boolean).join('\n');
+    badge.hidden = false;
+  }
+
+  shortModelName(model) {
+    const raw = String(model || '').trim();
+    if (!raw) return '';
+    return raw
+      .replace(/^openrouter\//, '')
+      .replace(/:free$/, ' free')
+      .split('/')
+      .slice(-1)[0]
+      .replace(/-/g, ' ')
+      .slice(0, 34);
+  }
+
+  renderAgentInsights(insights) {
+    const box = this.modal?.querySelector('#da-agent-insights');
+    if (!box) return;
+
+    const workflow = insights?.workflow;
+    const chain = Array.isArray(insights?.agentChain)
+      ? insights.agentChain
+      : String(insights?.agentChain || '').split('>').map(item => item.trim()).filter(Boolean);
+    const evidence = Array.isArray(insights?.evidence) ? insights.evidence : [];
+    const matched = Array.isArray(insights?.matchedRequirements) ? insights.matchedRequirements : [];
+    const truth = insights?.truthfulness;
+
+    if (!workflow && evidence.length === 0 && matched.length === 0 && !truth) {
+      box.hidden = true;
+      box.textContent = '';
+      return;
+    }
+
+    const parts = [];
+    const title = workflow === 'applicationAnswer' ? 'Answer workflow' : 'DraftApply workflow';
+    const meta = [
+      insights?.questionType ? this.escapeHtml(insights.questionType.replace(/_/g, ' ')) : null,
+      chain.length ? `${chain.length} agents` : null,
+    ].filter(Boolean).join(' · ');
+
+    parts.push(`<div class="da-agent-title"><span>${title}</span>${meta ? `<small>${meta}</small>` : ''}</div>`);
+
+    if (evidence.length > 0) {
+      parts.push(`
+        <div class="da-agent-section">
+          <div class="da-agent-label">CV evidence used</div>
+          <div class="da-agent-chips">
+            ${evidence.map(item => `
+              <span class="da-agent-chip" title="${this.escapeHtml(item.text || '')}">
+                ${this.escapeHtml(item.label || item.type || 'Evidence')}
+              </span>
+            `).join('')}
+          </div>
+        </div>`);
+    }
+
+    if (matched.length > 0) {
+      parts.push(`
+        <div class="da-agent-section">
+          <div class="da-agent-label">JD requirements checked</div>
+          <div class="da-agent-chips">
+            ${matched.map(item => `
+              <span class="da-agent-chip ${item.supported ? 'da-agent-chip-ok' : 'da-agent-chip-muted'}">
+                ${this.escapeHtml(item.requirement || '')}
+              </span>
+            `).join('')}
+          </div>
+        </div>`);
+    }
+
+    if (truth) {
+      parts.push(`
+        <div class="da-agent-trust">
+          Truthfulness guard: ${Number(truth.allowedCount || 0)} supported claim${Number(truth.allowedCount || 0) === 1 ? '' : 's'}, ${Number(truth.unsupportedCount || 0)} unsupported requirement${Number(truth.unsupportedCount || 0) === 1 ? '' : 's'} held back.
+        </div>`);
+    }
+
+    box.innerHTML = parts.join('');
+    box.hidden = false;
+  }
+
+  escapeHtml(value) {
+    return String(value || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
   }
 
   async copyAnswer() {

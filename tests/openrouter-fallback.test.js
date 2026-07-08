@@ -4,6 +4,7 @@ import {
   OpenRouterFreeModelCache,
   buildOpenRouterFallbackModelOrder,
   isOpenRouterFreeTextModel,
+  scoreOpenRouterModelForDraftApply,
   shouldUseOpenRouterFallback,
 } from '../render-proxy/llm-fallback.js';
 
@@ -64,47 +65,43 @@ describe('OpenRouter free-model fallback ordering', () => {
   it('tries preferred free models first when they are available', () => {
     const ordered = buildOpenRouterFallbackModelOrder([
       freeModel('zeta/other:free'),
-      freeModel('google/gemma-4-26b-a4b-it:free'),
-      freeModel('nvidia/nemotron-3-super-120b-a12b:free'),
+      freeModel('google/gemma-3-27b-it:free'),
+      freeModel('qwen/qwen3-32b:free'),
       freeModel('alpha/other:free'),
     ]);
 
     expect(ordered.slice(0, 2)).toEqual([
-      'nvidia/nemotron-3-super-120b-a12b:free',
-      'google/gemma-4-26b-a4b-it:free',
+      'qwen/qwen3-32b:free',
+      'google/gemma-3-27b-it:free',
     ]);
   });
 
   it('honors a configured preferred OpenRouter model before the built-in preferred order', () => {
     const ordered = buildOpenRouterFallbackModelOrder([
-      freeModel('google/gemma-4-26b-a4b-it:free'),
-      freeModel('nvidia/nemotron-3-super-120b-a12b:free'),
+      freeModel('google/gemma-3-27b-it:free'),
+      freeModel('qwen/qwen3-32b:free'),
       freeModel('meta-llama/llama-3.3-70b-instruct'),
     ], [
       'meta-llama/llama-3.3-70b-instruct',
-      'nvidia/nemotron-3-super-120b-a12b:free',
-      'google/gemma-4-26b-a4b-it:free',
+      'qwen/qwen3-32b:free',
+      'google/gemma-3-27b-it:free',
     ]);
 
     expect(ordered.slice(0, 3)).toEqual([
       'meta-llama/llama-3.3-70b-instruct',
-      'nvidia/nemotron-3-super-120b-a12b:free',
-      'google/gemma-4-26b-a4b-it:free',
+      'qwen/qwen3-32b:free',
+      'google/gemma-3-27b-it:free',
     ]);
   });
 
-  it('falls back to other free models in stable sorted order when preferred models are unavailable', () => {
+  it('ranks other free models by DraftApply suitability when preferred models are unavailable', () => {
     const ordered = buildOpenRouterFallbackModelOrder([
-      freeModel('zeta/model:free'),
-      freeModel('alpha/model:free'),
-      freeModel('middle/model:free'),
+      freeModel('zeta/story-roleplay:free'),
+      { ...freeModel('alpha/qwen-instruct:free'), context_length: 128000, supported_parameters: ['response_format', 'temperature', 'max_tokens'] },
+      freeModel('middle/code-coder:free'),
     ]);
 
-    expect(ordered).toEqual([
-      'alpha/model:free',
-      'middle/model:free',
-      'zeta/model:free',
-    ]);
+    expect(ordered[0]).toBe('alpha/qwen-instruct:free');
   });
 
   it('keeps ordering deterministic across a large mixed catalogue and removes duplicate ids', () => {
@@ -113,7 +110,7 @@ describe('OpenRouter free-model fallback ordering', () => {
       catalogue.push(freeModel(`vendor/model-${String(i).padStart(3, '0')}:free`));
     }
     catalogue.push(freeModel('vendor/model-010:free'));
-    catalogue.push(freeModel('google/gemma-4-26b-a4b-it:free'));
+    catalogue.push(freeModel('google/gemma-3-27b-it:free'));
     catalogue.push({
       ...freeModel('paid/model'),
       pricing: { prompt: '0.1', completion: '0', request: '0' },
@@ -121,16 +118,28 @@ describe('OpenRouter free-model fallback ordering', () => {
 
     const ordered = buildOpenRouterFallbackModelOrder(catalogue);
 
-    expect(ordered[0]).toBe('google/gemma-4-26b-a4b-it:free');
+    expect(ordered[0]).toBe('google/gemma-3-27b-it:free');
     expect(ordered.filter(id => id === 'vendor/model-010:free')).toHaveLength(1);
-    expect(ordered.slice(1, 6)).toEqual([
-      'vendor/model-000:free',
-      'vendor/model-001:free',
-      'vendor/model-002:free',
-      'vendor/model-003:free',
-      'vendor/model-004:free',
-    ]);
+    expect(ordered.slice(1, 6)).toHaveLength(5);
     expect(ordered).not.toContain('paid/model');
+  });
+
+  it('penalizes code-only or soon-expiring free models for DraftApply prose workflows', () => {
+    const stableInstruction = {
+      ...freeModel('vendor/qwen-instruct:free'),
+      context_length: 128000,
+      supported_parameters: ['response_format', 'temperature', 'max_tokens'],
+    };
+    const expiringCode = {
+      ...freeModel('vendor/code-coder:free'),
+      context_length: 128000,
+      supported_parameters: ['temperature', 'max_tokens'],
+      expiration_date: '2026-07-09T00:00:00Z',
+    };
+
+    const now = Date.parse('2026-07-08T12:00:00Z');
+    expect(scoreOpenRouterModelForDraftApply(stableInstruction, now))
+      .toBeGreaterThan(scoreOpenRouterModelForDraftApply(expiringCode, now));
   });
 
   it('excludes expired models from fallback order', () => {

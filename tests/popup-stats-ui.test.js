@@ -77,7 +77,14 @@ describe('popup productivity stats UI', () => {
 
   it('labels OpenRouter Tailor output as a fallback when Groq failed over', () => {
     expect(popupJs).toContain('fallbackFrom');
-    expect(popupJs).toContain('fallback from');
+    expect(popupJs).toContain('Fallback from ${providerLabel(fallbackFrom)}');
+    expect(popupJs).toContain('Model: ${model ||');
+  });
+
+  it('keeps proxy reliability visible without crowding the popup status line', () => {
+    expect(popupJs).toContain('qualityModeLabel');
+    expect(popupJs).toContain('status.qualityModeReason');
+    expect(popupJs).toContain('Best-effort free fallback');
   });
 
   it('sets user-friendly Tailor CV loading copy when providers are busy and fallback is likely', () => {

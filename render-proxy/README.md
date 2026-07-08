@@ -122,7 +122,11 @@ If `RECIPE_PATH` is not set (or fails to load), the proxy uses the bundled recip
 |----------|----------|---------|-------------|
 | `GROQ_API_KEY` | Yes, unless `OPENROUTER_API_KEY` or `LOCAL_LLM_BASE_URL` is set | — | Groq API key; used as the primary hosted LLM provider when present |
 | `OPENROUTER_API_KEY` | No | — | OpenRouter API key; used as fallback when Groq is rate-limited, times out, or returns a transient error. Free fallback models are discovered from OpenRouter's official models API. |
+| `OPENROUTER_MODEL` | No | — | Optional configured OpenRouter model. Use this when you want a paid/reliable OpenRouter route ahead of free fallback. |
 | `OPENROUTER_MAX_FALLBACK_MODELS` | No | `6` | Maximum OpenRouter free models to try per request after Groq fails |
+| `OPENROUTER_USE_MODELS_ARRAY` | No | `true` | Send the ranked fallback chain to OpenRouter as one `models` request so OpenRouter handles model/provider failover. Set `false` to use DraftApply's older manual loop. |
+| `OPENROUTER_PROVIDER_SORT` | No | `throughput` | Provider routing preference for OpenRouter fallback. `throughput` is the default for reducing free-model stalls. |
+| `OPENROUTER_REQUIRE_DATA_PRIVACY` | No | `true` | Adds OpenRouter provider routing preferences that deny providers marked as collecting data. |
 | `OPENROUTER_MODEL_CACHE_TTL_MS` | No | `600000` | How long to cache OpenRouter's official models catalogue in memory |
 | `OPENROUTER_TAILOR_FALLBACK` | No | `true` | Tailor CV generation/audit falls back to OpenRouter by default when `OPENROUTER_API_KEY` is set. Set to `false` only if you want Tailor CV to hard-fail rather than use OpenRouter as backup. |
 | `OPENROUTER_SITE_URL` | No | `https://draftapply.com` | Optional OpenRouter attribution header |
@@ -162,9 +166,36 @@ DraftApply now exposes a conservative model-router policy:
 - Recommended lightweight local chat model: `Qwen/Qwen3-4B-Instruct-2507`.
 - Recommended evidence matching / retrieval model: `Qwen/Qwen3-Embedding-0.6B`.
 - `/api/health` reports whether the optional embedding endpoint is configured and shows the active retrieval thresholds.
+- `/api/health` also reports `qualityMode`, so operators can tell whether the deployment is on hosted primary, local private, configured OpenRouter, or best-effort free fallback.
 - If `LOCAL_EMBEDDING_BASE_URL` is set, Tailor CV analysis/generation uses embeddings to rerank CV evidence against JD requirements. If embeddings fail, time out, or return malformed data, deterministic matching remains active.
 
+Run `npm run eval:evidence-retrieval` to check whether embedding-reranked matching actually beats deterministic
+keyword matching on a hand-labeled fixture (`shared/evidence-retrieval-eval-fixtures.js`). Without
+`LOCAL_EMBEDDING_BASE_URL` set, it runs on a bag-of-words fallback purely so the script executes — that mode
+cannot prove real quality and says so explicitly. Set `LOCAL_EMBEDDING_BASE_URL` to a live
+Qwen3-Embedding-0.6B-compatible endpoint to get a real precision/recall/F1 comparison, and the script exits
+non-zero if the live embedding path is worse than the deterministic baseline.
+
 This keeps the browser extension unchanged and privacy-first while letting operators evaluate smaller open models for lower-risk agent steps.
+
+### OpenRouter fallback orchestration
+
+OpenRouter free models are best-effort capacity. OpenRouter documents that free-model availability can vary, rate limits are lower, latency may be higher, and the `openrouter/free` router selects randomly. DraftApply therefore avoids random free routing for production flows.
+
+The proxy now:
+
+- Builds a DraftApply-specific ranked shortlist from the official model catalogue instead of falling through to alphabetical free-model order.
+- Sends the shortlist to OpenRouter with the `models` fallback array so OpenRouter performs model/provider failover in one request.
+- Sorts OpenRouter providers by throughput by default.
+- Requests OpenRouter router metadata so the actual served model can be surfaced in extension UI.
+- Keeps Groq/local Qwen as the preferred quality path. OpenRouter free remains a fallback, not the main production plan.
+
+For reliability, the recommended production path is:
+
+1. Groq primary for final answer/CV generation.
+2. Local/OpenAI-compatible Qwen for extraction and privacy-sensitive lightweight agent steps.
+3. OpenRouter fallback with `OPENROUTER_USE_MODELS_ARRAY=true`.
+4. If free models remain unreliable for your traffic, configure a paid OpenRouter model via `OPENROUTER_MODEL` or prefer local Qwen instead of free-only fallback.
 
 A free way to run the local chat model: [`hf-space-local-llm/`](../hf-space-local-llm/) is a
 `llama.cpp`-based Hugging Face Space (Docker SDK, free CPU tier) behind an OpenAI-compatible API.
@@ -184,14 +215,26 @@ These agents live in `shared/agent-workflows.js`. They do not add extra LLM call
 
 Stage 4 adds optional embedding retrieval in `shared/evidence-retrieval.js`. When `LOCAL_EMBEDDING_BASE_URL` is configured, the proxy embeds compact CV evidence snippets and JD requirements, reranks evidence, and may promote high-confidence missing requirements to transferable partial matches. The promotion threshold is deliberately conservative, and any embedding failure falls back to deterministic matching.
 
+### Reliability and truthfulness contract
+
+All generated or analyzed outputs now include explicit risk metadata:
+
+- `qualityMode` and `qualityModeReason` identify the route used, for example `hosted_primary`, `local_private`, `configured_openrouter`, `openrouter_fallback`, or `best_effort_free_fallback`.
+- `truthfulnessReport` groups JD/CV claims into `supportedClaims`, `transferableClaims`, `userConfirmedClaims`, and `blockedClaims`.
+- `reviewRequired` is `true` when transferable or blocked claims exist, so the extension can keep review-before-sending visible without parsing model text.
+
+This is intentionally an open-source product contract: contributors can add providers or UI views without hiding model reliability or unsupported-claim risk.
+
 For production validation, run:
 
 ```bash
 npm test
+npm run test:static
+npm run test:unit
 npm run verify:architecture
 ```
 
-`verify:architecture` is a dependency-light syntax gate for the extension/proxy architecture files. It is useful on machines where native Vitest dependencies such as `esbuild` are blocked, but it does not replace the full test suite.
+`test:static` runs architecture syntax checks and release metadata validation. `test:unit` runs Vitest. If Vitest fails before running tests with an `esbuild` service error, run `npm rebuild esbuild` once and retry. `verify:architecture` is a dependency-light syntax gate for the extension/proxy architecture files; it is useful on machines where native Vitest dependencies are blocked, but it does not replace the full test suite.
 
 ---
 

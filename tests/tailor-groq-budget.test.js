@@ -22,6 +22,8 @@ describe('Tailor CV Groq budget', () => {
     expect(route).toContain('buildTailoringPrompt');
     expect(route).toContain('buildTailoredCvAuditPrompt');
     expect(route).toContain('buildRecruiterReview');
+    expect(route).toContain('truthfulnessReport: buildTruthfulnessReport');
+    expect(route).toContain('...buildQualityMetadata(completion)');
     expect(route).toContain('allowFallback: OPENROUTER_TAILOR_FALLBACK');
     expect(route).not.toContain('buildLLMAnalysisPrompt');
     expect(route).not.toContain('buildSemanticMatchPrompt');
@@ -37,7 +39,13 @@ describe('Tailor CV Groq budget', () => {
     expect(renderProxyServer).toContain('OpenRouterFreeModelCache');
     expect(renderProxyServer).toContain('const OPENROUTER_MODEL = (process.env.OPENROUTER_MODEL ||');
     expect(renderProxyServer).toContain('? [OPENROUTER_MODEL, ...PREFERRED_OPENROUTER_FREE_MODELS.filter');
+    expect(renderProxyServer).toContain('!order.includes(OPENROUTER_MODEL)');
     expect(renderProxyServer).toContain('OPENROUTER_MAX_FALLBACK_MODELS');
+    expect(renderProxyServer).toContain('const OPENROUTER_USE_MODELS_ARRAY = !/^false$/i.test');
+    expect(renderProxyServer).toContain('providerPreferences');
+    expect(renderProxyServer).toContain('models: orderedModels');
+    expect(renderProxyServer).toContain("metadata: true");
+    expect(renderProxyServer).toContain("openRouterStrategy: 'models-array'");
     expect(renderProxyServer).toContain("console.warn(`[DraftApply] Groq ${error.status || error.name || 'error'}; falling back to OpenRouter free models.`)");
   });
 

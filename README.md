@@ -70,6 +70,9 @@ See [`render-proxy/README.md`](render-proxy/README.md) for the full API contract
 | `OPENROUTER_API_KEY` | No | OpenRouter API key; used as fallback when Groq is rate-limited, times out, or returns a transient error. Free fallback models are discovered from OpenRouter's official models API. |
 | `OPENROUTER_MAX_FALLBACK_MODELS` | No | Maximum OpenRouter free models to try per request (default: `6`) |
 | `OPENROUTER_TAILOR_FALLBACK` | No | Tailor CV generation/audit falls back to OpenRouter by default when `OPENROUTER_API_KEY` is set. Set to `false` only if you want Tailor CV to hard-fail rather than use OpenRouter as backup. |
+| `OPENROUTER_MODEL` | No | Optional configured OpenRouter model. Use this for a paid/reliable OpenRouter fallback instead of relying only on free models. |
+| `OPENROUTER_USE_MODELS_ARRAY` | No | Sends a ranked fallback chain to OpenRouter in one request (default: `true`). |
+| `OPENROUTER_REQUIRE_DATA_PRIVACY` | No | Denies OpenRouter providers marked as collecting data by default (default: `true`). |
 | `TOKEN_SECRET` | Yes | Secret for signing install tokens |
 | `GROQ_MODEL` | No | Model name (default: `llama-3.3-70b-versatile`) |
 | `RECIPE_PATH` | No | Path to custom recipe module (default: bundled `recipe/index.js`) |
@@ -155,23 +158,36 @@ Open `http://localhost:3001`
 ## Architecture
 
 ```
-┌─────────────────────┐     ┌──────────────────────┐     ┌───────────┐
-│  Chrome Extension    │────▶│  Render Proxy Engine  │────▶│  Groq API │
-│  (extension-ready/)  │◀────│  (render-proxy/)      │◀────│  (ZDR)    │
-└─────────────────────┘     └──────────────────────┘     └───────────┘
-        │                            │
-        ▼                            ▼
-  CV stored locally          Recipe module builds
-  in chrome.storage          prompts server-side
+Chrome Extension
+  → Render Proxy
+    → deterministic workflow agents
+    → model router
+    → Groq primary / local model / OpenRouter fallback
 ```
 
 1. **Extension** extracts job context from the page (title, company, description, requirements)
 2. **Extension** sends structured payload (question + CV + job context) to the proxy
-3. **Proxy** authenticates via 90-day install token, cleans the question label, passes to recipe
-4. **Recipe** classifies the question type and builds a tailored prompt (9 distinct strategies)
-5. **Proxy** calls Groq API with a 60s timeout and returns the answer
-6. **Extension** shows progressive status messages while waiting, then displays the answer in a modal
-7. **Extension** inserts the answer into the form field using framework-compatible native events (React/Vue/Angular safe)
+3. **Proxy** authenticates via 90-day install token, cleans the question label, and builds a CV/JD evidence package
+4. **Workflow agents** classify the question, map CV evidence, score JD requirements, flag gaps, and build truthfulness metadata
+5. **Recipe** builds a tailored prompt server-side
+6. **Model router** uses Groq by default, optional local OpenAI-compatible models for lightweight/private steps, and ranked OpenRouter fallback when configured
+7. **Extension** shows model/provider cues, truthfulness/agent insights, and inserts the answer using framework-compatible native events
+
+The multi-agent design is intentionally cost-conscious: agents are deterministic workflow modules plus one-pass LLM orchestration, not one hosted LLM call per agent.
+
+Generated API responses include `qualityMode` and `truthfulnessReport` so users and contributors can see whether an answer came from the primary hosted path, a local/private model, a configured OpenRouter model, or best-effort free fallback.
+
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) and [`render-proxy/README.md`](render-proxy/README.md) for the full provider and orchestration details.
+
+## Testing
+
+```bash
+npm run test:static       # syntax/architecture + release metadata checks
+npm run test:unit         # Vitest unit/static contract tests
+npm test                  # both gates
+```
+
+If Vitest fails before running tests with an `esbuild` service error, run `npm rebuild esbuild` once and retry. The static gate exists so contributors can still validate architecture on machines where native test dependencies are temporarily unhappy.
 
 ## Store listing assets
 

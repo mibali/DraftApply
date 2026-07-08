@@ -645,6 +645,69 @@
       line-height: 1.35;
     }
 
+    .agent-insights {
+      margin-top: 10px;
+      padding: 11px 12px;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      color: #475569;
+    }
+
+    .agent-insights-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      color: #1e293b;
+      font-size: 12px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+
+    .agent-insights-title small {
+      color: #8493aa;
+      font-size: 10px;
+      font-weight: 600;
+      text-align: right;
+    }
+
+    .agent-insights-group { margin-top: 8px; }
+
+    .agent-insights-label {
+      color: #8493aa;
+      font-size: 9.8px;
+      font-weight: 700;
+      letter-spacing: 0.55px;
+      margin-bottom: 5px;
+      text-transform: uppercase;
+    }
+
+    .agent-insights-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+    }
+
+    .agent-chip {
+      max-width: 100%;
+      padding: 4px 7px;
+      background: white;
+      border: 1px solid #dbe3ee;
+      border-radius: 8px;
+      color: #334155;
+      font-size: 11px;
+      font-weight: 600;
+      line-height: 1.25;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .agent-chip-ok { background: #f0fdf4; border-color: #bbf7d0; color: #166534; }
+    .agent-chip-info { background: #eff6ff; border-color: #bfdbfe; color: #1e40af; }
+    .agent-chip-muted { background: white; border-color: #e2e8f0; color: #64748b; }
+    .agent-chip-warn { background: #fffbeb; border-color: #fde68a; color: #92400e; }
+
     .tailor-warning-box {
       margin-top: 10px;
       padding: 10px 12px;
@@ -1109,6 +1172,8 @@
             <div class="match-chips" id="match-domain-chips"></div>
           </div>
         </div>
+
+        <div id="tailor-agent-insights" class="agent-insights" hidden></div>
 
         <div id="tailor-warnings-box" class="tailor-warning-box" hidden></div>
 

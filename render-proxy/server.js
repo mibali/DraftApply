@@ -46,6 +46,9 @@ const OPENROUTER_MODEL = (process.env.OPENROUTER_MODEL || '').trim();
 const OPENROUTER_SITE_URL = process.env.OPENROUTER_SITE_URL || 'https://draftapply.com';
 const OPENROUTER_APP_NAME = process.env.OPENROUTER_APP_NAME || 'DraftApply';
 const OPENROUTER_TAILOR_FALLBACK = !/^false$/i.test(process.env.OPENROUTER_TAILOR_FALLBACK || 'true');
+const OPENROUTER_USE_MODELS_ARRAY = !/^false$/i.test(process.env.OPENROUTER_USE_MODELS_ARRAY || 'true');
+const OPENROUTER_REQUIRE_DATA_PRIVACY = !/^false$/i.test(process.env.OPENROUTER_REQUIRE_DATA_PRIVACY || 'true');
+const OPENROUTER_PROVIDER_SORT = (process.env.OPENROUTER_PROVIDER_SORT || 'throughput').trim();
 const OPENROUTER_MODEL_CACHE_TTL_MS = Number(process.env.OPENROUTER_MODEL_CACHE_TTL_MS || 10 * 60 * 1000);
 const OPENROUTER_MAX_FALLBACK_MODELS = coercePositiveInteger(process.env.OPENROUTER_MAX_FALLBACK_MODELS, 6);
 const LOCAL_LLM_BASE_URL = (process.env.LOCAL_LLM_BASE_URL || '').trim();
@@ -279,7 +282,7 @@ function llmProviderConfig(provider, model) {
   return {
     provider: 'openrouter',
     apiKey: OPENROUTER_API_KEY,
-    model,
+    model: model || OPENROUTER_MODEL || 'openrouter/free',
     url: 'https://openrouter.ai/api/v1/chat/completions',
     headers: {
       'HTTP-Referer': OPENROUTER_SITE_URL,
@@ -296,9 +299,23 @@ function localChatCompletionsUrl(rawBaseUrl) {
   return `${base}/v1/chat/completions`;
 }
 
-function localEmbeddingsUrl(rawBaseUrl) {
+// Hugging Face's Inference Providers router does not implement the
+// OpenAI-compatible /v1/embeddings route (only chat completions) - embedding
+// models there are called at /hf-inference/models/{model} with a native
+// {inputs: [...]} request and a plain array-of-vectors response, not the
+// OpenAI {data: [{embedding}]} shape. Detect that host and speak its shape.
+function isHfInferenceRouterUrl(rawBaseUrl) {
+  return /(^|\.)router\.huggingface\.co$/i.test(
+    (() => {
+      try { return new URL(rawBaseUrl).hostname; } catch { return ''; }
+    })()
+  );
+}
+
+function localEmbeddingsUrl(rawBaseUrl, model) {
   const base = String(rawBaseUrl || '').trim().replace(/\/+$/, '');
   if (!base) return '';
+  if (isHfInferenceRouterUrl(base)) return `${base}/models/${model}`;
   if (/\/embeddings$/i.test(base)) return base;
   if (/\/v1$/i.test(base)) return `${base}/embeddings`;
   return `${base}/v1/embeddings`;
@@ -313,21 +330,19 @@ async function callEmbeddingEndpoint(texts, {
     .filter(Boolean);
   if (!LOCAL_EMBEDDING_BASE_URL || input.length === 0) return null;
 
+  const useHfNativeShape = isHfInferenceRouterUrl(LOCAL_EMBEDDING_BASE_URL);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const startedAt = Date.now();
   try {
-    const response = await fetch(localEmbeddingsUrl(LOCAL_EMBEDDING_BASE_URL), {
+    const response = await fetch(localEmbeddingsUrl(LOCAL_EMBEDDING_BASE_URL, model), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${LOCAL_EMBEDDING_API_KEY}`,
       },
       signal: controller.signal,
-      body: JSON.stringify({
-        model,
-        input,
-      }),
+      body: JSON.stringify(useHfNativeShape ? { inputs: input } : { model, input }),
     });
 
     if (!response.ok) {
@@ -336,9 +351,11 @@ async function callEmbeddingEndpoint(texts, {
     }
 
     const data = await response.json();
-    const embeddings = (data?.data || [])
-      .sort((a, b) => Number(a.index || 0) - Number(b.index || 0))
-      .map(item => item.embedding);
+    const embeddings = useHfNativeShape
+      ? (Array.isArray(data) ? data : [])
+      : (data?.data || [])
+          .sort((a, b) => Number(a.index || 0) - Number(b.index || 0))
+          .map(item => item.embedding);
 
     if (embeddings.length !== input.length) {
       throw new LLMProviderError('local-openai-embeddings', 502, 'Embedding count mismatch', null, model);
@@ -376,6 +393,9 @@ async function callProviderChat(provider, {
   stream = false,
   timeoutMs = 60000,
   model,
+  models,
+  providerPreferences,
+  metadata = false,
   attempt = 1,
   fallbackFrom = null,
 }) {
@@ -383,7 +403,8 @@ async function callProviderChat(provider, {
   if (!config.apiKey) {
     throw new LLMProviderError(provider, 0, 'Missing API key', null, config.model);
   }
-  if (!config.model) {
+  const useModelsArray = provider === 'openrouter' && Array.isArray(models) && models.length > 0;
+  if (!config.model && !useModelsArray) {
     throw new LLMProviderError(provider, 0, 'Missing model', null, config.model);
   }
 
@@ -396,13 +417,15 @@ async function callProviderChat(provider, {
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${config.apiKey}`,
+        ...(metadata ? { 'X-OpenRouter-Metadata': 'enabled' } : {}),
         ...config.headers,
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: config.model,
+        ...(useModelsArray ? { models } : { model: config.model }),
         temperature,
         ...(maxTokens ? { max_tokens: maxTokens } : {}),
+        ...(providerPreferences ? { provider: providerPreferences } : {}),
         stream,
         messages,
       }),
@@ -411,15 +434,29 @@ async function callProviderChat(provider, {
     if (!response.ok) {
       const text = await response.text().catch(() => '');
       const retryAfterMs = retryAfterMsFromHeaders(response.headers) ?? retryAfterMsFromProviderDetail(text);
-      logLLMAttempt({ provider, model: config.model, attempt, outcome: 'error', status: response.status, fallbackFrom, elapsedMs: Date.now() - startedAt });
-      throw new LLMProviderError(provider, response.status, text.slice(0, 500), retryAfterMs, config.model);
+      const attemptedModel = useModelsArray ? models.join(' > ') : config.model;
+      logLLMAttempt({ provider, model: attemptedModel, attempt, outcome: 'error', status: response.status, fallbackFrom, elapsedMs: Date.now() - startedAt });
+      throw new LLMProviderError(provider, response.status, text.slice(0, 500), retryAfterMs, attemptedModel);
     }
 
-    logLLMAttempt({ provider, model: config.model, attempt, outcome: 'success', fallbackFrom, elapsedMs: Date.now() - startedAt });
-    return { response, provider: config.provider, model: config.model };
+    const requestedModel = useModelsArray ? models[0] : config.model;
+    logLLMAttempt({ provider, model: requestedModel, attempt, outcome: 'success', fallbackFrom, elapsedMs: Date.now() - startedAt });
+    return {
+      response,
+      provider: config.provider,
+      model: requestedModel,
+      requestedModels: useModelsArray ? models : undefined,
+    };
   } catch (error) {
     if (error?.name === 'AbortError') {
-      logLLMAttempt({ provider, model: config.model, attempt, outcome: 'timeout', fallbackFrom, elapsedMs: Date.now() - startedAt });
+      logLLMAttempt({
+        provider,
+        model: useModelsArray ? models.join(' > ') : config.model,
+        attempt,
+        outcome: 'timeout',
+        fallbackFrom,
+        elapsedMs: Date.now() - startedAt,
+      });
     }
     throw error;
   } finally {
@@ -432,8 +469,11 @@ async function getOpenRouterFallbackModelOrder() {
   const preferred = OPENROUTER_MODEL
     ? [OPENROUTER_MODEL, ...PREFERRED_OPENROUTER_FREE_MODELS.filter(model => model !== OPENROUTER_MODEL)]
     : PREFERRED_OPENROUTER_FREE_MODELS;
-  return buildOpenRouterFallbackModelOrder(models, preferred)
-    .slice(0, OPENROUTER_MAX_FALLBACK_MODELS);
+  const order = buildOpenRouterFallbackModelOrder(models, preferred);
+  const orderWithConfiguredModel = OPENROUTER_MODEL && !order.includes(OPENROUTER_MODEL)
+    ? [OPENROUTER_MODEL, ...order]
+    : order;
+  return orderWithConfiguredModel.slice(0, OPENROUTER_MAX_FALLBACK_MODELS);
 }
 
 async function callOpenRouterFreeFallback(options, { callStart, fallbackFrom = 'groq' } = {}) {
@@ -450,6 +490,35 @@ async function callOpenRouterFreeFallback(options, { callStart, fallbackFrom = '
     throw new LLMProviderError('openrouter', 0, 'No free OpenRouter text models are currently available');
   }
 
+  const providerPreferences = {
+    allow_fallbacks: true,
+    sort: OPENROUTER_PROVIDER_SORT || 'throughput',
+    ...(OPENROUTER_REQUIRE_DATA_PRIVACY ? { data_collection: 'deny' } : {}),
+  };
+
+  if (OPENROUTER_USE_MODELS_ARRAY) {
+    try {
+      return {
+        ...(await callProviderChat('openrouter', {
+          ...options,
+          models: orderedModels,
+          providerPreferences,
+          metadata: true,
+          timeoutMs: Math.max(8000, options.fallbackTimeoutMs || options.timeoutMs || 60000),
+          attempt: 1,
+          fallbackFrom,
+        })),
+        fallbackFrom,
+        openRouterStrategy: 'models-array',
+        openRouterModels: orderedModels,
+      };
+    } catch (error) {
+      if (Number(error?.status) === 401 || Number(error?.status) === 403) throw error;
+      if (!isRetryableOpenRouterModelError(error)) throw error;
+      console.warn(`[DraftApply] OpenRouter models-array fallback failed (${error.status || error.name || 'error'}); trying manual model loop.`);
+    }
+  }
+
   let lastError = null;
   for (let i = 0; i < orderedModels.length; i += 1) {
     const model = orderedModels[i];
@@ -459,11 +528,15 @@ async function callOpenRouterFreeFallback(options, { callStart, fallbackFrom = '
         ...(await callProviderChat('openrouter', {
           ...options,
           model,
+          providerPreferences,
+          metadata: true,
           timeoutMs,
           attempt: i + 1,
           fallbackFrom,
         })),
         fallbackFrom,
+        openRouterStrategy: 'manual-loop',
+        openRouterModels: orderedModels,
       };
     } catch (error) {
       lastError = error;
@@ -562,11 +635,14 @@ app.get('/api/health', (req, res) => {
     hasEmbedding: Boolean(LOCAL_EMBEDDING_BASE_URL),
     embeddingModel: LOCAL_EMBEDDING_MODEL,
   });
+  const qualityMode = deploymentQualityMode();
 
   res.json({
     ok: true,
     provider: GROQ_API_KEY ? 'groq' : OPENROUTER_API_KEY ? 'openrouter' : 'local-openai',
     model: GROQ_API_KEY ? GROQ_MODEL : OPENROUTER_API_KEY ? 'openrouter-free-dynamic' : LOCAL_LLM_MODEL,
+    qualityMode,
+    qualityModeReason: qualityModeReason(qualityMode),
     modelRouter: {
       applicationAnswer: applicationRoute,
       lightweightExtraction: extractionRoute,
@@ -583,6 +659,12 @@ app.get('/api/health', (req, res) => {
     fallbackProvider: GROQ_API_KEY && OPENROUTER_API_KEY ? 'openrouter' : null,
     fallbackModel: GROQ_API_KEY && OPENROUTER_API_KEY ? 'openrouter-free-dynamic' : null,
     fallbackModelPreference: GROQ_API_KEY && OPENROUTER_API_KEY ? PREFERRED_OPENROUTER_FREE_MODELS : [],
+    openRouter: OPENROUTER_API_KEY ? {
+      useModelsArray: OPENROUTER_USE_MODELS_ARRAY,
+      providerSort: OPENROUTER_PROVIDER_SORT || 'throughput',
+      requireDataPrivacy: OPENROUTER_REQUIRE_DATA_PRIVACY,
+      maxFallbackModels: OPENROUTER_MAX_FALLBACK_MODELS,
+    } : undefined,
   });
 });
 
@@ -697,6 +779,101 @@ function summarizeAgentRun(context = {}) {
     missingRequirementCount: context.gapAnalysis?.missingRequirements?.length,
     supportedKeywordCount: context.keywordOptimisation?.supportedKeywords?.length,
     riskyKeywordCount: context.keywordOptimisation?.riskyKeywords?.length,
+  };
+}
+
+function deploymentQualityMode() {
+  if (GROQ_API_KEY) {
+    return OPENROUTER_API_KEY
+      ? 'hosted_primary_with_openrouter_fallback'
+      : 'hosted_primary';
+  }
+  if (LOCAL_LLM_BASE_URL) return 'local_private';
+  if (OPENROUTER_API_KEY) {
+    return OPENROUTER_MODEL
+      ? 'configured_openrouter'
+      : 'best_effort_free_fallback';
+  }
+  return 'unavailable';
+}
+
+function qualityModeReason(mode) {
+  const reasons = {
+    deterministic_local: 'Answered without an LLM call using local CV extraction.',
+    hosted_primary: 'Groq is configured as the primary hosted generation path.',
+    hosted_primary_with_openrouter_fallback: 'Groq is configured as primary, with OpenRouter available only as fallback.',
+    local_private: 'A local OpenAI-compatible endpoint is configured for private generation.',
+    configured_openrouter: 'A configured OpenRouter model is selected instead of random free routing.',
+    best_effort_free_fallback: 'Only OpenRouter free/best-effort routing is available; reliability may vary.',
+    openrouter_fallback: 'The primary hosted provider failed, so DraftApply used the ranked OpenRouter fallback chain.',
+    unavailable: 'No LLM route is configured.',
+  };
+  return reasons[mode] || reasons.unavailable;
+}
+
+function responseQualityMode(completion = {}) {
+  if (completion.provider === 'deterministic') return 'deterministic_local';
+  if (completion.provider === 'local-openai') return 'local_private';
+  if (completion.provider === 'groq') {
+    return OPENROUTER_API_KEY ? 'hosted_primary_with_openrouter_fallback' : 'hosted_primary';
+  }
+  if (completion.provider === 'openrouter') {
+    if (completion.fallbackFrom) return 'openrouter_fallback';
+    return OPENROUTER_MODEL ? 'configured_openrouter' : 'best_effort_free_fallback';
+  }
+  return deploymentQualityMode();
+}
+
+function buildQualityMetadata(completion = {}) {
+  const qualityMode = responseQualityMode(completion);
+  return {
+    qualityMode,
+    qualityModeReason: qualityModeReason(qualityMode),
+  };
+}
+
+function buildTruthfulnessReport(context = {}) {
+  if (!context) return undefined;
+  const matchMap = Array.isArray(context.matchMap) ? context.matchMap : [];
+  const toClaim = item => ({
+    requirement: compactText(item.requirement, 120),
+    type: item.type,
+    evidence: (Array.isArray(item.evidence) ? item.evidence : [])
+      .slice(0, 3)
+      .map(evidence => compactText(evidence, 160)),
+    confirmedByUser: Boolean(item.confirmedByUser),
+    retrievalScore: Number.isFinite(Number(item.retrievalScore)) ? Number(item.retrievalScore) : undefined,
+  });
+
+  const supportedClaims = matchMap
+    .filter(item => item.allowedToMention && item.status === 'strong_match')
+    .map(toClaim);
+  const transferableClaims = matchMap
+    .filter(item => item.allowedToMention && item.status === 'partial_match')
+    .map(toClaim);
+  const userConfirmedClaims = matchMap
+    .filter(item => item.allowedToMention && item.confirmedByUser)
+    .map(toClaim);
+  const blockedClaims = matchMap
+    .filter(item => !item.allowedToMention)
+    .map(item => ({
+      requirement: compactText(item.requirement, 120),
+      type: item.type,
+      reason: 'Not confirmed in the CV or by the user.',
+    }));
+
+  return {
+    supportedClaims,
+    transferableClaims,
+    userConfirmedClaims,
+    blockedClaims,
+    counts: {
+      supported: supportedClaims.length,
+      transferable: transferableClaims.length,
+      userConfirmed: userConfirmedClaims.length,
+      blocked: blockedClaims.length,
+    },
+    reviewRequired: blockedClaims.length > 0 || transferableClaims.length > 0,
   };
 }
 
@@ -879,7 +1056,12 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
     // can be answered directly from the CV without calling the LLM.
     const deterministicAnswer = tryDeterministicExtract(cleanedQuestion, body.cvText);
     if (deterministicAnswer) {
-      return res.json({ answer: deterministicAnswer, provider: 'deterministic' });
+      const deterministicQuality = buildQualityMetadata({ provider: 'deterministic' });
+      return res.json({
+        answer: deterministicAnswer,
+        provider: 'deterministic',
+        ...deterministicQuality,
+      });
     }
 
     // Deterministic stage-2 agents parse CV/JD, build the candidate evidence
@@ -972,11 +1154,13 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
         draftapplyMeta: {
           provider: completion.provider,
           model: completion.model,
+          ...buildQualityMetadata(completion),
           fallbackFrom: completion.fallbackFrom || undefined,
           workflow: completion.route?.workflow || 'applicationAnswer',
           agentChain: completion.route?.agentChain || WORKFLOW_AGENT_CHAINS.applicationAnswer,
           agentRun: summarizeAgentRun(answerAgentContext),
           agentInsights: buildAgentInsights(answerAgentContext),
+          truthfulnessReport: buildTruthfulnessReport(answerAgentContext),
         }
       })}\n\n`);
 
@@ -1001,6 +1185,8 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
     const data = await response.json();
     let answer = data?.choices?.[0]?.message?.content;
     if (!answer?.trim()) return res.status(502).json({ error: 'No answer from provider' });
+    let responseModel = data?.model || completion.model;
+    let openRouterMetadata = data?.openrouter_metadata || undefined;
 
     // Quality gate: one conditional regeneration attempt for low-scoring answers.
     // Only runs for structured payloads (questionType set), never for streaming,
@@ -1031,7 +1217,11 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
           const retryAnswer = retryData?.choices?.[0]?.message?.content;
           if (retryAnswer?.trim()) {
             const retryEval = evaluateAnswer(retryAnswer, questionType);
-            if (retryEval.score > evaluation.score) answer = retryAnswer;
+            if (retryEval.score > evaluation.score) {
+              answer = retryAnswer;
+              responseModel = retryData?.model || retry.model || responseModel;
+              openRouterMetadata = retryData?.openrouter_metadata || openRouterMetadata;
+            }
           }
         } catch (_) {
           // Regeneration failed — use original answer.
@@ -1042,12 +1232,18 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
     res.json({
       answer,
       provider: completion.provider,
-      model: completion.model,
+      model: responseModel,
+      ...buildQualityMetadata(completion),
+      requestedModel: completion.model,
+      requestedModels: completion.requestedModels,
+      openRouterMetadata,
+      openRouterStrategy: completion.openRouterStrategy,
       fallbackFrom: completion.fallbackFrom || undefined,
       workflow: completion.route?.workflow || 'applicationAnswer',
       agentChain: completion.route?.agentChain || WORKFLOW_AGENT_CHAINS.applicationAnswer,
       agentRun: summarizeAgentRun(answerAgentContext),
       agentInsights: buildAgentInsights(answerAgentContext),
+      truthfulnessReport: buildTruthfulnessReport(answerAgentContext),
     });
   } catch (e) {
     if (e?.name === 'AbortError') {
@@ -1202,7 +1398,12 @@ Preserve the original bullet point structure and section headings. Output only t
     res.json({
       extractedText,
       provider: completion.provider,
-      model: completion.model,
+      model: data?.model || completion.model,
+      ...buildQualityMetadata(completion),
+      requestedModel: completion.model,
+      requestedModels: completion.requestedModels,
+      openRouterMetadata: data?.openrouter_metadata || undefined,
+      openRouterStrategy: completion.openRouterStrategy,
       fallbackFrom: completion.fallbackFrom || undefined,
       workflow: completion.route?.workflow || 'tailoredCv',
       agentChain: completion.route?.agentChain || WORKFLOW_AGENT_CHAINS.tailoredCv,
@@ -1421,6 +1622,8 @@ app.post('/api/cv/analyze', authRequired, generateLimiter, async (req, res) => {
       keywordOptimisation: tailorAgentContext.keywordOptimisation,
       atsFormatting: tailorAgentContext.atsFormatting,
       truthfulness: tailorAgentContext.truthfulness,
+      truthfulnessReport: buildTruthfulnessReport(tailorAgentContext),
+      ...buildQualityMetadata({ provider: 'deterministic' }),
       evidenceRetrieval: tailorAgentContext.evidenceRetrieval,
       agentRun: summarizeAgentRun(tailorAgentContext),
       agentInsights: buildAgentInsights(tailorAgentContext),
@@ -1576,7 +1779,12 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
       atsKeywordGaps,
       atsKeywordCoverage,
       provider: tailorProvider,
-      model: completion.model,
+      model: data?.model || completion.model,
+      ...buildQualityMetadata(completion),
+      requestedModel: completion.model,
+      requestedModels: completion.requestedModels,
+      openRouterMetadata: data?.openrouter_metadata || undefined,
+      openRouterStrategy: completion.openRouterStrategy,
       fallbackFrom: completion.fallbackFrom || undefined,
       workflow: completion.route?.workflow || 'tailoredCv',
       agentChain: completion.route?.agentChain || WORKFLOW_AGENT_CHAINS.tailoredCv,
@@ -1584,6 +1792,7 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
       keywordOptimisation: tailorAgentContext.keywordOptimisation,
       atsFormatting: tailorAgentContext.atsFormatting,
       truthfulness: tailorAgentContext.truthfulness,
+      truthfulnessReport: buildTruthfulnessReport(tailorAgentContext),
       evidenceRetrieval: tailorAgentContext.evidenceRetrieval,
       agentRun: summarizeAgentRun(tailorAgentContext),
       agentInsights: buildAgentInsights(tailorAgentContext),

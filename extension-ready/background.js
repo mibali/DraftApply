@@ -927,13 +927,17 @@ async function handleStreamingAPICall(payload, requestId, tabId, frameId) {
     const provider = response.headers.get('X-DraftApply-Provider');
     const model = response.headers.get('X-DraftApply-Model');
     const fallbackFrom = response.headers.get('X-DraftApply-Fallback-From');
+    const workflow = response.headers.get('X-DraftApply-Workflow');
+    const agentChain = response.headers.get('X-DraftApply-Agent-Chain');
     if (provider || fallbackFrom) {
       chrome.tabs.sendMessage(tabId, {
         type: 'STREAM_META',
         requestId: effectiveRequestId,
         provider,
         model,
-        fallbackFrom
+        fallbackFrom,
+        workflow,
+        agentChain
       }, { frameId }).catch(() => {});
     }
 
@@ -959,6 +963,22 @@ async function handleStreamingAPICall(payload, requestId, tabId, frameId) {
         if (data === '[DONE]') continue;
         try {
           const json = JSON.parse(data);
+          if (json.draftapplyMeta) {
+            chrome.tabs.sendMessage(tabId, {
+              type: 'STREAM_META',
+              requestId: effectiveRequestId,
+              ...json.draftapplyMeta
+            }, { frameId }).catch(() => {});
+            continue;
+          }
+          if (json.model || json.openrouter_metadata) {
+            chrome.tabs.sendMessage(tabId, {
+              type: 'STREAM_META',
+              requestId: effectiveRequestId,
+              model: json.model || undefined,
+              openRouterMetadata: json.openrouter_metadata || undefined
+            }, { frameId }).catch(() => {});
+          }
           // OpenAI-compatible format
           const chunk = json.choices?.[0]?.delta?.content;
           if (chunk) sendChunk(chunk);
