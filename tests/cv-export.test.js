@@ -448,6 +448,87 @@ TechCorp`);
     expect(html).not.toContain('<li>Cloud &amp; Platform Engineering');
   });
 
+  // Regression for a live-generated CV: the model omitted the blank line
+  // between one role's last bullet and the next role's company line
+  // ("Semgrep | USA"), put a blank line AFTER the company instead, and split
+  // the date range across two lines. The renderer showed the company as plain
+  // body text and invented a fake bold entry with company "Feb 2024 -" and
+  // dates "Jun 2025".
+  it('renders a company line straight after a bullet, with a blank + split date range below it, as one proper entry', () => {
+    const formatCvToHtml = loadFormatter();
+    const html = formatCvToHtml(`Jordan Taylor
+Senior MLOps Engineer
+
+PROFESSIONAL EXPERIENCE
+Sourcegraph | UK
+Feb 2026 - Present
+DevOps & Platform Engineer IC4
+
+• Conducted root cause analysis and implemented long-term remediation.
+• Partnered with SRE and Engineering teams to improve operational resilience across production-
+Semgrep | USA
+
+Feb 2024 -
+Jun 2025
+Senior Customer Success Engineer IC4
+
+• Resolved complex Tier 3/4 security platform issues across enterprise-scale integrations.
+
+Sourcegraph | USA / Remote
+Jul 2021 - Feb 2024
+Senior Technical Support Engineer
+
+• Delivered advanced customer-facing DevOps and platform support.`);
+
+    expect(html).toContain('<span class="cv-company">Semgrep | USA</span>');
+    expect(html).toContain('<span class="cv-entry-dates">Feb 2024 - Jun 2025</span>');
+    expect(html).toContain('<p class="cv-job-title">Senior Customer Success Engineer IC4</p>');
+    expect(html).not.toContain('<span class="cv-company">Feb 2024 -</span>');
+    expect(html).not.toContain('<p class="cv-body">Semgrep | USA</p>');
+    // The truncated trailing bullet fragment is repaired, not left dangling.
+    expect(html).not.toContain('across production-</li>');
+    expect(html).toContain('to improve operational resilience.</li>');
+    // Neighbouring entries stay intact.
+    expect(html).toContain('<span class="cv-company">Sourcegraph | USA / Remote</span>');
+    expect(html).toContain('<span class="cv-entry-dates">Jul 2021 - Feb 2024</span>');
+  });
+
+  it('never turns a standalone date range into an entry row company', () => {
+    const formatCvToHtml = loadFormatter();
+    const html = formatCvToHtml(`Jordan Taylor
+Senior MLOps Engineer
+
+PROFESSIONAL EXPERIENCE
+• Some earlier bullet content.
+
+Feb 2024 - Jun 2025
+Senior Engineer
+
+• Did the work.`);
+
+    expect(html).not.toContain('<span class="cv-company">Feb 2024 -</span>');
+    expect(html).not.toContain('cv-company">Feb 2024');
+  });
+
+  it('holds a pending company across blank lines so "Company / blank / dates / title" renders as one entry', () => {
+    const formatCvToHtml = loadFormatter();
+    const html = formatCvToHtml(`Jordan Taylor
+Senior MLOps Engineer
+
+PROFESSIONAL EXPERIENCE
+
+Opay Financial Services | Nigeria
+
+Mar 2021 - Jun 2021
+DevOps Engineer
+
+• Improved deployment reliability using Kubernetes and Docker.`);
+
+    expect(html).toContain('<span class="cv-company">Opay Financial Services | Nigeria</span>');
+    expect(html).toContain('<span class="cv-entry-dates">Mar 2021 - Jun 2021</span>');
+    expect(html).toContain('<p class="cv-job-title">DevOps Engineer</p>');
+  });
+
   it('builds an editable Word-compatible document from the rendered CV HTML', () => {
     const { buildWordDocument, safeDownloadName } = loadExportHelpers();
     const doc = buildWordDocument('<h1 class="cv-name">Jane Doe</h1><p class="cv-body">Cloud engineer</p>', 'Jane Doe CV');

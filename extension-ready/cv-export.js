@@ -134,9 +134,18 @@ function repairDanglingBulletEndings(lines) {
     if (!match) return line;
 
     const [, prefix, body] = match;
-    const repaired = body
-      .replace(/\s+\b(?:and|or|with|including|across|for|to|by)\s*$/i, '')
-      .replace(/[,\s]+$/, '');
+    // Trim repeatedly until stable: a token-limit truncation can cut a bullet
+    // mid-word ("...across production-"), and stripping the hyphenated
+    // fragment then exposes a dangling conjunction needing a second pass.
+    let repaired = body;
+    let previous;
+    do {
+      previous = repaired;
+      repaired = repaired
+        .replace(/\s+\S*[a-z]-$/, '')
+        .replace(/\s+\b(?:and|or|with|including|across|for|to|by)\s*$/i, '')
+        .replace(/[,\s]+$/, '');
+    } while (repaired !== previous);
 
     if (repaired === body) return line;
     return `${prefix}${repaired}.`;
@@ -663,13 +672,16 @@ function formatCvToHtml(rawText, fallbackContactUrls = {}, linkAnnotations = [])
     // ── Blank line ──
     if (!line) {
       closeList();
-      flushPendingCompany(null);
       afterEntryRow = false;
       if (inHeader) {
         inHeader = false;
         html += '<hr class="cv-header-rule">';
       }
-      html += '<div class="cv-spacer"></div>';
+      // Keep any pending company buffered across blank lines — LLM output
+      // often reads "Company", blank, "dates", "title"; flushing here would
+      // emit the company row before its dates arrive, and the orphaned date
+      // line downstream then gets misparsed as a company of its own.
+      if (pendingCompany === null) html += '<div class="cv-spacer"></div>';
       continue;
     }
 
@@ -784,11 +796,14 @@ function formatCvToHtml(rawText, fallbackContactUrls = {}, linkAnnotations = [])
         continue;
       }
 
-      // "Company Name Month Year – Month Year" on one line without pipe (OpenRouter format)
+      // "Company Name Month Year – Month Year" on one line without pipe (OpenRouter format).
+      // The "company" part must not itself be a date fragment: a rejoined
+      // split range like "Feb 2024 - Jun 2025" also matches this shape, and
+      // without the guard it renders as a fake entry with company "Feb 2024 -".
       const inlineDateMatch = line.match(
         /^(.{3,60}?)\s+((?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{4}.{0,40})$/i
       );
-      if (inlineDateMatch && !isSectionHeader(inlineDateMatch[1].trim())) {
+      if (inlineDateMatch && !isSectionHeader(inlineDateMatch[1].trim()) && !isDateLine(inlineDateMatch[1].trim())) {
         flushPendingCompany(null);
         emitEntryRow(inlineDateMatch[1].trim(), inlineDateMatch[2].trim());
         continue;
@@ -821,9 +836,19 @@ function formatCvToHtml(rawText, fallbackContactUrls = {}, linkAnnotations = [])
 
       // Short line that could be a company / institution name — buffer it, but only when
       // at the start of a new entry (preceded by blank, section header, or date line).
+      // LLM output also frequently omits the blank line between one role's last
+      // bullet and the next role's company line; in that case a short line
+      // straight after a bullet is still a new entry header when the next
+      // content line is a date range.
       if (pendingCompany === null && line.length < 70 && !isContactLine(line) && !isDateLine(line)) {
         const prevLine = lines[i - 1]?.trim() || '';
-        if (prevLine === '' || isSectionHeader(prevLine) || isDateLine(prevLine)) {
+        let lookahead = i + 1;
+        while (lookahead < lines.length && !String(lines[lookahead] || '').trim()) lookahead++;
+        const nextIsDate = lookahead < lines.length && isDateLine(String(lines[lookahead]).trim());
+        if (
+          prevLine === '' || isSectionHeader(prevLine) || isDateLine(prevLine) ||
+          (/^[-•*●▪◦–—]\s/.test(prevLine) && nextIsDate)
+        ) {
           pendingCompany = line;
           continue;
         }

@@ -660,8 +660,9 @@ Do not add anything new. Return the complete corrected CV.`;
   finalizeTailoredCV(rawText, { cvData, jdData, matchMap = [], confirmedSkills = [] } = {}) {
     // Repair hard-wrapped lines first: LLMs copy the original CV's PDF-extracted
     // line wrapping ("cloud-\nnative"), which every downstream step would
-    // otherwise treat as separate lines.
-    const unwrapped = this.repairHardWrappedLines(rawText);
+    // otherwise treat as separate lines. Then rejoin split date ranges so every
+    // later pass sees date lines as single units.
+    const unwrapped = this._joinSplitDateRanges(this.repairHardWrappedLines(rawText));
     const withCoreCompetencies = this._ensureCoreCompetencies(unwrapped, matchMap, confirmedSkills, jdData);
     const cleaned = this.cleanSkillsSection(
       this.ensureRoleFocusLines(
@@ -762,6 +763,52 @@ Do not add anything new. Return the complete corrected CV.`;
   }
 
   /**
+   * Rejoin a date range the model (or two-column PDF extraction) split across
+   * lines ("Feb 2024 -" / "Jun 2025") or flattened with a column gap
+   * ("Feb 2024 -    Jun 2025", "Feb 2024 - | Jun 2025") into one clean
+   * "Feb 2024 - Jun 2025" line. Runs before any entry-structure repair and
+   * needs no parsed cvData, so it fixes malformed date lines even for entries
+   * the parser failed to match. Both halves must be pure date fragments -
+   * ordinary sentences containing years never qualify.
+   */
+  _joinSplitDateRanges(text) {
+    if (!text) return text;
+
+    const MONTH = '(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)';
+    const RANGE_START_RE = new RegExp(`^(?:${MONTH}\\.?\\s+)?(?:19|20)\\d{2}\\s*(?:-|–|—|to)$`, 'i');
+    const RANGE_END_RE = new RegExp(`^(?:(?:${MONTH}\\.?\\s+)?(?:19|20)\\d{2}|present|current)$`, 'i');
+
+    const lines = String(text).split('\n');
+    const output = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      const trimmed = String(lines[i] || '').trim();
+
+      // Same-line column flatten: "Feb 2024 -   Jun 2025" / "Feb 2024 - | Jun 2025".
+      const flattened = trimmed.match(/^(.+?)\s*(?:\||\t+|\s{2,})\s*(.+)$/);
+      if (flattened && RANGE_START_RE.test(flattened[1].trim()) && RANGE_END_RE.test(flattened[2].trim())) {
+        output.push(`${flattened[1].trim()} ${flattened[2].trim()}`);
+        continue;
+      }
+
+      if (RANGE_START_RE.test(trimmed)) {
+        let next = i + 1;
+        while (next < lines.length && !String(lines[next] || '').trim()) next++;
+        const nextTrimmed = next < lines.length ? String(lines[next]).trim() : '';
+        if (RANGE_END_RE.test(nextTrimmed)) {
+          output.push(`${trimmed} ${nextTrimmed}`);
+          i = next;
+          continue;
+        }
+      }
+
+      output.push(lines[i]);
+    }
+
+    return output.join('\n');
+  }
+
+  /**
    * Move any "Focus:" line that ended up below a bullet run to just above that
    * run. Unlike normaliseRoleFocusPlacement this needs no parsed cvData, so it
    * still works when composite pipe titles defeat title matching.
@@ -817,9 +864,19 @@ Do not add anything new. Return the complete corrected CV.`;
       if (!match) return line;
 
       const [, prefix, body] = match;
-      const repaired = body
-        .replace(/\s+\b(?:and|or|with|including|across|for|to|by)\s*$/i, '')
-        .replace(/[,\s]+$/, '');
+      // Trim repeatedly until stable: a token-limit truncation can cut a
+      // bullet mid-word ("...resilience across production-"), and stripping
+      // the hyphenated fragment then exposes a dangling conjunction that
+      // needs a second pass ("...resilience across" -> "...resilience").
+      let repaired = body;
+      let previous;
+      do {
+        previous = repaired;
+        repaired = repaired
+          .replace(/\s+\S*[a-z]-$/, '')
+          .replace(/\s+\b(?:and|or|with|including|across|for|to|by)\s*$/i, '')
+          .replace(/[,\s]+$/, '');
+      } while (repaired !== previous);
 
       if (repaired === body) return line;
       return `${prefix}${repaired}.`;

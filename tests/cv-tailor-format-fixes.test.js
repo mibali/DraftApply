@@ -584,3 +584,38 @@ describe('_findRoleEntryEnd stops at an intervening role whose title carries an 
     expect(output).toContain('Delivered advanced customer-facing DevOps and platform support.');
   });
 });
+
+describe('_joinSplitDateRanges (regression)', () => {
+  it('rejoins a date range split across two lines', () => {
+    const input = 'Semgrep | USA\n\nFeb 2024 -\nJun 2025\nSenior Customer Success Engineer IC4';
+    expect(tailor._joinSplitDateRanges(input))
+      .toBe('Semgrep | USA\n\nFeb 2024 - Jun 2025\nSenior Customer Success Engineer IC4');
+  });
+
+  it('collapses a column-flattened range with a large gap or pipe into one clean line', () => {
+    expect(tailor._joinSplitDateRanges('Feb 2024 -                    Jun 2025')).toBe('Feb 2024 - Jun 2025');
+    expect(tailor._joinSplitDateRanges('Feb 2024 - | Jun 2025')).toBe('Feb 2024 - Jun 2025');
+  });
+
+  it('joins a range ending in Present and tolerates a blank line between the halves', () => {
+    expect(tailor._joinSplitDateRanges('Sep 2025 -\n\nPresent')).toBe('Sep 2025 - Present');
+  });
+
+  it('never touches ordinary prose containing years', () => {
+    const prose = 'Delivered results in 2024 -\nand beyond into 2025';
+    expect(tailor._joinSplitDateRanges(prose)).toBe(prose);
+  });
+});
+
+describe('repairDanglingBulletEndings truncated-word repair (regression)', () => {
+  it('strips a mid-word truncation fragment and the dangling conjunction it exposes', () => {
+    const input = '• Partnered with SRE and Engineering teams to improve operational resilience across production-';
+    expect(tailor.repairDanglingBulletEndings(input))
+      .toBe('• Partnered with SRE and Engineering teams to improve operational resilience.');
+  });
+
+  it('leaves complete bullets untouched', () => {
+    const input = '• Built cloud-native model serving on Kubernetes.';
+    expect(tailor.repairDanglingBulletEndings(input)).toBe(input);
+  });
+});

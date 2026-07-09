@@ -93,6 +93,8 @@ if ((!GROQ_API_KEY && !OPENROUTER_API_KEY && !LOCAL_LLM_BASE_URL) || !TOKEN_SECR
   process.exit(1);
 }
 
+const SERVER_STARTED_AT = new Date().toISOString();
+
 const app = express();
 app.disable('x-powered-by');
 // Render (and most PaaS/load-balancer setups) sit exactly one reverse-proxy
@@ -679,6 +681,13 @@ app.get('/api/health', embeddingProbeGate, async (req, res) => {
 
   res.json({
     ok: true,
+    // Which code is actually running: Render injects RENDER_GIT_COMMIT on
+    // every deploy, and startedAt shows when this process last restarted.
+    // Without these there is no way to tell whether a pushed fix is live yet.
+    build: {
+      commit: process.env.RENDER_GIT_COMMIT || null,
+      startedAt: SERVER_STARTED_AT,
+    },
     provider: GROQ_API_KEY ? 'groq' : OPENROUTER_API_KEY ? 'openrouter' : 'local-openai',
     model: GROQ_API_KEY ? GROQ_MODEL : OPENROUTER_API_KEY ? 'openrouter-free-dynamic' : LOCAL_LLM_MODEL,
     qualityMode,

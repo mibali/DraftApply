@@ -112,6 +112,11 @@ describe('Tailor CV Groq budget', () => {
     expect(route).toContain('tailorTruncated ?');
   });
 
+  it('exposes the deployed commit and process start time in /api/health so deploy state is verifiable', () => {
+    expect(renderProxyServer).toContain('process.env.RENDER_GIT_COMMIT');
+    expect(renderProxyServer).toContain('startedAt: SERVER_STARTED_AT');
+  });
+
   it('wraps CV parse and prompt build inside the try block in production', () => {
     const route = getCvTailorRoute(renderProxyServer);
     const tryIdx = route.indexOf('try {');
