@@ -765,6 +765,15 @@ Do not add anything new. Return the complete corrected CV.`;
    * Move any "Focus:" line that ended up below a bullet run to just above that
    * run. Unlike normaliseRoleFocusPlacement this needs no parsed cvData, so it
    * still works when composite pipe titles defeat title matching.
+   *
+   * A Focus line is only ever meaningful directly under a role title - if it
+   * isn't sitting above a bullet run (the case handled above) and the nearest
+   * preceding content is a section header instead, it has drifted into an
+   * unrelated section (e.g. stranded under "EDUCATION, CERTIFICATIONS &
+   * RECOGNITION" because the role it was generated for never matched during
+   * entry-boundary detection). There is no reliable way to know which role it
+   * belonged to, so drop it rather than render positioning text under the
+   * wrong heading.
    */
   repositionOrphanFocusLines(text) {
     if (!text) return text;
@@ -779,6 +788,13 @@ Do not add anything new. Return the complete corrected CV.`;
       // the model sometimes inserts between the final bullet and Focus line.
       let cursor = i - 1;
       while (cursor >= 0 && !String(lines[cursor] || '').trim()) cursor--;
+
+      if (cursor >= 0 && this._isLikelySectionHeader(String(lines[cursor] || '').trim())) {
+        lines.splice(i, 1);
+        i--;
+        continue;
+      }
+
       if (cursor < 0 || !BULLET_RE.test(String(lines[cursor] || '').trim())) continue;
 
       let runStart = cursor;
@@ -949,6 +965,37 @@ Do not add anything new. Return the complete corrected CV.`;
         }
         lines.splice(spliceStart, companyIdxBackward - spliceStart + 1, company, dates, title, ...cleanedBetween);
         searchFrom = spliceStart + 3 + cleanedBetween.length;
+        continue;
+      }
+
+      // Neither direction found a company line at all - common when this
+      // entry is a second (or later) stint at the same employer as the
+      // previous entry, and the model wrote the company name only once,
+      // above the first stint. Harvard-format multi-stint blocks are safest
+      // to restore as separate company+dates+title triplets (matching every
+      // other entry's shape, which the exporter's rendering depends on)
+      // rather than teaching the renderer a "title-only, shared company"
+      // sub-entry format. If the title itself can still be located, insert
+      // this entry's own canonical company/dates in front of it, dropping
+      // any adjacent malformed date fragment the model left in its place.
+      if (titleIdx !== -1) {
+        const LOOKBACK = 3;
+        const lookbackFloor = Math.max(searchFrom, titleIdx - LOOKBACK);
+        let spliceStart = titleIdx;
+        for (let i = titleIdx - 1; i >= lookbackFloor; i--) {
+          const trimmed = String(lines[i] || '').trim();
+          if (!trimmed || this._looksLikeDateLine(trimmed)) {
+            spliceStart = i;
+          } else {
+            break;
+          }
+        }
+        let spliceEnd = titleIdx + 1;
+        if (this._looksLikeDateLine(String(lines[titleIdx + 1] || '').trim())) {
+          spliceEnd = titleIdx + 2;
+        }
+        lines.splice(spliceStart, spliceEnd - spliceStart, company, dates, title);
+        searchFrom = spliceStart + 3;
         continue;
       }
 
@@ -2675,8 +2722,32 @@ Do not add anything new. Return the complete corrected CV.`;
     // exactly, but real/uploaded CVs and LLM output vary ("Experience",
     // "Employment History", "Work History"). Missing a variant here silently
     // keeps section-scoped logic active past the section it should stop at.
-    return /^(professional\s+summary|core\s+competenc(?:y|ies)|(?:professional\s+)?experience|employment(?:\s+history)?|work\s+history|technical\s+skills?|education|certifications?\s*(?:&|and)\s*awards?|technical\s+leadership|achievements?|projects?)\s*[:\-]?$/i
-      .test(String(line || '').trim());
+    const trimmed = String(line || '').trim();
+    if (/^(professional\s+summary|core\s+competenc(?:y|ies)|(?:professional\s+)?experience|employment(?:\s+history)?|work\s+history|technical\s+skills?|education|certifications?\s*(?:&|and)\s*awards?|technical\s+leadership|achievements?|projects?)\s*[:\-]?$/i
+      .test(trimmed)) {
+      return true;
+    }
+    // The anchored list above only matches bare section names, but real CVs
+    // routinely combine several into one heading ("EDUCATION, CERTIFICATIONS
+    // & RECOGNITION", "TECHNICAL LEADERSHIP, ACHIEVEMENTS & INNOVATION").
+    // Rather than enumerate every combination, fall back to an ALL-CAPS
+    // multi-word heuristic (mirroring cv-export.js's renderer-side check) -
+    // without it, an unrecognised compound header is invisible to
+    // entry-boundary detection, so the last experience entry's window never
+    // closes and silently swallows everything after it, including the next
+    // section's own content. Require multiple words so a single all-caps
+    // company acronym on its own line (IBM, SAP, NASA) is never mistaken for
+    // a section boundary - real section headers are always multi-word.
+    if (
+      trimmed.length >= 3 &&
+      /\s/.test(trimmed) &&
+      trimmed === trimmed.toUpperCase() &&
+      /[A-Z]/.test(trimmed) &&
+      !/[@+\d/]/.test(trimmed)
+    ) {
+      return true;
+    }
+    return false;
   }
 
   _isSkillsSectionHeader(line) {

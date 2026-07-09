@@ -101,6 +101,19 @@ function moveFocusLinesAboveBulletRuns(lines) {
 
     let cursor = i - 1;
     while (cursor >= 0 && !String(output[cursor] || '').trim()) cursor--;
+
+    // A Focus line is only ever meaningful directly under a role title. If
+    // it isn't above a bullet run and the nearest preceding content is a
+    // section header instead, it has drifted into an unrelated section
+    // (e.g. stranded under "EDUCATION, CERTIFICATIONS & RECOGNITION"). There
+    // is no reliable way to know which role it belonged to, so drop it
+    // rather than render positioning text under the wrong heading.
+    if (cursor >= 0 && isSectionHeader(String(output[cursor] || '').trim())) {
+      output.splice(i, 1);
+      i--;
+      continue;
+    }
+
     if (cursor < 0 || !BULLET_RE.test(String(output[cursor] || '').trim())) continue;
 
     let runStart = cursor;

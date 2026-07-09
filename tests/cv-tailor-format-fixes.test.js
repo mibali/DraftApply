@@ -448,3 +448,94 @@ describe('full finalizeTailoredCV pipeline on a realistic multi-entry CV (regres
     expect(output).toContain('Bincom ICT Solutions\nFeb 2019 - May 2020\nPython Developer');
   });
 });
+
+describe('_isLikelySectionHeader compound headings (regression)', () => {
+  // _findRoleEntryEnd/_findExperienceEntryEnd stop scanning a role's block at
+  // the first recognised section header. The anchored regex only matched bare
+  // section names ("Education"), so a compound heading like "EDUCATION,
+  // CERTIFICATIONS & RECOGNITION" was invisible to it - the last experience
+  // entry's window silently extended to end-of-document, swallowing whatever
+  // came after that heading as if it still belonged to that role.
+  it('recognises a compound ALL-CAPS heading as a section boundary', () => {
+    expect(tailor._isLikelySectionHeader('EDUCATION, CERTIFICATIONS & RECOGNITION')).toBe(true);
+    expect(tailor._isLikelySectionHeader('TECHNICAL LEADERSHIP, ACHIEVEMENTS & INNOVATION')).toBe(true);
+  });
+
+  it('does not treat a bare all-caps company acronym as a section boundary', () => {
+    expect(tailor._isLikelySectionHeader('IBM')).toBe(false);
+    expect(tailor._isLikelySectionHeader('NASA')).toBe(false);
+  });
+
+  it('stops an experience entry window at a compound section heading', () => {
+    const cvData = { experience: [{ company: 'Bincom ICT Solutions', title: 'Python Developer', dates: 'Feb 2019 - May 2020', responsibilities: [] }] };
+    const lines = [
+      'Bincom ICT Solutions', 'Feb 2019 - May 2020', 'Python Developer',
+      '• Developed reusable, testable Python code for production systems.',
+      '', 'EDUCATION, CERTIFICATIONS & RECOGNITION', 'BSc Information Technology',
+    ];
+    const titleKeys = new Set(cvData.experience.map(exp => tailor._normaliseText(exp.title)));
+    const entryEnd = tailor._findRoleEntryEnd(lines, 2, titleKeys);
+    expect(lines[entryEnd]).toBe('EDUCATION, CERTIFICATIONS & RECOGNITION');
+  });
+});
+
+describe('repositionOrphanFocusLines drops Focus lines stranded under a section header (regression)', () => {
+  it('removes a Focus line that ended up directly under a later section heading instead of a role', () => {
+    const text = [
+      'Bincom ICT Solutions', 'Feb 2019 - May 2020', 'Python Developer',
+      '• Developed reusable, testable Python code for production systems.',
+      '',
+      'EDUCATION, CERTIFICATIONS & RECOGNITION',
+      'Focus: cloud infrastructure, platform reliability, CI/CD and release engineering, observability and monitoring, and engineering enablement',
+      '• BSc Information Technology, University of Cape Coast, 2018',
+    ].join('\n');
+
+    const output = tailor.repositionOrphanFocusLines(text);
+    expect(output).not.toMatch(/Focus:/);
+    expect(output).toContain('EDUCATION, CERTIFICATIONS & RECOGNITION\n• BSc Information Technology');
+  });
+
+  it('still repositions a Focus line correctly stranded below a bullet run', () => {
+    const text = [
+      'Bincom ICT Solutions', 'Feb 2019 - May 2020', 'Python Developer',
+      '• Developed reusable, testable Python code for production systems.',
+      'Focus: backend systems and production reliability',
+    ].join('\n');
+
+    const output = tailor.repositionOrphanFocusLines(text);
+    const lines = output.split('\n');
+    expect(lines[3]).toBe('Focus: backend systems and production reliability');
+  });
+});
+
+describe('restoreLockedExperienceDates handles multiple stints at the same employer (regression)', () => {
+  // Real CVs commonly list an internal promotion as two experience entries
+  // sharing one company, with the model writing the company name only once
+  // (above the first/most-recent stint). The original implementation only
+  // ever looked for a company line per entry; once the shared line was
+  // consumed restoring the first stint, the second stint's company search
+  // always failed and the entry was left completely unrestructured -
+  // producing exactly the malformed split-date/no-company block seen live.
+  it('restores a complete company/dates/title block for both stints instead of leaving the second one malformed', () => {
+    const cvData = {
+      experience: [
+        { company: 'Sourcegraph | USA / Remote', title: 'Senior Customer Success Engineer', dates: 'Feb 2024 - Jun 2025', responsibilities: [] },
+        { company: 'Sourcegraph | USA / Remote', title: 'Senior Technical Support Engineer', dates: 'Jul 2021 - Feb 2024', responsibilities: [] },
+      ],
+    };
+    const rawText = [
+      'Feb 2024 -                    Jun 2025',
+      'Senior Customer Success Engineer IC4',
+      '• Resolved complex Tier 3/4 security platform issues.',
+      'Sourcegraph | USA / Remote',
+      'Jul 2021 - Feb 2024',
+      'Senior Technical Support Engineer',
+      '• Delivered advanced customer-facing DevOps and platform support.',
+    ].join('\n');
+
+    const output = tailor.restoreLockedExperienceDates(rawText, cvData);
+    expect(output).toContain('Sourcegraph | USA / Remote\nFeb 2024 - Jun 2025\nSenior Customer Success Engineer');
+    expect(output).toContain('Sourcegraph | USA / Remote\nJul 2021 - Feb 2024\nSenior Technical Support Engineer');
+    expect((output.match(/Sourcegraph \| USA \/ Remote/g) || [])).toHaveLength(2);
+  });
+});
