@@ -539,3 +539,48 @@ describe('restoreLockedExperienceDates handles multiple stints at the same emplo
     expect((output.match(/Sourcegraph \| USA \/ Remote/g) || [])).toHaveLength(2);
   });
 });
+
+describe('_findRoleEntryEnd stops at an intervening role whose title carries an unrecognised suffix (regression)', () => {
+  // A role's own title is found with a startsWith fallback (_findTitleLineIndex
+  // already tolerates a suffix like " IC4" or " - Transitioned from X"), but
+  // _findRoleEntryEnd used to check ONLY exact/pipe-segment title matches when
+  // deciding where a role's content window ends. A later role whose OWN title
+  // line also carried an unrecognised suffix was invisible as a boundary, so
+  // an earlier role's window silently swallowed that entire intervening role's
+  // company line, dates, title, and bullets - corrupting Focus placement and,
+  // via downstream bullet-processing that shares this same window, bullet
+  // content itself.
+  const cvData = {
+    experience: [
+      { company: 'Sourcegraph | UK', title: 'DevOps & Platform Engineer IC4', dates: 'Feb 2026 - Present', responsibilities: [] },
+      { company: 'Semgrep | USA', title: 'Senior Customer Success Engineer', dates: 'Feb 2024 - Jun 2025', responsibilities: [] },
+      { company: 'Sourcegraph | USA / Remote', title: 'Senior Technical Support Engineer', dates: 'Jul 2021 - Feb 2024', responsibilities: [] },
+    ],
+  };
+  const lines = [
+    'Sourcegraph | UK', 'Feb 2026 - Present',
+    'DevOps & Platform Engineer IC4 - Transitioned from Senior Technical Support Engineer',
+    'Focus: Improving platform reliability',
+    '• Improved platform reliability by leading mitigation of high-impact production incidents.',
+    '• Partnered with SRE and Engineering teams to improve architecture, scalability, telemetry coverage, and operational resilience.',
+    'Semgrep | USA', 'Feb 2024 - Jun 2025', 'Senior Customer Success Engineer IC4',
+    '• Resolved complex Tier 3/4 security platform issues.',
+    'Sourcegraph | USA / Remote', 'Jul 2021 - Feb 2024', 'Senior Technical Support Engineer',
+    '• Delivered advanced customer-facing DevOps and platform support.',
+  ];
+
+  it('stops the first role window at the intervening role\'s company line, not past its entire block', () => {
+    const titleKeys = new Set(cvData.experience.map(exp => tailor._normaliseText(exp.title)));
+    const companyKeys = new Set(cvData.experience.map(exp => tailor._normaliseText(exp.company)));
+    const entryEnd = tailor._findRoleEntryEnd(lines, 2, titleKeys, companyKeys, tailor._normaliseText('Sourcegraph | UK'));
+    expect(lines[entryEnd]).toBe('Semgrep | USA');
+  });
+
+  it('keeps every role\'s Focus line and bullets intact through the full pipeline despite the suffixed titles', () => {
+    const text = lines.join('\n');
+    const output = tailor.normaliseRoleFocusPlacement(text, cvData);
+    expect(output.split('\n').filter(l => l.trim().startsWith('Focus:'))).toHaveLength(1);
+    expect(output).toContain('Resolved complex Tier 3/4 security platform issues.');
+    expect(output).toContain('Delivered advanced customer-facing DevOps and platform support.');
+  });
+});

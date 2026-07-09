@@ -1851,7 +1851,12 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
     const completion = await callChatCompletionWithFallback({
       workflow: 'cv_tailor',
       temperature: 0.3,
-      maxTokens: 4000,
+      // CVs with many roles (senior candidates commonly have 6-7+) push the
+      // full regenerated text close to 4000 tokens; a model that spends any
+      // of its budget on preamble/reasoning before the CV body can then get
+      // cut off mid-sentence, silently dropping trailing bullets. 6000 gives
+      // real headroom without materially increasing cost for typical CVs.
+      maxTokens: 6000,
       timeoutMs: 50000,
       fallbackTimeoutMs: 50000,
       maxFallbackModels: 2,
@@ -1867,6 +1872,10 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
     if (!data) {
       console.error(`[DraftApply] ${tailorProvider} tailor response body failed to parse`);
       return res.status(502).json({ error: 'Unexpected response from AI provider. Please try again.' });
+    }
+    const tailorTruncated = data?.choices?.[0]?.finish_reason === 'length';
+    if (tailorTruncated) {
+      console.warn(`[DraftApply] ${tailorProvider} tailor response was truncated (finish_reason=length) - output may be missing trailing content.`);
     }
     let tailoredCvText = tailor.finalizeTailoredCV(data?.choices?.[0]?.message?.content, {
       cvData,
@@ -1886,7 +1895,7 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
       const auditCompletion = await callChatCompletionWithFallback({
         workflow: 'cv_tailor',
         temperature: auditTemperature,
-        maxTokens: 4500,
+        maxTokens: 6500,
         timeoutMs: 30000,
         fallbackTimeoutMs: 30000,
         maxFallbackModels: 2,
@@ -1899,7 +1908,16 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
 
       const auditData = await auditCompletion.response.json().catch(() => null);
       const auditedText = auditData?.choices?.[0]?.message?.content;
-      if (auditedText?.trim() && tailor.isValidCvOutput(auditedText)) {
+      // The audit pass rewrites the ENTIRE CV, not a diff - if the provider's
+      // response was cut off by the token budget, the result is a shorter,
+      // truncated CV that still structurally "looks like" one (has all the
+      // section headers isValidCvOutput checks for). Reject it outright
+      // rather than let a truncated rewrite silently replace the complete
+      // pre-audit text.
+      if (auditData?.choices?.[0]?.finish_reason === 'length') {
+        auditSkipped = true;
+        console.warn('[DraftApply] Audit output rejected: response was truncated (finish_reason=length)');
+      } else if (auditedText?.trim() && tailor.isValidCvOutput(auditedText)) {
         const finalizedAudit = tailor.finalizeTailoredCV(auditedText, {
           cvData,
           jdData,
@@ -1921,6 +1939,7 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
     }
 
     const warnings        = [
+      ...(tailorTruncated ? ['The AI response may have been cut short for this CV (it has a lot of experience to cover) - please check the end of each role for missing content before using it.'] : []),
       ...tailor.validateTailoredCV(cvData, tailoredCvText),
       ...tailor.validateTailoringQuality(cvData, jdData, matchMap, tailoredCvText, confirmedSkills),
     ];

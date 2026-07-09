@@ -1016,6 +1016,11 @@ Do not add anything new. Return the complete corrected CV.`;
         .map(exp => this._normaliseText(exp.title))
         .filter(Boolean)
     );
+    const companyKeys = new Set(
+      (cvData.experience || [])
+        .map(exp => this._normaliseText(exp.company))
+        .filter(Boolean)
+    );
     let searchFrom = 0;
 
     for (const exp of (cvData.experience || [])) {
@@ -1025,7 +1030,7 @@ Do not add anything new. Return the complete corrected CV.`;
       const titleIdx = this._findTitleLineIndex(lines, title, searchFrom);
       if (titleIdx === -1) continue;
 
-      const entryEnd = this._findRoleEntryEnd(lines, titleIdx, titleKeys);
+      const entryEnd = this._findRoleEntryEnd(lines, titleIdx, titleKeys, companyKeys, this._normaliseText(exp.company));
       const focusIndices = [];
       for (let i = titleIdx + 1; i < entryEnd; i++) {
         if (/^focus\s*:/i.test(String(lines[i] || '').trim())) {
@@ -2344,12 +2349,17 @@ Do not add anything new. Return the complete corrected CV.`;
   }
 
   // Whether `rawLine` represents `normalisedTarget` as an entry-boundary
-  // marker - either an exact match, or (for composite "A | B" lines like
-  // "Cloud Support Engineer | Cloud Service SME") any pipe-segment matching
-  // exactly. Centralised so every entry-boundary detector agrees on what
-  // counts as a match - three independent exact-match checks
-  // (_findTitleLineIndex, _findRoleEntryEnd, _findExperienceEntryEnd) is
-  // exactly how a composite-pipe-title fix landed in only one of them,
+  // marker - an exact match, a pipe-segment match (for composite "A | B"
+  // lines like "Cloud Support Engineer | Cloud Service SME"), or a prefix
+  // match at a genuine word boundary (for a preserved title the LLM appended
+  // a suffix to, like "Senior Customer Success Engineer IC4" or "DevOps
+  // Engineer - Transitioned from Senior Technical Support Engineer").
+  // _findTitleLineIndex already tolerates all three shapes when locating a
+  // role's OWN title; this centralises the same tolerance for detecting when
+  // scanning has crossed INTO a different role, so every entry-boundary
+  // detector agrees on what counts as a match - three independent exact-match
+  // checks (_findTitleLineIndex, _findRoleEntryEnd, _findExperienceEntryEnd)
+  // is exactly how a composite-pipe-title fix landed in only one of them,
   // silently breaking entry-boundary detection for composite-titled roles
   // in the other two (a later role's Focus/bullets get scooped into an
   // earlier role's window because the boundary between them was missed).
@@ -2360,16 +2370,29 @@ Do not add anything new. Return the complete corrected CV.`;
     if (String(rawLine || '').includes('|')) {
       return String(rawLine).split('|').some(seg => this._normaliseText(seg) === normalisedTarget);
     }
+    if (line.startsWith(normalisedTarget)) {
+      const rest = line.slice(normalisedTarget.length);
+      if (!rest || /^[\s\-–—(:,]/.test(rest)) return true;
+    }
     return false;
   }
 
-  _findRoleEntryEnd(lines, titleIdx, titleKeys = new Set()) {
+  _findRoleEntryEnd(lines, titleIdx, titleKeys = new Set(), companyKeys = new Set(), currentCompanyKey = '') {
     for (let i = titleIdx + 1; i < lines.length; i++) {
       const trimmed = String(lines[i] || '').trim();
       if (!trimmed) continue;
       if (this._isLikelySectionHeader(trimmed)) return i;
 
       if (i > titleIdx + 1 && [...titleKeys].some(key => this._lineMatchesBoundaryValue(trimmed, key))) {
+        return i;
+      }
+      // Titles alone miss the boundary when an intervening role's title also
+      // carries an unrecognised suffix - a company line is a second, more
+      // reliable signal that scanning has crossed into a different role.
+      // Exclude this role's own company so a coincidental repeat within its
+      // own block can never falsely truncate it.
+      const isOtherCompany = [...companyKeys].some(key => key !== currentCompanyKey && this._lineMatchesBoundaryValue(trimmed, key));
+      if (i > titleIdx + 1 && isOtherCompany) {
         return i;
       }
     }

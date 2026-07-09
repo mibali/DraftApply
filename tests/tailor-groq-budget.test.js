@@ -95,10 +95,21 @@ describe('Tailor CV Groq budget', () => {
     expect(route).toContain('auditSkipped');
   });
 
-  it('uses 4500 max tokens for the audit call in production', () => {
+  it('uses 6500 max tokens for the audit call in production', () => {
     const route = getCvTailorRoute(renderProxyServer);
-    expect(route).toContain('maxTokens: 4500');
+    expect(route).toContain('maxTokens: 6500');
     expect(route).not.toContain('maxTokens: 3500');
+  });
+
+  it('rejects a truncated audit response instead of replacing the tailored CV with a cut-off rewrite', () => {
+    const route = getCvTailorRoute(renderProxyServer);
+    expect(route).toContain("auditData?.choices?.[0]?.finish_reason === 'length'");
+  });
+
+  it('surfaces a warning when the primary tailor response was truncated', () => {
+    const route = getCvTailorRoute(renderProxyServer);
+    expect(route).toContain("tailorTruncated = data?.choices?.[0]?.finish_reason === 'length'");
+    expect(route).toContain('tailorTruncated ?');
   });
 
   it('wraps CV parse and prompt build inside the try block in production', () => {

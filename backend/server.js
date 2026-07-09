@@ -544,7 +544,10 @@ app.post('/api/cv/tailor', async (req, res) => {
 
     const result = await generateWithFallback(FALLBACK_CHAIN, messages, {
       temperature: 0.3,
-      max_tokens: 4000
+      // Kept in sync with render-proxy/server.js's production tailor route -
+      // CVs with many roles push the regenerated text close to the old 4000
+      // token cap, risking a mid-sentence cutoff that drops trailing content.
+      max_tokens: 6000
     });
 
     let tailoredCvText = tailor.finalizeTailoredCV(result.answer, {
@@ -564,7 +567,7 @@ app.post('/api/cv/tailor', async (req, res) => {
       const auditResult = await generateWithFallback(FALLBACK_CHAIN, [
         { role: 'system', content: auditSystemPrompt },
         { role: 'user',   content: auditUserPrompt },
-      ], { temperature: auditTemperature, max_tokens: 4500 });
+      ], { temperature: auditTemperature, max_tokens: 6500 });
       const auditedText = auditResult.answer;
       if (auditedText?.trim() && tailor.isValidCvOutput(auditedText)) {
         const finalizedAudit = tailor.finalizeTailoredCV(auditedText, {
