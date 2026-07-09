@@ -17,6 +17,7 @@
  *     jdData:          object?,
  *     matchMap:        object[]?,
  *     roleProfile:     object?,
+ *     domainRisk:      object?,
  *     jobTitle:        string?,
  *     company:         string?,
  *     jobDescription:  string?,
@@ -1046,6 +1047,27 @@ function buildUnsupportedBridge(matchMap, question, qType) {
   return `NOT CONFIRMED BY THE CV OR USER REVIEW:\n${lines.join('\n')}\nIf the question asks about one of these directly, do not claim it. Say "Not directly" and pivot to the closest truthful adjacent experience.\n\n`;
 }
 
+function buildDomainRiskBlock(domainRisk, qType) {
+  if (!domainRisk?.detected || ['salary', 'short_factual', 'data_extraction'].includes(qType)) return '';
+  const profile = domainRisk.primaryProfile?.label || 'Domain-sensitive role';
+  const warnings = Array.isArray(domainRisk.credentialWarnings) ? domainRisk.credentialWarnings : [];
+  const prompts = Array.isArray(domainRisk.reviewPrompts) ? domainRisk.reviewPrompts : [];
+  const missingCredentials = [...new Set(warnings.flatMap(item => item.missingCredentials || []))]
+    .map(item => String(item || '').trim())
+    .filter(Boolean)
+    .slice(0, 8);
+
+  let block = `DOMAIN REVIEW GUARD:\n  Detected profile: ${profile}.\n`;
+  if (missingCredentials.length > 0) {
+    block += `  Do not claim these credentials unless they are explicitly present in the CV or user-confirmed: ${missingCredentials.join(', ')}.\n`;
+  }
+  if (prompts.length > 0) {
+    block += `  Review prompts before strong claims: ${prompts.slice(0, 3).join(' | ')}\n`;
+  }
+  block += '  If a regulated credential, clearance, license, certification, publication, or portfolio proof is not supported, leave it out or frame the answer as adjacent/transferable experience.\n\n';
+  return block;
+}
+
 function buildRoleCredibilityBlock(jdData, qType) {
   const roleProfile = jdData?.roleProfile;
   if (!roleProfile || ['salary', 'short_factual'].includes(qType)) return '';
@@ -1102,7 +1124,7 @@ function buildRoleCredibilityBlock(jdData, qType) {
  * (role signals first, then matched proof points closest to the answer task).
  * If neither insertion point is found the prompt is returned unchanged.
  */
-function injectHints(userPrompt, evidenceHint, jdFocusBlock, roleCredibilityBlock, bridge, unsupportedBridge = '') {
+function injectHints(userPrompt, evidenceHint, jdFocusBlock, roleCredibilityBlock, bridge, unsupportedBridge = '', domainRiskBlock = '') {
   let p = userPrompt;
   if (evidenceHint) {
     p = p.replace(/^MY CV:/m, `${evidenceHint}MY CV:`);
@@ -1118,6 +1140,9 @@ function injectHints(userPrompt, evidenceHint, jdFocusBlock, roleCredibilityBloc
   }
   if (unsupportedBridge) {
     p = p.replace(/^(Question:|Write a cover letter)/m, `${unsupportedBridge}$1`);
+  }
+  if (domainRiskBlock) {
+    p = p.replace(/^(Question:|Write a cover letter)/m, `${domainRiskBlock}$1`);
   }
   return p;
 }
@@ -1136,6 +1161,7 @@ export function buildPrompts(input) {
     jdData,
     matchMap,
     roleProfile,
+    domainRisk,
     jobTitle,
     company,
     jobDescription,
@@ -1237,8 +1263,9 @@ export function buildPrompts(input) {
     const roleCredibilityBlock = buildRoleCredibilityBlock(enrichedJdData, qType);
     const bridge = buildRequirementsBridge(matchMap, question, qType);
     const unsupportedBridge = buildUnsupportedBridge(matchMap, question, qType);
-    if (evidenceHint || jdFocusBlock || roleCredibilityBlock || bridge || unsupportedBridge) {
-      result = { ...result, userPrompt: injectHints(result.userPrompt, evidenceHint, jdFocusBlock, roleCredibilityBlock, bridge, unsupportedBridge) };
+    const domainRiskBlock = buildDomainRiskBlock(domainRisk, qType);
+    if (evidenceHint || jdFocusBlock || roleCredibilityBlock || bridge || unsupportedBridge || domainRiskBlock) {
+      result = { ...result, userPrompt: injectHints(result.userPrompt, evidenceHint, jdFocusBlock, roleCredibilityBlock, bridge, unsupportedBridge, domainRiskBlock) };
     }
   }
 

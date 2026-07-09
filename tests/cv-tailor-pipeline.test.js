@@ -78,15 +78,18 @@ Senior Technical Support Engineer
     );
     const html = formatCvToHtml(tailoredCvText);
     const text = visibleText(html);
-    const bulletTexts = [...html.matchAll(/<li>([\s\S]*?)<\/li>/g)].map(match => visibleText(match[1]));
+    const itemTexts = [
+      ...[...html.matchAll(/<li>([\s\S]*?)<\/li>/g)].map(match => visibleText(match[1])),
+      ...[...html.matchAll(/<p class="cv-skill-row">([\s\S]*?)<\/p>/g)].map(match => visibleText(match[1])),
+    ];
 
     expect(text).not.toMatch(/4\+ years of experience/i);
     expect(text).not.toMatch(/highly preferred/i);
     expect(text).not.toMatch(/Bachelor.*related field/i);
     expect(text).not.toMatch(/deploying and managing AI, ML models/i);
-    expect(bulletTexts.every(item => item.length <= 160)).toBe(true);
-    expect(bulletTexts.some(item => /Model Serving & Infrastructure: .*Docker.*Kubernetes/.test(item))).toBe(true);
-    expect(bulletTexts.some(item => /Programming & Automation: .*Python.*Bash/.test(item))).toBe(true);
+    expect(itemTexts.every(item => item.length <= 160)).toBe(true);
+    expect(itemTexts.some(item => /Model Serving & Infrastructure: .*Docker.*Kubernetes/.test(item))).toBe(true);
+    expect(itemTexts.some(item => /Programming & Automation: .*Python.*Bash/.test(item))).toBe(true);
     expect(text).toMatch(/\bTerraform\b/);
     expect(text).toMatch(/\bGit\b/);
   });

@@ -22,21 +22,41 @@ export class CVParser {
    * @returns {Object} Structured CV data
    */
   parse(text) {
-    this.rawText = text;
-    const experience = this.extractExperience(text);
+    const normalizedText = this._insertMissingSpaceBeforeMonths(text);
+    this.rawText = normalizedText;
+    const experience = this.extractExperience(normalizedText);
 
     this.structured = {
-      contactInfo: this.extractContactInfo(text),
-      summary: this.extractSummary(text),
+      contactInfo: this.extractContactInfo(normalizedText),
+      summary: this.extractSummary(normalizedText),
       experience,
-      education: this.extractEducation(text),
-      skills: this.extractSkills(text),
-      achievements: this.extractAchievements(text, experience),
-      certifications: this.extractCertifications(text),
-      rawText: text
+      education: this.extractEducation(normalizedText),
+      skills: this.extractSkills(normalizedText),
+      achievements: this.extractAchievements(normalizedText, experience),
+      certifications: this.extractCertifications(normalizedText),
+      rawText: normalizedText
     };
 
     return this.structured;
+  }
+
+  // PDF/DOCX text extraction sometimes squishes a location directly against
+  // a following date with no space (e.g. "Birmingham, UKSep 2021 - Present"),
+  // because the two were visually separated (different columns/alignment) in
+  // the original document but have no whitespace between them once
+  // flattened to plain text. Without a space, date-detection regexes'
+  // word-boundary requirement fails to recognize the month (no \b between
+  // two letters), so the whole garbled string gets misclassified as a
+  // company/job-title/institution field instead of being split into its
+  // real location and date parts. Idempotent: already-spaced text is
+  // untouched since the pattern requires no space between the letter and
+  // the month name.
+  _insertMissingSpaceBeforeMonths(text) {
+    const month = '(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)';
+    return String(text || '').replace(
+      new RegExp(`([a-zA-Z])(${month}\\.?\\s+(?:19|20)\\d{2})`, 'g'),
+      '$1 $2'
+    );
   }
 
   extractContactInfo(text) {

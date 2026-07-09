@@ -1,11 +1,13 @@
 import { CVParser } from './cv-parser.js';
 import { JDParser } from './jd-parser.js';
 import { CVTailor } from './cv-tailor.js';
+import { classifyDomainRisk } from './domain-packs/domain-classifier.js';
 
 export const APPLICATION_ANSWER_AGENTS = [
   'Question Classifier Agent',
   'CV Grounding Agent',
   'Job Context Matcher',
+  'Domain Risk Classifier',
   'Answer Drafting Agent',
   'Tone & Length Agent',
   'Truthfulness Guard Agent',
@@ -17,6 +19,7 @@ export const TAILORED_CV_AGENTS = [
   'CV Parsing Agent',
   'Match Scoring Agent',
   'Gap Analysis Agent',
+  'Domain Risk Classifier',
   'Keyword Optimisation Agent',
   'CV Rewrite Agent',
   'ATS Formatting Agent',
@@ -237,7 +240,21 @@ export function atsFormattingAgent(jdData = {}, matchMap = []) {
   };
 }
 
-export function truthfulnessGuardAgent(matchMap = []) {
+export function domainRiskClassifierAgent({
+  cvText = '',
+  jobDescription = '',
+  jobTitle = '',
+  cvData = null,
+  jdData = null,
+} = {}) {
+  return classifyDomainRisk({ cvText, jobDescription, jobTitle, cvData, jdData });
+}
+
+export function truthfulnessGuardAgent(matchMap = [], domainRisk = null) {
+  const domainCredentialWarnings = Array.isArray(domainRisk?.credentialWarnings)
+    ? domainRisk.credentialWarnings
+    : [];
+
   return {
     unsupportedClaims: (matchMap || [])
       .filter(item => !item.allowedToMention)
@@ -253,7 +270,12 @@ export function truthfulnessGuardAgent(matchMap = []) {
       'Do not claim unsupported tools, credentials, employers, dates, or metrics.',
       'User-confirmed skills may be added only when explicitly confirmed.',
       'Transferable experience must be framed honestly.',
+      ...(domainRisk?.detected ? [
+        'Apply domain-specific review prompts before claiming regulated credentials, clearances, licenses, publications, or portfolio proof.',
+      ] : []),
     ],
+    domainCredentialWarnings,
+    reviewRequired: Boolean(domainRisk?.reviewRequired || domainCredentialWarnings.length > 0),
   };
 }
 
@@ -285,15 +307,23 @@ export function normalizeMatchReport(summary = {}, matchMap = []) {
 export function rebuildTailoredCvAgentContext(context = {}, matchMap = [], tailor = new CVTailor()) {
   const effectiveMatchMap = Array.isArray(matchMap) ? matchMap : [];
   const rawMatchReport = matchScoringAgent(effectiveMatchMap, tailor);
+  const domainRisk = context.domainRisk || domainRiskClassifierAgent({
+    cvText: context.cvText || '',
+    jobDescription: context.jobDescription || '',
+    jobTitle: context.jdData?.jobTitle || '',
+    cvData: context.cvData,
+    jdData: context.jdData,
+  });
 
   return {
     ...context,
     matchMap: effectiveMatchMap,
     matchReport: normalizeMatchReport(rawMatchReport, effectiveMatchMap),
     gapAnalysis: gapAnalysisAgent(effectiveMatchMap),
+    domainRisk,
     keywordOptimisation: keywordOptimisationAgent(effectiveMatchMap, context.jdData),
     atsFormatting: atsFormattingAgent(context.jdData, effectiveMatchMap),
-    truthfulness: truthfulnessGuardAgent(effectiveMatchMap),
+    truthfulness: truthfulnessGuardAgent(effectiveMatchMap, domainRisk),
   };
 }
 
@@ -321,6 +351,13 @@ export function runApplicationAnswerAgents({
       : [];
   const candidateEvidenceMap = candidateEvidenceMapAgent(parsedCv);
   const roleRequirementMap = parsedJd ? roleRequirementMapAgent(parsedJd) : null;
+  const domainRisk = domainRiskClassifierAgent({
+    cvText,
+    jobDescription,
+    jobTitle,
+    cvData: parsedCv,
+    jdData: parsedJd,
+  });
   const cvGrounding = cvGroundingAgent(question, candidateEvidenceMap);
   const jobContextMatch = roleRequirementMap
     ? jobContextMatcherAgent(question, roleRequirementMap, effectiveMatchMap)
@@ -335,9 +372,10 @@ export function runApplicationAnswerAgents({
     matchMap: effectiveMatchMap,
     candidateEvidenceMap,
     roleRequirementMap,
+    domainRisk,
     relevantEvidence: cvGrounding.evidence,
     matchedRequirements: jobContextMatch.matchedRequirements,
-    truthfulness: truthfulnessGuardAgent(effectiveMatchMap),
+    truthfulness: truthfulnessGuardAgent(effectiveMatchMap, domainRisk),
   };
 }
 
@@ -360,6 +398,8 @@ export function runTailoredCvAgents({
   return rebuildTailoredCvAgentContext({
     workflow: 'tailoredCv',
     agentChain: TAILORED_CV_AGENTS,
+    cvText,
+    jobDescription,
     cvData: parsedCv,
     jdData: parsedJd,
     candidateEvidenceMap: candidateEvidenceMapAgent(parsedCv),

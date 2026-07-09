@@ -22,6 +22,12 @@ import {
   rerankMatchMapWithEmbeddings,
 } from '../shared/evidence-retrieval.js';
 import {
+  isHfInferenceRouterUrl,
+  localEmbeddingsUrl,
+  buildEmbeddingsRequestBody,
+  parseEmbeddingsResponse,
+} from '../shared/hf-inference-client.js';
+import {
   coercePositiveInteger,
   OpenRouterFreeModelCache,
   PREFERRED_OPENROUTER_FREE_MODELS,
@@ -89,6 +95,15 @@ if ((!GROQ_API_KEY && !OPENROUTER_API_KEY && !LOCAL_LLM_BASE_URL) || !TOKEN_SECR
 
 const app = express();
 app.disable('x-powered-by');
+// Render (and most PaaS/load-balancer setups) sit exactly one reverse-proxy
+// hop in front of this app. Without this, Express's req.ip resolves to that
+// proxy's own address for every caller - not the real client - which
+// collapses every per-IP rate limiter (registerLimiter, generateLimiter,
+// healthProbeLimiter) into one shared global bucket instead of isolating
+// callers from each other. `1` trusts exactly the first hop's
+// X-Forwarded-For entry; it must not be set to `true` (trust the whole
+// chain), which would let a client spoof its own IP via that header.
+app.set('trust proxy', 1);
 app.use(helmet());
 app.use(cors({
   exposedHeaders: ['RateLimit-Limit', 'RateLimit-Remaining', 'RateLimit-Reset', 'RateLimit-Policy']
@@ -305,28 +320,6 @@ function localChatCompletionsUrl(rawBaseUrl) {
   return `${base}/v1/chat/completions`;
 }
 
-// Hugging Face's Inference Providers router does not implement the
-// OpenAI-compatible /v1/embeddings route (only chat completions) - embedding
-// models there are called at /hf-inference/models/{model} with a native
-// {inputs: [...]} request and a plain array-of-vectors response, not the
-// OpenAI {data: [{embedding}]} shape. Detect that host and speak its shape.
-function isHfInferenceRouterUrl(rawBaseUrl) {
-  return /(^|\.)router\.huggingface\.co$/i.test(
-    (() => {
-      try { return new URL(rawBaseUrl).hostname; } catch { return ''; }
-    })()
-  );
-}
-
-function localEmbeddingsUrl(rawBaseUrl, model) {
-  const base = String(rawBaseUrl || '').trim().replace(/\/+$/, '');
-  if (!base) return '';
-  if (isHfInferenceRouterUrl(base)) return `${base}/models/${model}`;
-  if (/\/embeddings$/i.test(base)) return base;
-  if (/\/v1$/i.test(base)) return `${base}/embeddings`;
-  return `${base}/v1/embeddings`;
-}
-
 async function callEmbeddingEndpoint(texts, {
   timeoutMs = LOCAL_EMBEDDING_TIMEOUT_MS,
   model = LOCAL_EMBEDDING_MODEL,
@@ -348,7 +341,7 @@ async function callEmbeddingEndpoint(texts, {
         Authorization: `Bearer ${LOCAL_EMBEDDING_API_KEY}`,
       },
       signal: controller.signal,
-      body: JSON.stringify(useHfNativeShape ? { inputs: input } : { model, input }),
+      body: JSON.stringify(buildEmbeddingsRequestBody(useHfNativeShape, model, input)),
     });
 
     if (!response.ok) {
@@ -357,11 +350,7 @@ async function callEmbeddingEndpoint(texts, {
     }
 
     const data = await response.json();
-    const embeddings = useHfNativeShape
-      ? (Array.isArray(data) ? data : [])
-      : (data?.data || [])
-          .sort((a, b) => Number(a.index || 0) - Number(b.index || 0))
-          .map(item => item.embedding);
+    const embeddings = parseEmbeddingsResponse(useHfNativeShape, data);
 
     if (embeddings.length !== input.length) {
       throw new LLMProviderError('local-openai-embeddings', 502, 'Embedding count mismatch', null, model);
@@ -640,6 +629,17 @@ const generateLimiter = rateLimit({
   }
 });
 
+// /api/health itself is intentionally open (no auth, no limiter) for uptime
+// monitors. But ?probe=embedding makes one real, billed call to the
+// configured embedding provider - without a limiter here, an unauthenticated
+// caller could loop that query param to run up the operator's provider bill.
+const healthProbeLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 function authRequired(req, res, next) {
   if (!TOKEN_SECRET) return res.status(500).json({ error: 'Server misconfigured' });
   const t = getBearerToken(req);
@@ -649,7 +649,14 @@ function authRequired(req, res, next) {
   next();
 }
 
-app.get('/api/health', async (req, res) => {
+// Only gate the paid ?probe=embedding path - plain /api/health stays open
+// and unthrottled for uptime monitors.
+function embeddingProbeGate(req, res, next) {
+  if (req.query.probe === 'embedding') return healthProbeLimiter(req, res, next);
+  return next();
+}
+
+app.get('/api/health', embeddingProbeGate, async (req, res) => {
   const applicationRoute = selectModelRoute('application_answer', {
     hasLocal: Boolean(LOCAL_LLM_BASE_URL),
     hasHosted: Boolean(GROQ_API_KEY || OPENROUTER_API_KEY),
@@ -869,6 +876,11 @@ function buildQualityMetadata(completion = {}) {
 function buildTruthfulnessReport(context = {}) {
   if (!context) return undefined;
   const matchMap = Array.isArray(context.matchMap) ? context.matchMap : [];
+  const domainWarnings = Array.isArray(context.truthfulness?.domainCredentialWarnings)
+    ? context.truthfulness.domainCredentialWarnings
+    : Array.isArray(context.domainRisk?.credentialWarnings)
+      ? context.domainRisk.credentialWarnings
+      : [];
   const toClaim = item => ({
     requirement: compactText(item.requirement, 120),
     type: item.type,
@@ -895,19 +907,50 @@ function buildTruthfulnessReport(context = {}) {
       type: item.type,
       reason: 'Not confirmed in the CV or by the user.',
     }));
+  // A missing credential can be surfaced by both the deterministic matchMap
+  // (unmatched JD requirement) and the domain-pack classifier (missing
+  // credential) - drop credential mentions already covered by blockedClaims,
+  // and drop the whole domain entry if every credential it names is already
+  // represented, so the same gap isn't listed (and counted) twice.
+  const blockedRequirementKeys = new Set(
+    blockedClaims.map(item => normalizeClaimKey(item.requirement))
+  );
+  const domainBlockedClaims = domainWarnings
+    .filter(item => item.severity === 'block')
+    .map(item => ({
+      ...item,
+      missingCredentials: (item.missingCredentials || [])
+        .filter(credential => !blockedRequirementKeys.has(normalizeClaimKey(credential))),
+    }))
+    .filter(item => item.missingCredentials.length > 0)
+    .map(item => ({
+      requirement: compactText(item.missingCredentials.join(', ') || item.profileId, 120),
+      type: 'credential',
+      reason: compactText(item.message || 'Credential requested by the JD is not clearly supported by the CV.', 180),
+      profileId: item.profileId,
+    }));
+  const allBlockedClaims = [...blockedClaims, ...domainBlockedClaims];
 
   return {
     supportedClaims,
     transferableClaims,
     userConfirmedClaims,
-    blockedClaims,
+    blockedClaims: allBlockedClaims,
+    domainCredentialWarnings: domainWarnings.map(item => ({
+      profileId: item.profileId,
+      severity: item.severity,
+      message: compactText(item.message, 180),
+      missingCredentials: (item.missingCredentials || []).slice(0, 6).map(value => compactText(value, 80)),
+      confirmationPrompts: (item.confirmationPrompts || []).slice(0, 3).map(value => compactText(value, 120)),
+    })),
+    domainRisk: summarizeDomainRisk(context.domainRisk),
     counts: {
       supported: supportedClaims.length,
       transferable: transferableClaims.length,
       userConfirmed: userConfirmedClaims.length,
-      blocked: blockedClaims.length,
+      blocked: allBlockedClaims.length,
     },
-    reviewRequired: blockedClaims.length > 0 || transferableClaims.length > 0,
+    reviewRequired: allBlockedClaims.length > 0 || transferableClaims.length > 0 || Boolean(context.domainRisk?.reviewRequired),
   };
 }
 
@@ -917,6 +960,39 @@ function compactText(value, max = 160) {
   return `${text.slice(0, max - 1).trim()}…`;
 }
 
+function normalizeClaimKey(value) {
+  return String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function summarizeDomainRisk(domainRisk = null) {
+  if (!domainRisk?.detected) return undefined;
+  return {
+    detected: true,
+    primaryProfile: domainRisk.primaryProfile ? {
+      id: domainRisk.primaryProfile.id,
+      label: compactText(domainRisk.primaryProfile.label, 100),
+      riskLevel: domainRisk.primaryProfile.riskLevel,
+      evidenceStrictness: domainRisk.primaryProfile.evidenceStrictness,
+    } : null,
+    matchedProfiles: (domainRisk.matchedProfiles || []).slice(0, 3).map(profile => ({
+      id: profile.id,
+      label: compactText(profile.label, 100),
+      riskLevel: profile.riskLevel,
+      keywordMatches: (profile.keywordMatches || []).slice(0, 5).map(item => compactText(item, 60)),
+      credentialMatches: (profile.credentialMatches || []).slice(0, 5).map(item => compactText(item, 60)),
+    })),
+    credentialWarnings: (domainRisk.credentialWarnings || []).slice(0, 4).map(item => ({
+      profileId: item.profileId,
+      severity: item.severity,
+      message: compactText(item.message, 180),
+      missingCredentials: (item.missingCredentials || []).slice(0, 6).map(value => compactText(value, 80)),
+    })),
+    reviewPrompts: (domainRisk.reviewPrompts || []).slice(0, 6).map(item => compactText(item, 140)),
+    reviewRequired: Boolean(domainRisk.reviewRequired),
+    sparseContext: Boolean(domainRisk.sparseContext),
+  };
+}
+
 function buildAgentInsights(context = {}) {
   if (!context) return undefined;
 
@@ -924,6 +1000,7 @@ function buildAgentInsights(context = {}) {
     workflow: context.workflow,
     agentChain: context.agentChain,
     questionType: context.questionType,
+    domainRisk: summarizeDomainRisk(context.domainRisk),
   };
 
   if (context.workflow === 'applicationAnswer') {
@@ -1120,6 +1197,7 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
         cvData:         answerAgentContext?.cvData,
         jdData:         answerAgentContext?.jdData,
         matchMap:       answerAgentContext?.matchMap?.length > 0 ? answerAgentContext.matchMap : undefined,
+        domainRisk:     answerAgentContext?.domainRisk,
         roleProfile:    answerAgentContext?.jdData?.roleProfile || undefined,
         jobTitle:       body.jobTitle || undefined,
         company:        body.company || undefined,
@@ -1194,6 +1272,7 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
           agentChain: completion.route?.agentChain || WORKFLOW_AGENT_CHAINS.applicationAnswer,
           agentRun: summarizeAgentRun(answerAgentContext),
           agentInsights: buildAgentInsights(answerAgentContext),
+          domainRisk: summarizeDomainRisk(answerAgentContext?.domainRisk),
           truthfulnessReport: buildTruthfulnessReport(answerAgentContext),
         }
       })}\n\n`);
@@ -1277,6 +1356,7 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
       agentChain: completion.route?.agentChain || WORKFLOW_AGENT_CHAINS.applicationAnswer,
       agentRun: summarizeAgentRun(answerAgentContext),
       agentInsights: buildAgentInsights(answerAgentContext),
+      domainRisk: summarizeDomainRisk(answerAgentContext?.domainRisk),
       truthfulnessReport: buildTruthfulnessReport(answerAgentContext),
     });
   } catch (e) {
@@ -1306,6 +1386,7 @@ app.post('/api/cv/upload', authRequired, generateLimiter, upload.single('cv'), a
     const mimetype = req.file.mimetype;
 
     let text = '';
+    let linkAnnotations = [];
     if (mimetype === 'application/pdf') {
       // Extract text AND hyperlink annotations (e.g. LinkedIn URL hidden behind hyperlinked text)
       const collectedUrls = [];
@@ -1336,6 +1417,7 @@ app.post('/api/cv/upload', authRequired, generateLimiter, upload.single('cv'), a
       text = pdfData.text;
       if (collectedUrls.length > 0) {
         const uniqueUrls = [...new Set(collectedUrls)];
+        linkAnnotations = uniqueUrls.map(url => ({ text: linkLabelFromUrl(url), url }));
         text += '\n\nLinks:\n' + uniqueUrls.join('\n');
       }
     } else if (mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
@@ -1345,12 +1427,8 @@ app.post('/api/cv/upload', authRequired, generateLimiter, upload.single('cv'), a
         mammoth.convertToHtml({ buffer })
       ]);
       text = rawResult.value;
-      const hrefMatches = htmlResult.value.match(/href="([^"]+)"/g) || [];
-      const docxUrls = [...new Set(
-        hrefMatches
-          .map(m => m.slice(6, -1))
-          .filter(u => /^https?:\/\//.test(u))
-      )];
+      linkAnnotations = extractLinkAnnotationsFromHtml(htmlResult.value);
+      const docxUrls = [...new Set(linkAnnotations.map(item => item.url))];
       if (docxUrls.length > 0) {
         text += '\n\nLinks:\n' + docxUrls.join('\n');
       }
@@ -1368,6 +1446,7 @@ app.post('/api/cv/upload', authRequired, generateLimiter, upload.single('cv'), a
     res.json({
       success: true,
       text,
+      linkAnnotations,
       filename: req.file.originalname,
       size: req.file.size
     });
@@ -1375,6 +1454,59 @@ app.post('/api/cv/upload', authRequired, generateLimiter, upload.single('cv'), a
     res.status(500).json({ error: 'Failed to process CV file' });
   }
 });
+
+function extractLinkAnnotationsFromHtml(html = '') {
+  const annotations = [];
+  const seen = new Set();
+  const anchorRe = /<a\b[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  let match;
+  while ((match = anchorRe.exec(String(html || '')))) {
+    const url = normaliseAnnotationUrl(decodeHtmlEntities(match[1]));
+    const label = cleanAnnotationLabel(match[2]) || linkLabelFromUrl(url);
+    if (!url || !label) continue;
+    const key = `${label.toLowerCase()}|${url}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    annotations.push({ text: label, url });
+  }
+  return annotations.slice(0, 100);
+}
+
+function cleanAnnotationLabel(value = '') {
+  return decodeHtmlEntities(String(value || '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()).slice(0, 120);
+}
+
+function decodeHtmlEntities(value = '') {
+  return String(value || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+}
+
+function normaliseAnnotationUrl(url = '') {
+  const clean = String(url || '').trim();
+  if (!/^https?:\/\//i.test(clean)) return '';
+  return clean;
+}
+
+function linkLabelFromUrl(url = '') {
+  const raw = String(url || '').trim();
+  if (/linkedin\.com/i.test(raw)) return 'LinkedIn';
+  if (/github\.com/i.test(raw)) return 'GitHub';
+  if (/behance\.net/i.test(raw)) return 'Behance';
+  if (/dribbble\.com/i.test(raw)) return 'Dribbble';
+  if (/kaggle\.com/i.test(raw)) return 'Kaggle';
+  try {
+    return new URL(raw).hostname.replace(/^www\./i, '');
+  } catch {
+    return raw;
+  }
+}
 
 /**
  * Job Description Extraction endpoint
@@ -1657,6 +1789,7 @@ app.post('/api/cv/analyze', authRequired, generateLimiter, async (req, res) => {
       atsFormatting: tailorAgentContext.atsFormatting,
       truthfulness: tailorAgentContext.truthfulness,
       truthfulnessReport: buildTruthfulnessReport(tailorAgentContext),
+      domainRisk: summarizeDomainRisk(tailorAgentContext.domainRisk),
       ...buildQualityMetadata({ provider: 'deterministic' }),
       evidenceRetrieval: tailorAgentContext.evidenceRetrieval,
       agentRun: summarizeAgentRun(tailorAgentContext),
@@ -1711,7 +1844,9 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
     tailorAgentContext = await applyEmbeddingRetrieval(tailorAgentContext, tailor);
     const matchMap = tailorAgentContext.matchMap;
 
-    const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(cvData, jdData, matchMap);
+    const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(cvData, jdData, matchMap, {
+      domainRisk: tailorAgentContext.domainRisk,
+    });
 
     const completion = await callChatCompletionWithFallback({
       workflow: 'cv_tailor',
@@ -1827,6 +1962,7 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
       atsFormatting: tailorAgentContext.atsFormatting,
       truthfulness: tailorAgentContext.truthfulness,
       truthfulnessReport: buildTruthfulnessReport(tailorAgentContext),
+      domainRisk: summarizeDomainRisk(tailorAgentContext.domainRisk),
       evidenceRetrieval: tailorAgentContext.evidenceRetrieval,
       agentRun: summarizeAgentRun(tailorAgentContext),
       agentInsights: buildAgentInsights(tailorAgentContext),

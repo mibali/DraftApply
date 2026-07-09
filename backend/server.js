@@ -135,6 +135,7 @@ app.post('/api/cv/upload', upload.single('cv'), async (req, res) => {
     }
 
     let text = '';
+    let linkAnnotations = [];
     const { mimetype, buffer } = req.file;
 
     switch (mimetype) {
@@ -144,8 +145,12 @@ app.post('/api/cv/upload', upload.single('cv'), async (req, res) => {
         break;
 
       case 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
-        const docxResult = await mammoth.extractRawText({ buffer });
+        const [docxResult, htmlResult] = await Promise.all([
+          mammoth.extractRawText({ buffer }),
+          mammoth.convertToHtml({ buffer })
+        ]);
         text = docxResult.value;
+        linkAnnotations = extractLinkAnnotationsFromHtml(htmlResult.value);
         break;
 
       case 'text/plain':
@@ -164,6 +169,7 @@ app.post('/api/cv/upload', upload.single('cv'), async (req, res) => {
     res.json({
       success: true,
       text,
+      linkAnnotations,
       filename: req.file.originalname,
       size: req.file.size
     });
@@ -173,6 +179,59 @@ app.post('/api/cv/upload', upload.single('cv'), async (req, res) => {
     res.status(500).json({ error: 'Failed to process CV file' });
   }
 });
+
+function extractLinkAnnotationsFromHtml(html = '') {
+  const annotations = [];
+  const seen = new Set();
+  const anchorRe = /<a\b[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  let match;
+  while ((match = anchorRe.exec(String(html || '')))) {
+    const url = normaliseAnnotationUrl(decodeHtmlEntities(match[1]));
+    const label = cleanAnnotationLabel(match[2]) || linkLabelFromUrl(url);
+    if (!url || !label) continue;
+    const key = `${label.toLowerCase()}|${url}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    annotations.push({ text: label, url });
+  }
+  return annotations.slice(0, 100);
+}
+
+function cleanAnnotationLabel(value = '') {
+  return decodeHtmlEntities(String(value || '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()).slice(0, 120);
+}
+
+function decodeHtmlEntities(value = '') {
+  return String(value || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+}
+
+function normaliseAnnotationUrl(url = '') {
+  const clean = String(url || '').trim();
+  if (!/^https?:\/\//i.test(clean)) return '';
+  return clean;
+}
+
+function linkLabelFromUrl(url = '') {
+  const raw = String(url || '').trim();
+  if (/linkedin\.com/i.test(raw)) return 'LinkedIn';
+  if (/github\.com/i.test(raw)) return 'GitHub';
+  if (/behance\.net/i.test(raw)) return 'Behance';
+  if (/dribbble\.com/i.test(raw)) return 'Dribbble';
+  if (/kaggle\.com/i.test(raw)) return 'Kaggle';
+  try {
+    return new URL(raw).hostname.replace(/^www\./i, '');
+  } catch {
+    return raw;
+  }
+}
 
 /**
  * Answer Generation endpoint

@@ -54,6 +54,40 @@ BSc Economics - Example University`);
     });
   });
 
+  it('splits a location squished directly against a date with no space (regression)', () => {
+    // PDF/DOCX extraction sometimes flattens a location and a date that were
+    // visually separated (different columns) in the original document into
+    // one line with no space between them, e.g. "Birmingham, UKSep 2021 -
+    // Present" - the date regex's word-boundary check fails to see "Sep"
+    // when it's glued directly to "UK", so the whole garbled string used to
+    // land in a structured field (company/title) instead of being split.
+    const cv = new CVParser().parse(`Jordan Taylor
+jordan@example.com
+
+Experience
+
+Senior Engineer
+Acme Corp
+Birmingham, UKSep 2021 - Present
+- Led backend development for the platform team.
+
+Software Engineer
+Beta Inc
+Manchester, UKFeb 2019 - Aug 2021
+- Built internal tooling for the growth team.
+
+Skills
+Python, SQL, AWS`);
+
+    for (const exp of cv.experience) {
+      expect(exp.company).not.toMatch(/UK(Sep|Feb)/);
+      expect(exp.title).not.toMatch(/UK(Sep|Feb)/);
+      expect(exp.dates).not.toContain('UK');
+    }
+    expect(cv.experience.some(exp => exp.dates.includes('Sep 2021'))).toBe(true);
+    expect(cv.experience.some(exp => exp.dates.includes('Feb 2019'))).toBe(true);
+  });
+
   it('parses company-date lines followed by the job title', () => {
     const cv = new CVParser().parse(`Jane Doe
 jane@example.com

@@ -76,6 +76,19 @@ async function responseErrorMessage(response, fallback = `Error ${response?.stat
 
 const DEFAULT_PROXY_URL = 'https://draftapply.onrender.com';
 const TAILOR_JOB_KEY = 'tailorCvJob';
+const TRANSIENT_TAILOR_STORAGE_KEYS = [
+  'tailorCvDraft',
+  TAILOR_JOB_KEY,
+  'tailoredCvExport',
+  'tailoredCvContactUrls',
+  'tailoredCvLinkAnnotations',
+];
+
+function clearTransientTailorState() {
+  chrome.storage.local.remove(TRANSIENT_TAILOR_STORAGE_KEYS, () => {
+    void chrome.runtime.lastError;
+  });
+}
 
 async function setTailorJobIfCurrent(jobId, nextState) {
   const stored = await chrome.storage.local.get(TAILOR_JOB_KEY);
@@ -345,12 +358,18 @@ chrome.alarms.onAlarm.addListener(alarm => {
 });
 
 // Recreate the alarm after install/update or browser restart (alarms persist
-// across SW restarts but are cleared on extension update/reinstall).
-chrome.runtime.onStartup.addListener(ensureKeepaliveAlarm);
+// across SW restarts but are cleared on extension update/reinstall). Tailor CV
+// drafts/jobs/exports are transient session state, so clear them here while
+// preserving saved CV text and install tokens.
+chrome.runtime.onStartup.addListener(() => {
+  ensureKeepaliveAlarm();
+  clearTransientTailorState();
+});
 
 // Create context menu on install/update (idempotent)
 chrome.runtime.onInstalled.addListener(() => {
   ensureKeepaliveAlarm();
+  clearTransientTailorState();
 
   // On extension reload/update, Chrome may keep old menu items.
   // Ensure we don't throw "duplicate id" by removing first.
@@ -481,21 +500,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'GET_CV') {
-    chrome.storage.local.get('cvText', (result) => {
-      sendResponse({ cvText: result.cvText || null });
+    chrome.storage.local.get(['cvText', 'cvLinkAnnotations'], (result) => {
+      sendResponse({
+        cvText: result.cvText || null,
+        linkAnnotations: Array.isArray(result.cvLinkAnnotations) ? result.cvLinkAnnotations : [],
+      });
     });
     return true;
   }
 
   if (message.type === 'SAVE_CV') {
-    chrome.storage.local.set({ cvText: message.cvText }, () => {
+    chrome.storage.local.set({
+      cvText: message.cvText,
+      cvLinkAnnotations: Array.isArray(message.linkAnnotations) ? message.linkAnnotations : [],
+    }, () => {
       sendResponse({ success: true });
     });
     return true;
   }
 
   if (message.type === 'CLEAR_CV') {
-    chrome.storage.local.remove('cvText', () => {
+    chrome.storage.local.remove(['cvText', 'cvLinkAnnotations'], () => {
       sendResponse({ success: true });
     });
     return true;

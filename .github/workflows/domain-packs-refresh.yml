@@ -1,0 +1,59 @@
+name: Domain Pack Refresh
+
+on:
+  schedule:
+    - cron: '18 6 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh:
+    name: Refresh domain knowledge snapshot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Refresh domain packs
+        env:
+          DOMAIN_PACK_FETCH_REMOTE: 'true'
+          DOMAIN_PACK_MAX_REMOTE_BYTES: '5000000'
+        run: npm run refresh:domain-packs
+
+      - name: Validate refreshed snapshot
+        run: npm test
+
+      - name: Open pull request when snapshot changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git diff --quiet -- shared/domain-packs/domain-pack.snapshot.json; then
+            echo "Domain pack snapshot unchanged."
+            exit 0
+          fi
+
+          branch="domain-packs/refresh-${GITHUB_RUN_ID}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add shared/domain-packs/domain-pack.snapshot.json
+          git commit -m "Refresh domain knowledge snapshot"
+          git push origin "$branch"
+          gh pr create \
+            --title "Refresh domain knowledge snapshot" \
+            --body "Automated refresh for DraftApply domain pack metadata. Review source attribution, checksums, and generated profile changes before merge." \
+            --base main \
+            --head "$branch"

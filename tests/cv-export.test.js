@@ -78,6 +78,37 @@ http://linkedin.com/in/michael-temitope-bali-830640171`);
     expect(html).not.toContain('cv-body"><a href="http://linkedin.com/in/michael-temitope-bali-830640171"');
   });
 
+  it('does not link a generic anchor label like "here", even where it appears in unrelated prose (regression)', () => {
+    const formatCvToHtml = loadFormatter();
+    const html = formatCvToHtml(`Michael T Bali
+Birmingham, UK
+mtbdesigns01@gmail.com
+
+Professional Summary
+See my portfolio here. I relocated here in 2020 and have worked remotely since.`, {}, [
+      { text: 'here', url: 'https://myportfolio.example.com' },
+    ]);
+
+    expect(html).not.toContain('href="https://myportfolio.example.com"');
+    expect(html).toContain('See my portfolio here');
+    expect(html).toContain('I relocated here in 2020');
+  });
+
+  it('still links a specific, non-generic annotation label (regression control)', () => {
+    const formatCvToHtml = loadFormatter();
+    const html = formatCvToHtml(`Michael T Bali
+Birmingham, UK
+mtbdesigns01@gmail.com
+
+Professional Summary
+Built the Acme Dashboard Project, a real-time analytics tool.`, {}, [
+      { text: 'Acme Dashboard Project', url: 'https://acme.example.com/dashboard' },
+    ]);
+
+    expect(html).toContain('href="https://acme.example.com/dashboard"');
+    expect(html).toContain('>Acme Dashboard Project</a>');
+  });
+
   it('uses original CV contact URLs when tailored text only has social labels', () => {
     const formatCvToHtml = loadFormatter();
     const html = formatCvToHtml(`Michael T Bali
@@ -131,6 +162,39 @@ Projects
 
     expect(html).toContain('href="https://github.com/janedoe/platform-tools"');
     expect(html).toContain('href="https://linkedin.com/in/janedoe"');
+  });
+
+  it('relinks arbitrary linked text from original CV annotations when the label survives tailoring', () => {
+    const formatCvToHtml = loadFormatter();
+    const html = formatCvToHtml(`Jane Doe
+jane@example.com
+Senior Engineer
+
+Projects
+- Led the migration described in the platform case study and presented the demo deck to stakeholders.`, {}, [
+      { text: 'platform case study', url: 'https://example.com/case-study' },
+      { text: 'demo deck', url: 'https://example.com/demo' },
+    ]);
+
+    expect(html).toContain('href="https://example.com/case-study"');
+    expect(html).toContain('>platform case study</a>');
+    expect(html).toContain('href="https://example.com/demo"');
+    expect(html).toContain('>demo deck</a>');
+  });
+
+  it('does not nest annotation links inside raw URLs already linkified in the tailored CV', () => {
+    const formatCvToHtml = loadFormatter();
+    const html = formatCvToHtml(`Jane Doe
+jane@example.com
+Senior Engineer
+
+Projects
+- Portfolio: https://example.com/case-study`, {}, [
+      { text: 'example.com', url: 'https://example.com' },
+    ]);
+
+    expect(html).toContain('href="https://example.com/case-study"');
+    expect(html).not.toContain('<a href="https://<a');
   });
 
   it('linkifies bare non-social domains without breaking emails or punctuation', () => {
@@ -196,6 +260,21 @@ Python, SQL`);
     expect(html).toContain('Technical Skills');
   });
 
+  it('repairs hard-wrapped prose during export rendering', () => {
+    const formatCvToHtml = loadFormatter();
+    const html = formatCvToHtml(`Jane Doe
+jane@example.com
+MLOps Engineer
+
+Professional Summary
+Strong production reliability background with hands-on experience building reproducible ML workflows,
+containerized inference services, cloud-
+native model serving, and scalable platform operations across AWS, Azure, and GCP.`);
+
+    expect(html).toContain('containerized inference services, cloud-native model serving');
+    expect(html).not.toContain('cloud-\n');
+  });
+
   it('renders the target job title as the headline after contact lines', () => {
     const formatCvToHtml = loadFormatter();
     const html = formatCvToHtml(`Jane Doe
@@ -233,8 +312,9 @@ jane@example.com
 Senior Engineer
 
 Professional Experience
-Semgrep, USA
+Semgrep | USA
 February 2024 -
+
 June 2025
 Senior Customer Success Engineer (IC4)
 
@@ -243,6 +323,32 @@ Senior Customer Success Engineer (IC4)
     expect(html).toContain('class="cv-entry-dates">February 2024 - June 2025</span>');
     expect(html).toContain('class="cv-job-title">Senior Customer Success Engineer (IC4)</p>');
     expect(html).not.toContain('class="cv-date-line">June 2025</p>');
+    expect(html).not.toContain('class="cv-date-line">February 2024 -</p>');
+  });
+
+  it('keeps column-flattened date ranges from becoming fake company rows', () => {
+    const formatCvToHtml = loadFormatter();
+    const html = formatCvToHtml(`Jane Doe
+jane@example.com
+Senior Engineer
+
+Professional Experience
+Semgrep | USA
+Feb 2024 - | Jun 2025
+Senior Customer Success Engineer IC4
+- Resolved complex support issues
+
+Opay Financial Services | Nigeria
+Mar 2021 -    Jun 2021
+DevOps Engineer
+- Improved deployment reliability`);
+
+    expect(html).toContain('class="cv-company">Semgrep | USA</span>');
+    expect(html).toContain('class="cv-entry-dates">Feb 2024 - Jun 2025</span>');
+    expect(html).toContain('class="cv-company">Opay Financial Services | Nigeria</span>');
+    expect(html).toContain('class="cv-entry-dates">Mar 2021 - Jun 2021</span>');
+    expect(html).not.toContain('class="cv-company">Feb 2024 -</span>');
+    expect(html).not.toContain('class="cv-company">Mar 2021 -</span>');
   });
 
   it('renders Focus lines distinctly without replacing the official job title', () => {
@@ -263,6 +369,46 @@ Focus: MLOps, platform reliability, cloud infrastructure, automation, and produc
     expect(html).toContain('class="cv-role-focus">Focus: MLOps, platform reliability, cloud infrastructure, automation, and production diagnostics</p>');
   });
 
+  it('moves Focus lines above bullets during export rendering', () => {
+    const formatCvToHtml = loadFormatter();
+    const html = formatCvToHtml(`Jane Doe
+jane@example.com
+Senior MLOps Engineer
+
+Professional Experience
+Microsoft (Tek-Experts) | Nigeria
+May 2020 - Mar 2021
+Cloud Support Engineer | Cloud Service SME
+- Provided advanced cloud and SaaS troubleshooting for corporate customers.
+
+Focus: MLOps and AI platform enablement, cloud infrastructure, platform reliability
+
+Bincom ICT Solutions | Nigeria
+Feb 2019 - May 2020
+Python Developer`);
+
+    const focusIdx = html.indexOf('class="cv-role-focus"');
+    const bulletIdx = html.indexOf('<li>Provided advanced cloud');
+    expect(focusIdx).toBeGreaterThan(-1);
+    expect(focusIdx).toBeLessThan(bulletIdx);
+  });
+
+  it('repairs dangling bullet endings during export rendering', () => {
+    const formatCvToHtml = loadFormatter();
+    const html = formatCvToHtml(`Jane Doe
+jane@example.com
+Senior Engineer
+
+Professional Experience
+Sourcegraph | USA / Remote
+Jul 2021 - Feb 2024
+Senior Technical Support Engineer
+- Improved deployment and troubleshooting efficiency through Python scripting, automation, log analysis, and collaboration with Engineering and`);
+
+    expect(html).toContain('collaboration with Engineering.</li>');
+    expect(html).not.toContain('collaboration with Engineering and</li>');
+  });
+
   it('cleans pasted JD prose from Core Competencies when rendering', () => {
     const formatCvToHtml = loadFormatter();
     const html = formatCvToHtml(`Jane Doe
@@ -276,14 +422,14 @@ Core Competencies
 Professional Experience
 TechCorp`);
 
-    expect(html).toContain('<li>Containerization and Orchestration: Docker, Kubernetes</li>');
-    expect(html).toContain('<li>Programming &amp; Scripting: Python and scripting for automation (e.g., Bash, Terraform), Git</li>');
+    expect(html).toContain('<p class="cv-skill-row"><strong>Containerization and Orchestration:</strong> Docker, Kubernetes</p>');
+    expect(html).toContain('<p class="cv-skill-row"><strong>Programming &amp; Scripting:</strong> Python and scripting for automation (e.g., Bash, Terraform), Git</p>');
     expect(html).not.toMatch(/4\+ years of experience/i);
     expect(html).not.toMatch(/Bachelor.*related field/i);
     expect(html).not.toMatch(/highly preferred/i);
   });
 
-  it('renders long labelled Core Competencies lines as bullets', () => {
+  it('renders long labelled Core Competencies lines as consistent category rows', () => {
     const formatCvToHtml = loadFormatter();
     const html = formatCvToHtml(`Jane Doe
 jane@example.com
@@ -296,9 +442,10 @@ Programming & Automation: Python
 Professional Experience
 TechCorp`);
 
-    expect(html).toContain('<li>Cloud &amp; Platform Engineering: AWS, Azure, GCP, Production Systems Engineering &amp; Platform Operations, Debugging &amp; Service Reliability, Azure DevOps</li>');
-    expect(html).toContain('<li>Cloud &amp; Platform Engineering: Azure Machine Learning</li>');
+    expect(html).toContain('<p class="cv-skill-row"><strong>Cloud &amp; Platform Engineering:</strong> AWS, Azure, GCP, Production Systems Engineering &amp; Platform Operations, Debugging &amp; Service Reliability, Azure DevOps</p>');
+    expect(html).toContain('<p class="cv-skill-row"><strong>Cloud &amp; Platform Engineering:</strong> Azure Machine Learning</p>');
     expect(html).not.toContain('class="cv-body">Cloud &amp; Platform Engineering');
+    expect(html).not.toContain('<li>Cloud &amp; Platform Engineering');
   });
 
   it('builds an editable Word-compatible document from the rendered CV HTML', () => {

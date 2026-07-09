@@ -120,7 +120,16 @@ describe('OpenRouter free-model fallback ordering', () => {
 
     expect(ordered[0]).toBe('google/gemma-3-27b-it:free');
     expect(ordered.filter(id => id === 'vendor/model-010:free')).toHaveLength(1);
-    expect(ordered.slice(1, 6)).toHaveLength(5);
+    // Same-score models tie-break alphabetically (a.localeCompare(b)) - assert
+    // the exact ordered ids, not just the count, so a future change that
+    // drops the tie-break or introduces iteration-order dependence is caught.
+    expect(ordered.slice(1, 6)).toEqual([
+      'vendor/model-000:free',
+      'vendor/model-001:free',
+      'vendor/model-002:free',
+      'vendor/model-003:free',
+      'vendor/model-004:free',
+    ]);
     expect(ordered).not.toContain('paid/model');
   });
 

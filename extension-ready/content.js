@@ -1454,8 +1454,9 @@ class DraftApplyExtension {
     const evidence = Array.isArray(insights?.evidence) ? insights.evidence : [];
     const matched = Array.isArray(insights?.matchedRequirements) ? insights.matchedRequirements : [];
     const truth = insights?.truthfulness;
+    const domainRisk = insights?.domainRisk || insights?.truthfulnessReport?.domainRisk;
 
-    if (!workflow && evidence.length === 0 && matched.length === 0 && !truth) {
+    if (!workflow && evidence.length === 0 && matched.length === 0 && !truth && !domainRisk) {
       box.hidden = true;
       box.textContent = '';
       return;
@@ -1495,6 +1496,29 @@ class DraftApplyExtension {
               </span>
             `).join('')}
           </div>
+        </div>`);
+    }
+
+    if (domainRisk?.detected) {
+      const profile = domainRisk.primaryProfile?.label || 'Domain review';
+      const prompts = Array.isArray(domainRisk.reviewPrompts) ? domainRisk.reviewPrompts : [];
+      const warnings = Array.isArray(domainRisk.credentialWarnings) ? domainRisk.credentialWarnings : [];
+      parts.push(`
+        <div class="da-agent-section da-agent-domain">
+          <div class="da-agent-label">Domain review</div>
+          <div class="da-agent-domain-line">
+            <strong>${this.escapeHtml(profile)}</strong>${domainRisk.primaryProfile?.riskLevel ? ` · ${this.escapeHtml(domainRisk.primaryProfile.riskLevel)}` : ''}
+          </div>
+          ${warnings.length > 0 ? `
+            <div class="da-agent-chips">
+              ${warnings.flatMap(item => item.missingCredentials || []).slice(0, 4).map(item => `
+                <span class="da-agent-chip da-agent-chip-warn">${this.escapeHtml(item)}</span>
+              `).join('')}
+            </div>` : ''}
+          ${prompts.length > 0 ? `
+            <ul class="da-agent-domain-prompts">
+              ${prompts.slice(0, 3).map(item => `<li>${this.escapeHtml(item)}</li>`).join('')}
+            </ul>` : ''}
         </div>`);
     }
 

@@ -105,6 +105,21 @@ describe('extension critical modal behavior', () => {
     expect(backgroundJs).toContain('await chrome.storage.local.remove(TAILOR_JOB_KEY)');
   });
 
+  it('clears transient Tailor state on extension reload without deleting saved CV data', () => {
+    expect(backgroundJs).toContain('const TRANSIENT_TAILOR_STORAGE_KEYS');
+    expect(backgroundJs).toContain("'tailorCvDraft'");
+    expect(backgroundJs).toContain("'tailoredCvExport'");
+    expect(backgroundJs).toContain('clearTransientTailorState();');
+    expect(backgroundJs).toContain('chrome.runtime.onInstalled.addListener');
+    expect(backgroundJs).toContain('chrome.runtime.onStartup.addListener');
+
+    const keysStart = backgroundJs.indexOf('const TRANSIENT_TAILOR_STORAGE_KEYS');
+    const keysEnd = backgroundJs.indexOf('];', keysStart);
+    const keyBlock = backgroundJs.slice(keysStart, keysEnd);
+    expect(keyBlock).not.toContain("'cvText'");
+    expect(keyBlock).not.toContain("'installToken'");
+  });
+
   it('preserves specific proxy/provider error messages instead of replacing all 429s', () => {
     expect(backgroundJs).toContain('async function responseErrorMessage');
     expect(backgroundJs).toContain('if (body?.error) return body.error');
@@ -161,7 +176,16 @@ describe('extension critical modal behavior', () => {
     expect(contentJs).toContain('CV evidence used');
     expect(popupHtml).toContain('id="tailor-agent-insights"');
     expect(popupJs).toContain('renderTailorAgentInsights');
-    expect(popupJs).toContain('Supported keywords');
+    expect(popupJs).toContain('Matched from your CV');
     expect(popupJs).toContain('retrieval.status');
+  });
+
+  it('renders domain review cues from proxy metadata without replacing agent insights', () => {
+    expect(contentJs).toContain('Domain review');
+    expect(contentJs).toContain('domainRisk');
+    expect(contentCss).toContain('da-agent-domain');
+    expect(contentCss).toContain('da-agent-chip-warn');
+    expect(popupJs).toContain('agent-domain-review');
+    expect(popupHtml).toContain('agent-domain-prompts');
   });
 });

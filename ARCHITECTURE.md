@@ -18,6 +18,7 @@ Chrome Extension
 - `extension-ready/` stores CV text in `chrome.storage.local`, extracts page context, displays generated output, and inserts text into form fields.
 - `render-proxy/` authenticates install tokens, applies rate limiting, parses CV/JD inputs, builds prompts, routes models, and returns generation metadata.
 - `shared/` contains deterministic parsers, Tailor CV logic, workflow-agent helpers, and evidence-retrieval helpers.
+- `shared/domain-packs/` contains compact, versioned domain knowledge snapshots for regulated, credential-heavy, sparse, academic, trade, aviation, healthcare, legal, and portfolio-heavy roles.
 - `backend/` and `frontend/` are local development/offline app surfaces.
 
 ## Workflow Agents
@@ -70,3 +71,27 @@ Generated responses expose:
 - `agentInsights`: compact UI-safe evidence and workflow summaries.
 
 The UI should show this metadata instead of hiding provider uncertainty or unsupported-claim risk.
+
+## Domain Knowledge Refresh
+
+DraftApply uses domain packs to close gaps where generic CV matching is not enough:
+
+- regulated professions such as legal, clinical healthcare, aviation, clearance-heavy public sector roles, and licensed trades
+- academic/research CVs where publications, grants, supervision, and methods matter
+- creative portfolios where written CV evidence is only part of the proof
+- sparse or vague job descriptions that require stronger user confirmation
+
+The runtime reads `shared/domain-packs/domain-pack.snapshot.json`. It does not fetch live third-party datasets during answer or CV generation. This keeps the extension/proxy deterministic, fast, and privacy-aware.
+
+Source metadata lives in `shared/domain-packs/sources.json`. A scheduled GitHub Actions workflow runs `npm run refresh:domain-packs` with remote monitoring enabled, validates the snapshot, runs the test suite, and opens a pull request when the compact snapshot changes. Maintainers review attribution, checksums, and profile/rule changes before merge. Stable official raw export URLs can be added to `expectedRawFiles`; otherwise the workflow monitors each official landing page as a change signal.
+
+## Domain Risk Layer
+
+The domain pack snapshot is consumed by `shared/domain-packs/domain-classifier.js` and wired into the deterministic workflow agents. The classifier emits advisory metadata first:
+
+- `domainRisk.primaryProfile`
+- `domainRisk.credentialWarnings`
+- `domainRisk.reviewPrompts`
+- `truthfulnessReport.domainCredentialWarnings`
+
+For normal well-described non-regulated roles this metadata is absent and the existing generation path is unchanged. For regulated or credential-heavy roles, unverified credentials requested by the JD are represented as blocked truthfulness claims and shown as review cues in the extension UI. The recipe and Tailor CV prompt builders receive the same metadata so they avoid claiming licenses, clearances, certifications, publications, or portfolio proof unless the CV or user confirmation supports them.

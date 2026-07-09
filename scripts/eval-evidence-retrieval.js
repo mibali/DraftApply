@@ -12,10 +12,17 @@
 
 import { buildEvidenceRetrievalInputs, rerankMatchMapWithEmbeddings, cosineSimilarity } from '../shared/evidence-retrieval.js';
 import { EVAL_EVIDENCE_ITEMS, EVAL_REQUIREMENTS } from '../shared/evidence-retrieval-eval-fixtures.js';
+import {
+  isHfInferenceRouterUrl,
+  localEmbeddingsUrl,
+  buildEmbeddingsRequestBody,
+  parseEmbeddingsResponse,
+} from '../shared/hf-inference-client.js';
 
 const LOCAL_EMBEDDING_BASE_URL = (process.env.LOCAL_EMBEDDING_BASE_URL || '').trim();
 const LOCAL_EMBEDDING_API_KEY = process.env.LOCAL_EMBEDDING_API_KEY || 'local';
 const LOCAL_EMBEDDING_MODEL = process.env.LOCAL_EMBEDDING_MODEL || 'mixedbread-ai/mxbai-embed-large-v1';
+const LOCAL_EMBEDDING_TIMEOUT_MS = Number(process.env.LOCAL_EMBEDDING_TIMEOUT_MS || 12000);
 const PROMOTE_THRESHOLD = Number(process.env.LOCAL_EMBEDDING_PROMOTE_THRESHOLD || 0.60);
 const ENRICH_THRESHOLD = Number(process.env.LOCAL_EMBEDDING_ENRICH_THRESHOLD || 0.50);
 // Some embedding models (BGE, E5) are calibrated for asymmetric retrieval and
@@ -48,42 +55,26 @@ function baselinePromotable(requirement, evidenceTexts) {
   });
 }
 
-// Mirrors render-proxy/server.js's isHfInferenceRouterUrl/localEmbeddingsUrl:
-// HF's Inference Providers router only implements OpenAI-compatible routes
-// for chat completions - embeddings there live at
-// /hf-inference/models/{model} with a native {inputs: [...]} request and a
-// plain array-of-vectors response, not the OpenAI {data: [...]} shape.
-function isHfInferenceRouterUrl(rawBaseUrl) {
-  return /(^|\.)router\.huggingface\.co$/i.test(
-    (() => {
-      try { return new URL(rawBaseUrl).hostname; } catch { return ''; }
-    })()
-  );
-}
-
-function localEmbeddingsUrl(rawBaseUrl, model) {
-  const base = String(rawBaseUrl || '').trim().replace(/\/+$/, '');
-  if (!base) return '';
-  if (isHfInferenceRouterUrl(base)) return `${base}/models/${model}`;
-  if (/\/embeddings$/i.test(base)) return base;
-  if (/\/v1$/i.test(base)) return `${base}/embeddings`;
-  return `${base}/v1/embeddings`;
-}
-
 async function fetchRealEmbeddings(texts) {
   const useHfNativeShape = isHfInferenceRouterUrl(LOCAL_EMBEDDING_BASE_URL);
-  const response = await fetch(localEmbeddingsUrl(LOCAL_EMBEDDING_BASE_URL, LOCAL_EMBEDDING_MODEL), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${LOCAL_EMBEDDING_API_KEY}` },
-    body: JSON.stringify(useHfNativeShape ? { inputs: texts } : { model: LOCAL_EMBEDDING_MODEL, input: texts }),
-  });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const data = await response.json();
-  return useHfNativeShape
-    ? (Array.isArray(data) ? data : [])
-    : (data?.data || [])
-        .sort((a, b) => Number(a.index || 0) - Number(b.index || 0))
-        .map(item => item.embedding);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), LOCAL_EMBEDDING_TIMEOUT_MS);
+  try {
+    const response = await fetch(localEmbeddingsUrl(LOCAL_EMBEDDING_BASE_URL, LOCAL_EMBEDDING_MODEL), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${LOCAL_EMBEDDING_API_KEY}` },
+      signal: controller.signal,
+      body: JSON.stringify(buildEmbeddingsRequestBody(useHfNativeShape, LOCAL_EMBEDDING_MODEL, texts)),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    return parseEmbeddingsResponse(useHfNativeShape, data);
+  } catch (error) {
+    if (error?.name === 'AbortError') throw new Error(`Timed out after ${LOCAL_EMBEDDING_TIMEOUT_MS}ms`);
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 // Fallback so this script runs without a live model. This is a plain vector

@@ -103,6 +103,13 @@ describe('popup productivity stats UI', () => {
     expect(popupJs).toContain('tw-group-quality');
   });
 
+  it('filters parser artefact warnings before showing Tailor CV review cues', () => {
+    expect(popupJs).toContain('isParserArtefactWarning');
+    expect(popupJs).toContain('warnings = (Array.isArray(warnings) ? warnings : []).filter');
+    expect(popupJs).toContain('Birmingham');
+    expect(popupJs).toContain('UK|United Kingdom');
+  });
+
   it('offers a manual JD CTA when page context is partial or missing', () => {
     expect(contentJs).toContain('Paste JD');
     expect(contentJs).toContain('paste JD manually');

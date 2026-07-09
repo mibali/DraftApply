@@ -18,9 +18,10 @@
     window.close();
   });
 
-  const stored = await chrome.storage.local.get(['tailoredCvExport', 'tailoredCvContactUrls']);
+  const stored = await chrome.storage.local.get(['tailoredCvExport', 'tailoredCvContactUrls', 'tailoredCvLinkAnnotations']);
   const tailoredCvExport = stored.tailoredCvExport;
   const originalContactUrls = stored.tailoredCvContactUrls || {};
+  const linkAnnotations = Array.isArray(stored.tailoredCvLinkAnnotations) ? stored.tailoredCvLinkAnnotations : [];
   const loading = document.getElementById('loading');
   const content = document.getElementById('cv-content');
 
@@ -29,13 +30,13 @@
     return;
   }
 
-  await chrome.storage.local.remove(['tailoredCvExport', 'tailoredCvContactUrls']);
+  await chrome.storage.local.remove(['tailoredCvExport', 'tailoredCvContactUrls', 'tailoredCvLinkAnnotations']);
 
   // Set page title (and therefore PDF filename) to "Full Name CV"
   const candidateName = tailoredCvExport.split('\n').map(l => l.trim()).find(l => l.length > 0);
   if (candidateName) document.title = `${candidateName} CV`;
 
-  content.innerHTML = formatCvToHtml(tailoredCvExport, originalContactUrls);
+  content.innerHTML = formatCvToHtml(tailoredCvExport, originalContactUrls, linkAnnotations);
   loading.hidden = true;
   content.hidden = false;
 })();
@@ -87,14 +88,107 @@ function isDateLine(line) {
   return line.length < 60 && DATE_RE.test(line) && (line.match(/\d{4}/g) || []).length >= 1;
 }
 
+function isSplitDateRangeStart(line) {
+  return isDateLine(line) && /(?:-|–|—|\bto\b)\s*$/i.test(String(line || '').trim());
+}
+
+function moveFocusLinesAboveBulletRuns(lines) {
+  const output = [...lines];
+  const BULLET_RE = /^[-•*●▪◦–—]\s/;
+
+  for (let i = 0; i < output.length; i++) {
+    if (!/^focus\s*:/i.test(String(output[i] || '').trim())) continue;
+
+    let cursor = i - 1;
+    while (cursor >= 0 && !String(output[cursor] || '').trim()) cursor--;
+    if (cursor < 0 || !BULLET_RE.test(String(output[cursor] || '').trim())) continue;
+
+    let runStart = cursor;
+    while (runStart > 0 && BULLET_RE.test(String(output[runStart - 1] || '').trim())) {
+      runStart--;
+    }
+
+    const [focusLine] = output.splice(i, 1);
+    output.splice(runStart, 0, focusLine);
+  }
+
+  return output;
+}
+
+function repairDanglingBulletEndings(lines) {
+  return lines.map(line => {
+    const match = String(line || '').match(/^(\s*[-•*●▪◦–—]\s+)(.+)$/);
+    if (!match) return line;
+
+    const [, prefix, body] = match;
+    const repaired = body
+      .replace(/\s+\b(?:and|or|with|including|across|for|to|by)\s*$/i, '')
+      .replace(/[,\s]+$/, '');
+
+    if (repaired === body) return line;
+    return `${prefix}${repaired}.`;
+  });
+}
+
+function repairHardWrappedExportLines(lines) {
+  const output = [];
+  const BULLET_RE = /^[-•*●▪◦–—]\s/;
+  const LABEL_RE = /^[A-Za-z][A-Za-z0-9 &/+.\-]{0,48}:\s/;
+
+  const isContinuation = (line) => {
+    const trimmed = String(line || '').trim();
+    if (!trimmed) return false;
+    if (BULLET_RE.test(trimmed)) return false;
+    if (LABEL_RE.test(trimmed)) return false;
+    if (isSectionHeader(trimmed)) return false;
+    if (isDateLine(trimmed)) return false;
+    if (isContactLine(trimmed) || isLocationLine(trimmed)) return false;
+    return /^[a-z]/.test(trimmed);
+  };
+
+  for (const line of lines) {
+    const prev = output.length ? output[output.length - 1] : '';
+    const prevTrimmed = String(prev || '').trimEnd();
+
+    if (prevTrimmed.length >= 8 && /[a-z]-$/.test(prevTrimmed) && isContinuation(line)) {
+      output[output.length - 1] = `${prevTrimmed}${String(line).trim()}`;
+      continue;
+    }
+    if (prevTrimmed.length >= 36 && /[a-z,]$/i.test(prevTrimmed) && !/[.!?:;]$/.test(prevTrimmed) && isContinuation(line)) {
+      output[output.length - 1] = `${prevTrimmed} ${String(line).trim()}`;
+      continue;
+    }
+    output.push(line);
+  }
+
+  return output;
+}
+
 function normaliseExportLines(text) {
-  const source = String(text || '').split('\n');
+  const source = repairHardWrappedExportLines(String(text || '').split('\n'));
   const output = [];
 
   for (let i = 0; i < source.length; i++) {
     const current = source[i];
     const line = current.trim();
-    const nextLine = source[i + 1]?.trim() || '';
+    let nextIdx = i + 1;
+    while (nextIdx < source.length && !String(source[nextIdx] || '').trim()) nextIdx++;
+    const nextLine = source[nextIdx]?.trim() || '';
+
+    // Column extraction can flatten a two-column date range into one textual
+    // line such as "Feb 2024 - | Jun 2025" or "Feb 2024 -    Jun 2025".
+    // Without this guard the entry formatter reads the left side as a company
+    // and the right side as the date, producing exactly the bad exported row
+    // "Feb 2024 -" on the left and "Jun 2025" on the right.
+    const sameLineSplit = line.match(/^(.+?)\s*(?:\||\t+|\s{2,})(.+)$/);
+    if (
+      sameLineSplit &&
+      isSplitDateRangeStart(sameLineSplit[1].trim()) &&
+      isDateLine(sameLineSplit[2].trim())
+    ) {
+      output.push(`${sameLineSplit[1].trim()} ${sameLineSplit[2].trim()}`);
+      continue;
+    }
 
     // LLMs sometimes split ranges as:
     // "February 2024 -"
@@ -104,19 +198,18 @@ function normaliseExportLines(text) {
     if (
       line &&
       nextLine &&
-      isDateLine(line) &&
-      isDateLine(nextLine) &&
-      /(?:-|–|—|\bto\b)\s*$/i.test(line)
+      isSplitDateRangeStart(line) &&
+      isDateLine(nextLine)
     ) {
       output.push(`${line} ${nextLine}`);
-      i++;
+      i = nextIdx;
       continue;
     }
 
     output.push(current);
   }
 
-  return output;
+  return repairDanglingBulletEndings(moveFocusLinesAboveBulletRuns(output));
 }
 
 function linkify(html) {
@@ -201,6 +294,63 @@ function contactLink(label, url) {
   return `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(label)}</a>`;
 }
 
+function renderInline(text, linkAnnotations = []) {
+  return applyLinkAnnotationsToHtml(linkify(esc(String(text || ''))), linkAnnotations);
+}
+
+function applyLinkAnnotationsToHtml(html, linkAnnotations = []) {
+  const annotations = normaliseLinkAnnotations(linkAnnotations);
+  if (annotations.length === 0) return html;
+
+  return String(html || '').split(/(<a\b[\s\S]*?<\/a>|<[^>]+>)/gi).map(part => {
+    if (!part || /^</.test(part)) return part;
+    let segment = part;
+    for (const ann of annotations) {
+      const re = new RegExp(`(^|[^\\w])(${escapeRegExp(ann.text)})(?=$|[^\\w])`, 'gi');
+      segment = segment.replace(re, (match, prefix, label) => {
+        return `${prefix}<a href="${esc(ann.url)}" target="_blank" rel="noopener">${label}</a>`;
+      });
+    }
+    return segment;
+  }).join('');
+}
+
+// Generic call-to-action anchor text ("here", "click here", "this project")
+// carries no content of its own to distinguish it from the same words used
+// elsewhere in the CV. applyLinkAnnotationsToHtml re-links every occurrence
+// of a label within a text segment, so a label this generic risks
+// hyperlinking unrelated prose that happens to contain the same common
+// word/phrase, not just the one link the original document intended.
+const GENERIC_LINK_LABELS = new Set([
+  'here', 'this', 'this project', 'this link', 'this repo', 'this repository',
+  'click', 'click here', 'link', 'view', 'view here', 'see', 'see here',
+  'read more', 'learn more', 'more', 'more info',
+]);
+
+function normaliseLinkAnnotations(linkAnnotations = []) {
+  const seen = new Set();
+  return (Array.isArray(linkAnnotations) ? linkAnnotations : [])
+    .map(item => ({
+      text: String(item?.text || item?.label || '').replace(/\s+/g, ' ').trim(),
+      url: String(item?.url || item?.href || '').trim(),
+    }))
+    .filter(item => item.text.length >= 2 && item.text.length <= 120 && /^https?:\/\//i.test(item.url))
+    .filter(item => !/^https?:\/\//i.test(item.text))
+    .filter(item => !GENERIC_LINK_LABELS.has(item.text.toLowerCase()))
+    .sort((a, b) => b.text.length - a.text.length)
+    .filter(item => {
+      const key = `${item.text.toLowerCase()}|${normalizeUrl(item.url)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 100);
+}
+
+function escapeRegExp(value = '') {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function safeDownloadName(title) {
   const clean = String(title || 'Tailored CV')
     .replace(/\s+CV\s*$/i, ' CV')
@@ -232,99 +382,107 @@ function buildWordDocument(cvHtml, title = 'Tailored CV') {
     @page { margin: 0.7in; }
     body {
       font-family: Calibri, Georgia, serif;
-      font-size: 11pt;
-      line-height: 1.45;
+      font-size: 10pt;
+      line-height: 1.35;
       color: #111;
     }
     .cv-name {
-      font-size: 18pt;
+      font-size: 16pt;
       font-weight: 700;
       text-align: center;
       text-transform: uppercase;
-      letter-spacing: 3px;
-      margin-bottom: 5px;
+      letter-spacing: 2px;
+      margin-bottom: 3px;
     }
     .cv-headline {
-      font-size: 11pt;
+      font-size: 10pt;
       font-style: italic;
       text-align: center;
       color: #444;
       margin-bottom: 3px;
     }
     .cv-contact {
-      font-size: 9.5pt;
+      font-size: 8.8pt;
       text-align: center;
       color: #555;
-      line-height: 1.5;
+      line-height: 1.35;
       margin: 0;
     }
-    .cv-contact a, .cv-body a, .cv-bullets li a {
+    .cv-contact a, .cv-body a, .cv-bullets li a, .cv-skill-row a {
       color: #111;
       text-decoration: underline;
     }
     .cv-header-rule {
       border: none;
       border-top: 1.5pt solid #0a0a0a;
-      margin: 10pt 0 0;
+      margin: 7pt 0 0;
     }
     .cv-section-header {
-      font-size: 10pt;
+      font-size: 9.2pt;
       font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 1.5px;
       border-bottom: 1.5pt solid #0a0a0a;
       padding-bottom: 2pt;
-      margin-top: 16pt;
-      margin-bottom: 7pt;
+      margin-top: 11pt;
+      margin-bottom: 5pt;
     }
     .cv-entry-row {
-      margin-top: 9pt;
+      margin-top: 7pt;
       width: 100%;
       clear: both;
     }
     .cv-company {
-      font-size: 11.6pt;
+      font-size: 10.4pt;
       font-weight: 800;
     }
     .cv-entry-dates {
-      font-size: 9.5pt;
+      font-size: 8.8pt;
       color: #444;
       float: right;
       margin-left: 12pt;
     }
     .cv-job-title {
-      font-size: 10.5pt;
+      font-size: 9.6pt;
       font-style: italic;
       font-weight: 600;
       color: #333;
       margin: 0 0 3pt;
     }
     .cv-role-focus {
-      font-size: 10pt;
+      font-size: 9pt;
       font-style: italic;
       color: #4b5563;
       margin: 0 0 5pt;
     }
     .cv-bullets {
-      padding-left: 18pt;
-      margin: 4pt 0;
+      padding-left: 15pt;
+      margin: 2pt 0 3pt;
     }
     .cv-bullets li {
-      font-size: 10.5pt;
-      line-height: 1.45;
-      margin-bottom: 2pt;
+      font-size: 9.4pt;
+      line-height: 1.3;
+      margin-bottom: 1pt;
+    }
+    .cv-skill-row {
+      font-size: 9.4pt;
+      line-height: 1.3;
+      margin: 0 0 2pt;
+    }
+    .cv-skill-row strong {
+      font-weight: 700;
     }
     .cv-body {
-      font-size: 10.5pt;
-      line-height: 1.5;
-      margin: 0 0 3pt;
+      font-size: 9.7pt;
+      line-height: 1.35;
+      margin: 0 0 2pt;
     }
     .cv-date-line {
-      font-size: 9.5pt;
+      font-size: 8.8pt;
       color: #555;
       margin-bottom: 2pt;
     }
-    .cv-spacer { height: 4pt; }
+    .cv-spacer { height: 3pt; }
   </style>
 </head>
 <body>${cvHtml}</body>
@@ -391,6 +549,15 @@ function isUsefulSkillItem(item) {
   return /[A-Za-z]/.test(text);
 }
 
+function renderSkillItem(item, linkAnnotations = []) {
+  const text = String(item || '').trim();
+  const match = text.match(/^([A-Z][A-Za-z/&+ .-]{2,46}):\s+(.+)$/);
+  if (match) {
+    return `<p class="cv-skill-row"><strong>${esc(match[1].trim())}:</strong> ${renderInline(match[2].trim(), linkAnnotations)}</p>`;
+  }
+  return `<p class="cv-skill-row">${renderInline(text, linkAnnotations)}</p>`;
+}
+
 function splitLongSkillItem(item) {
   const text = String(item || '').trim();
   if (text.length <= 160) return [text];
@@ -417,7 +584,7 @@ function splitLongSkillItem(item) {
   return chunks.length ? chunks : [text];
 }
 
-function formatCvToHtml(rawText, fallbackContactUrls = {}) {
+function formatCvToHtml(rawText, fallbackContactUrls = {}, linkAnnotations = []) {
   // Strip trailing "Links:" section added by PDF/DOCX extractor — links are
   // already inline in the text; we don't want them duplicated at the bottom.
   // Merge: tailored-text URLs take priority; original CV URLs fill any gaps.
@@ -534,12 +701,12 @@ function formatCvToHtml(rawText, fallbackContactUrls = {}) {
       if (social) {
         html += `<p class="cv-contact">${contactLink(social.label, social.url)}</p>`;
       } else if (isContactLine(line) || isLocationLine(line)) {
-        html += `<p class="cv-contact">${linkify(esc(line))}</p>`;
+        html += `<p class="cv-contact">${renderInline(line, linkAnnotations)}</p>`;
       } else if (!headlineSet) {
         html += `<p class="cv-headline">${esc(line)}</p>`;
         headlineSet = true;
       } else {
-        html += `<p class="cv-contact">${linkify(esc(line))}</p>`;
+        html += `<p class="cv-contact">${renderInline(line, linkAnnotations)}</p>`;
       }
       continue;
     }
@@ -556,10 +723,15 @@ function formatCvToHtml(rawText, fallbackContactUrls = {}) {
     if (/^[\-•*●▪◦–—]\s/.test(line)) {
       flushPendingCompany(null);
       afterEntryRow = false;
-      if (!listOpen) { html += '<ul class="cv-bullets">'; listOpen = true; }
       const body = line.replace(/^[\-•*●▪◦–—]\s*/, '');
       const items = inSkillsSection ? splitSkillLine(body) : [body];
-      for (const item of items) html += `<li>${linkify(esc(item))}</li>`;
+      if (inSkillsSection) {
+        closeList();
+        for (const item of items) html += renderSkillItem(item, linkAnnotations);
+      } else {
+        if (!listOpen) { html += '<ul class="cv-bullets">'; listOpen = true; }
+        for (const item of items) html += `<li>${renderInline(item, linkAnnotations)}</li>`;
+      }
       continue;
     }
 
@@ -568,9 +740,7 @@ function formatCvToHtml(rawText, fallbackContactUrls = {}) {
     if (inSkillsSection) {
       const items = splitSkillLine(line);
       if (items.length > 0) {
-        html += '<ul class="cv-bullets">';
-        for (const item of items) html += `<li>${linkify(esc(item))}</li>`;
-        html += '</ul>';
+        for (const item of items) html += renderSkillItem(item, linkAnnotations);
         continue;
       }
     }
@@ -660,7 +830,7 @@ function formatCvToHtml(rawText, fallbackContactUrls = {}) {
     }
 
     // Default body text
-    html += `<p class="cv-body">${linkify(esc(line))}</p>`;
+    html += `<p class="cv-body">${renderInline(line, linkAnnotations)}</p>`;
   }
 
   closeList();

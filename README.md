@@ -18,6 +18,7 @@ DraftApply classifies each question and generates the right kind of answer — a
 | `extension-ready/` | **Chrome extension** (recommended) — no API keys needed |
 | `render-proxy/` | **Hosted proxy** (Render) — holds the Groq API key server-side |
 | `backend/` + `frontend/` | **Local web app** (optional) — multi-provider LLM support |
+| `shared/domain-packs/` | **Domain knowledge packs** — reviewable snapshots for regulated, credential-heavy, academic, trade, sparse, and portfolio-heavy roles |
 | `store-assets/` | Chrome Web Store listing assets |
 
 ## Chrome extension
@@ -177,6 +178,8 @@ The multi-agent design is intentionally cost-conscious: agents are deterministic
 
 Generated API responses include `qualityMode` and `truthfulnessReport` so users and contributors can see whether an answer came from the primary hosted path, a local/private model, a configured OpenRouter model, or best-effort free fallback.
 
+DraftApply also includes compact domain packs for higher-risk role families. These packs help workflow agents recognize when to require stronger evidence, ask for credentials or jurisdiction, preserve academic/publication detail, or avoid overclaiming in portfolio-first roles. They are refreshed through a scheduled GitHub workflow and reviewed as pull requests; generation never fetches live third-party datasets.
+
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) and [`render-proxy/README.md`](render-proxy/README.md) for the full provider and orchestration details.
 
 ## Testing
@@ -185,6 +188,8 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md) and [`render-proxy/README.md`](render-p
 npm run test:static       # syntax/architecture + release metadata checks
 npm run test:unit         # Vitest unit/static contract tests
 npm test                  # both gates
+npm run validate:domain-packs
+npm run refresh:domain-packs
 ```
 
 If Vitest fails before running tests with an `esbuild` service error, run `npm rebuild esbuild` once and retry. The static gate exists so contributors can still validate architecture on machines where native test dependencies are temporarily unhappy.

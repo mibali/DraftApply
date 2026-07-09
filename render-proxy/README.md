@@ -219,6 +219,8 @@ These agents live in `shared/agent-workflows.js`. They do not add extra LLM call
 
 Stage 4 adds optional embedding retrieval in `shared/evidence-retrieval.js`. When `LOCAL_EMBEDDING_BASE_URL` is configured, the proxy embeds compact CV evidence snippets and JD requirements, reranks evidence, and may promote high-confidence missing requirements to transferable partial matches. The promotion threshold is deliberately conservative, and any embedding failure falls back to deterministic matching.
 
+`shared/domain-packs/domain-pack.snapshot.json` provides additional review cues for high-risk role families such as legal, clinical healthcare, aviation, clearance-heavy government roles, academic/research CVs, creative portfolios, licensed trades, and sparse job descriptions. These packs are refreshed offline through the repository workflow and reviewed as pull requests. The proxy must treat them as local read-only metadata during generation; it should not fetch live third-party domain datasets in the request path.
+
 ### Reliability and truthfulness contract
 
 All generated or analyzed outputs now include explicit risk metadata:

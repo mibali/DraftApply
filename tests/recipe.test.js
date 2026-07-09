@@ -295,3 +295,26 @@ Worked with engineering and support stakeholders to prioritise fixes.`,
     expect(prompt.systemPrompt).toMatch(/SALARY \/ COMPENSATION question/);
   });
 });
+
+describe('domain risk prompt guard', () => {
+  it('adds domain review guidance without changing the recipe contract', async () => {
+    const { buildPrompts } = await import('../render-proxy/recipe/index.js');
+    const result = buildPrompts({
+      question: 'Do you have an active RN license?',
+      cvText: 'Jordan Taylor\nHealthcare Operations Coordinator\nExperience\nCoordinated patient intake workflows and documentation for clinical teams.',
+      jobTitle: 'Registered Nurse',
+      jobDescription: 'Requirements: Active RN license, BLS certification, patient care.',
+      domainRisk: {
+        detected: true,
+        primaryProfile: { label: 'Clinical healthcare' },
+        credentialWarnings: [{ missingCredentials: ['rn license'], severity: 'block' }],
+        reviewPrompts: ['Which clinical licenses or registrations do you currently hold?'],
+      },
+    });
+
+    expect(result).toHaveProperty('systemPrompt');
+    expect(result).toHaveProperty('userPrompt');
+    expect(result.userPrompt).toContain('DOMAIN REVIEW GUARD');
+    expect(result.userPrompt).toContain('rn license');
+  });
+});

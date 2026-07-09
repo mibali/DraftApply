@@ -6,6 +6,8 @@
  * lightweight OpenAI-compatible model endpoint or the hosted LLM path.
  */
 
+import { APPLICATION_ANSWER_AGENTS, TAILORED_CV_AGENTS } from '../shared/agent-workflows.js';
+
 export const DEFAULT_LIGHTWEIGHT_CHAT_MODEL = 'Qwen/Qwen3-4B-Instruct-2507';
 // Qwen/Qwen3-Embedding-0.6B has no live Inference Providers route as of this
 // writing (empty inferenceProviderMapping) and could not be benchmarked.
@@ -26,26 +28,13 @@ export const LIGHTWEIGHT_MODEL_RECOMMENDATION = {
   ],
 };
 
+// Sourced from shared/agent-workflows.js instead of a second hand-maintained
+// copy - two independent lists of the same chain is exactly what let this
+// drift silently (this file was missing "Domain Risk Classifier" for a
+// while after it was added to the real pipeline).
 export const WORKFLOW_AGENT_CHAINS = {
-  applicationAnswer: [
-    'Question Classifier Agent',
-    'CV Grounding Agent',
-    'Job Context Matcher',
-    'Answer Drafting Agent',
-    'Tone & Length Agent',
-    'Truthfulness Guard Agent',
-    'Final Answer Formatter',
-  ],
-  tailoredCv: [
-    'JD Analysis Agent',
-    'CV Parsing Agent',
-    'Match Scoring Agent',
-    'Gap Analysis Agent',
-    'Keyword Optimisation Agent',
-    'CV Rewrite Agent',
-    'ATS Formatting Agent',
-    'Truthfulness Guard Agent',
-  ],
+  applicationAnswer: APPLICATION_ANSWER_AGENTS,
+  tailoredCv: TAILORED_CV_AGENTS,
 };
 
 const ROUTE_POLICIES = {

@@ -15,6 +15,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const TAILOR_JOB_POLL_INTERVAL_MS = 1500;
   const TAILOR_JOB_MAX_POLL_MS = 7 * 60 * 1000;
   const TAILOR_FALLBACK_HINT_MS = 10 * 1000;
+  let pendingCvLinkAnnotations = [];
 
   const elements = {
     cvStatusDot:     document.getElementById('cv-status-dot'),
@@ -251,7 +252,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.uploadArea.querySelector('.upload-hint').textContent = 'Extracting text…';
 
     try {
-      const text = await extractTextFromFile(file);
+      const extracted = await extractTextFromFile(file);
+      const text = typeof extracted === 'string' ? extracted : extracted?.text || '';
+      pendingCvLinkAnnotations = Array.isArray(extracted?.linkAnnotations) ? extracted.linkAnnotations : [];
       elements.cvText.value = text;
       elements.uploadArea.querySelector('.upload-hint').textContent = 'Text extracted — click Save CV';
       showMessage('File loaded. Review and click Save CV.');
@@ -265,7 +268,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   async function extractTextFromFile(file) {
     if (file.type === 'text/plain' || file.name.endsWith('.txt')) {
-      return await file.text();
+      const text = await file.text();
+      return { text, linkAnnotations: extractLinkAnnotationsFromText(text) };
     }
 
     if (!proxyUrl) {
@@ -299,7 +303,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       const result = await response.json();
-      return result.text;
+      return {
+        text: result.text || '',
+        linkAnnotations: Array.isArray(result.linkAnnotations) ? result.linkAnnotations : [],
+      };
     } catch (e) {
       if (e?.name === 'AbortError') {
         throw new Error('Timed out — the service may be starting up. Please try again in a few seconds.');
@@ -321,7 +328,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       const previous = await chrome.runtime.sendMessage({ type: 'GET_CV' }).catch(() => ({}));
       const cvChanged = Boolean(previous?.cvText && previous.cvText !== text);
-      await chrome.runtime.sendMessage({ type: 'SAVE_CV', cvText: text });
+      const linkAnnotations = cvChanged || pendingCvLinkAnnotations.length > 0
+        ? pendingCvLinkAnnotations
+        : Array.isArray(previous?.linkAnnotations) ? previous.linkAnnotations : [];
+      await chrome.runtime.sendMessage({ type: 'SAVE_CV', cvText: text, linkAnnotations });
+      pendingCvLinkAnnotations = linkAnnotations;
       if (cvChanged) await resetTailorStateForCvChange();
       showCVLoaded(text);
       showMessage(cvChanged ? 'CV saved. Re-analyze any saved JD before generating a new tailored CV.' : 'CV saved successfully');
@@ -887,6 +898,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function formatTailorWarnings(warnings = []) {
+    warnings = (Array.isArray(warnings) ? warnings : []).filter(w => !isParserArtefactWarning(w));
+    if (warnings.length === 0) return '';
+
     // Sort warnings into three buckets for display
     const accuracy = [];   // locked fields changed, fabricated metrics
     const missing  = [];   // user-confirmed skills the LLM didn't add
@@ -971,6 +985,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     return `<div class="tailor-warning-title">Review before sending</div>${sections.join('')}`;
   }
 
+  function isParserArtefactWarning(warning) {
+    const val = (String(warning || '').match(/: "(.+)"$/) || [])[1] || '';
+    if (!val || val.length > 80) return false;
+    const month = '(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)';
+    const place = '(?:UK|United Kingdom|England|Scotland|Wales|Ireland|Nigeria|USA|United States|Canada|Germany|France|Remote|London|Birmingham|Manchester|Lagos|Abuja)';
+    return new RegExp(`\\b${place}${month}\\b|,\\s*\\b${place}\\s*${month}\\b`, 'i').test(val);
+  }
+
   function displayMatchReport(matchReport, { reviewMode, domainSuggestions = [] } = {}) {
     const score = matchReport?.score ?? null;
     elements.matchScore.textContent = score != null ? `${score}%` : '–';
@@ -1049,13 +1071,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     const ats = insights.atsFormatting || {};
     const truth = insights.truthfulness || {};
     const retrieval = insights.evidenceRetrieval || {};
+    const domainRisk = insights.domainRisk || insights.truthfulnessReport?.domainRisk || {};
     const missing = Array.isArray(gap.missingRequirements) ? gap.missingRequirements : [];
     const transferable = Array.isArray(gap.transferableRequirements) ? gap.transferableRequirements : [];
     const supported = Array.isArray(keywords.supportedKeywords) ? keywords.supportedKeywords : [];
     const risky = Array.isArray(keywords.riskyKeywords) ? keywords.riskyKeywords : [];
     const visibleEvidence = Array.isArray(ats.requiredVisibleEvidence) ? ats.requiredVisibleEvidence : [];
+    const supportedKeys = new Set(supported.map(value => normaliseInsightValue(value)).filter(Boolean));
+    const visibleEvidenceOnly = visibleEvidence.filter(value => {
+      const key = normaliseInsightValue(value);
+      return key && !supportedKeys.has(key);
+    });
 
-    if (!workflow && missing.length === 0 && transferable.length === 0 && supported.length === 0 && risky.length === 0 && visibleEvidence.length === 0) {
+    if (!workflow && missing.length === 0 && transferable.length === 0 && supported.length === 0 && risky.length === 0 && visibleEvidence.length === 0 && !domainRisk.detected) {
       box.hidden = true;
       box.textContent = '';
       return;
@@ -1069,14 +1097,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       Number.isFinite(Number(truth.unsupportedCount)) ? `${Number(truth.unsupportedCount)} held back` : null,
     ].filter(Boolean).join(' · ');
 
-    sections.push(`<div class="agent-insights-title"><span>Architecture run</span><small>${esc(meta || 'Workflow active')}</small></div>`);
+    sections.push(`<div class="agent-insights-title"><span>Review guidance</span><small>${esc(meta || 'Workflow active')}</small></div>`);
 
     if (supported.length > 0) {
-      sections.push(renderInsightChipGroup('Supported keywords', supported, 'agent-chip-ok'));
+      sections.push(renderInsightChipGroup('Matched from your CV', supported, 'agent-chip-ok'));
     }
 
     if (transferable.length > 0) {
-      sections.push(renderInsightChipGroup('Transferable gaps', transferable, 'agent-chip-info'));
+      sections.push(renderInsightChipGroup('Transferable evidence to frame carefully', transferable, 'agent-chip-info'));
     }
 
     if (missing.length > 0) {
@@ -1087,8 +1115,24 @@ document.addEventListener('DOMContentLoaded', async () => {
       sections.push(renderInsightChipGroup('Held back unless confirmed', risky, 'agent-chip-warn'));
     }
 
-    if (visibleEvidence.length > 0) {
-      sections.push(renderInsightChipGroup('ATS evidence to keep visible', visibleEvidence, 'agent-chip-info'));
+    if (domainRisk.detected) {
+      const profile = domainRisk.primaryProfile?.label || 'Domain review';
+      const prompts = Array.isArray(domainRisk.reviewPrompts) ? domainRisk.reviewPrompts : [];
+      const credentialWarnings = Array.isArray(domainRisk.credentialWarnings) ? domainRisk.credentialWarnings : [];
+      sections.push(`
+        <div class="agent-insights-group agent-domain-review">
+          <div class="agent-insights-label">Domain review</div>
+          <div class="agent-domain-title">${esc(profile)}${domainRisk.primaryProfile?.riskLevel ? ` · ${esc(domainRisk.primaryProfile.riskLevel)}` : ''}</div>
+          ${credentialWarnings.length > 0 ? `
+            <div class="agent-insights-chips">
+              ${credentialWarnings.flatMap(item => item.missingCredentials || []).slice(0, 6).map(value => `<span class="agent-chip agent-chip-warn">${esc(value)}</span>`).join('')}
+            </div>` : ''}
+          ${prompts.length > 0 ? `<ul class="agent-domain-prompts">${prompts.slice(0, 3).map(value => `<li>${esc(value)}</li>`).join('')}</ul>` : ''}
+        </div>`);
+    }
+
+    if (visibleEvidenceOnly.length > 0) {
+      sections.push(renderInsightChipGroup('Additional ATS evidence to keep visible', visibleEvidenceOnly, 'agent-chip-info'));
     }
 
     box.innerHTML = sections.join('');
@@ -1103,6 +1147,10 @@ document.addEventListener('DOMContentLoaded', async () => {
           ${values.slice(0, 10).map(value => `<span class="agent-chip ${chipClass}">${esc(value)}</span>`).join('')}
         </div>
       </div>`;
+  }
+
+  function normaliseInsightValue(value) {
+    return String(value || '').toLowerCase().replace(/[^a-z0-9+#.]+/g, ' ').trim();
   }
 
   function renderMissingSkillChecks(missing) {
@@ -1220,12 +1268,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       // stripped from the tailored text (e.g. writing "LinkedIn" without the URL).
       // These are stored as a fallback so cv-export.js can re-link profile labels.
       let contactUrls = {};
+      let linkAnnotations = [];
       try {
         const cvResp = await chrome.runtime.sendMessage({ type: 'GET_CV' });
         contactUrls = extractCvContactUrls(cvResp?.cvText || '');
+        linkAnnotations = Array.isArray(cvResp?.linkAnnotations) ? cvResp.linkAnnotations : [];
       } catch { /* non-fatal */ }
 
-      await chrome.storage.local.set({ tailoredCvExport: text, tailoredCvContactUrls: contactUrls });
+      await chrome.storage.local.set({ tailoredCvExport: text, tailoredCvContactUrls: contactUrls, tailoredCvLinkAnnotations: linkAnnotations });
       await chrome.tabs.create({ url: chrome.runtime.getURL('cv-export.html') });
       await window.DraftApplyStats?.track?.('cvExports');
       await refreshStatsUI();
@@ -1248,6 +1298,35 @@ document.addEventListener('DOMContentLoaded', async () => {
       twitter:   ensure(tw?.[0]),
       website:   ensure(web?.[0]),
     };
+  }
+
+  function extractLinkAnnotationsFromText(text) {
+    const urls = String(text || '').match(/https?:\/\/[^\s<>"')]+/gi) || [];
+    const seen = new Set();
+    return urls.map(url => {
+      const clean = url.replace(/[).,;:!?]+$/, '');
+      const label = linkLabelFromUrl(clean);
+      return { text: label, url: clean };
+    }).filter(item => {
+      const key = `${String(item.text || '').toLowerCase()}|${item.url}`;
+      if (!item.text || !item.url || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).slice(0, 100);
+  }
+
+  function linkLabelFromUrl(url = '') {
+    const raw = String(url || '').trim();
+    if (/linkedin\.com/i.test(raw)) return 'LinkedIn';
+    if (/github\.com/i.test(raw)) return 'GitHub';
+    if (/behance\.net/i.test(raw)) return 'Behance';
+    if (/dribbble\.com/i.test(raw)) return 'Dribbble';
+    if (/kaggle\.com/i.test(raw)) return 'Kaggle';
+    try {
+      return new URL(raw).hostname.replace(/^www\./i, '');
+    } catch {
+      return raw;
+    }
   }
 
   function showTailorMessage(text, type = 'success') {

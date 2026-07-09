@@ -32,6 +32,7 @@ describe('render proxy agent architecture', () => {
     expect(serverJs).toContain('agentChain: completion.route?.agentChain');
     expect(serverJs).toContain('agentInsights: buildAgentInsights');
     expect(serverJs).toContain('truthfulnessReport: buildTruthfulnessReport');
+    expect(serverJs).toContain('domainRisk: summarizeDomainRisk');
     expect(serverJs).toContain('...buildQualityMetadata(completion)');
     expect(serverJs).toContain('draftapplyMeta');
   });
@@ -47,6 +48,7 @@ describe('render proxy agent architecture', () => {
     expect(serverJs).toContain('userConfirmedClaims');
     expect(serverJs).toContain('blockedClaims');
     expect(serverJs).toContain('reviewRequired');
+    expect(serverJs).toContain('domainCredentialWarnings');
   });
 
   it('normalizes match reports to both extension and architecture-doc field names', () => {
@@ -71,6 +73,7 @@ describe('render proxy agent architecture', () => {
     expect(agentWorkflowsJs).toContain('gapAnalysisAgent');
     expect(agentWorkflowsJs).toContain('keywordOptimisationAgent');
     expect(agentWorkflowsJs).toContain('atsFormattingAgent');
+    expect(agentWorkflowsJs).toContain('domainRiskClassifierAgent');
     expect(agentWorkflowsJs).toContain('truthfulnessGuardAgent');
   });
 
@@ -82,8 +85,17 @@ describe('render proxy agent architecture', () => {
     expect(serverJs).toContain('truthfulness: {');
   });
 
+  it('deduplicates matchMap and domain-pack blocked claims by requirement key before reporting', () => {
+    // A missing credential can be flagged both by the deterministic matchMap
+    // (unmatched JD requirement) and the domain-pack classifier (missing
+    // credential) - without dedup the same gap is listed and counted twice.
+    expect(serverJs).toContain('function normalizeClaimKey');
+    expect(serverJs).toContain('blockedRequirementKeys.has(normalizeClaimKey(credential))');
+    expect(serverJs).toContain('.filter(item => item.missingCredentials.length > 0)');
+  });
+
   it('implements stage-4 embedding retrieval as optional reranking with fallback', () => {
-    expect(serverJs).toContain('function localEmbeddingsUrl');
+    expect(serverJs).toContain('localEmbeddingsUrl');
     expect(serverJs).toContain('function callEmbeddingEndpoint');
     expect(serverJs).toContain('rerankMatchMapWithEmbeddings');
     expect(serverJs).toContain('Embedding endpoint failed; deterministic matching was used');
