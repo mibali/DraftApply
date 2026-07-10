@@ -159,6 +159,89 @@ describe('buildCvSkeleton', () => {
   });
 });
 
+describe('skeleton sanitisation of a corrupted CV parse (regression, from live output)', () => {
+  // Real defect: the source CV was itself a previously exported (corrupted)
+  // CV, so the parser produced duplicate role entries (one with the location
+  // in the title field and truncated bullets), a role with company and dates
+  // swapped into each other's fields, and hard-wrapped bullet fragments as
+  // separate responsibilities. The skeleton rendered all of it verbatim.
+  const corruptedCvData = {
+    contactInfo: { name: 'Michael T Bali', email: 'mtb@example.com' },
+    experience: [
+      {
+        company: 'DualMind Tech Consulting Ltd | Birmingham, UK',
+        title: 'MLOps / DevOps Engineer',
+        dates: 'Sep 2025 - Present',
+        responsibilities: ['Designed end-to-end MLOps workflows covering model training, artifact versioning, deployment, serving, scaling, monitoring, and lifecycle management for cloud-native ML workloads.'],
+      },
+      {
+        // Duplicate parse of the same role: location as title, truncated bullet.
+        company: 'DualMind Tech Consulting Ltd',
+        title: 'Birmingham, UK',
+        dates: 'Sep 2025 - Present',
+        responsibilities: ['Designed end-to-end MLOps workflows covering model training, artifact versioning, deployment, serving, scaling, monitoring, and lifecycle'],
+      },
+      {
+        company: 'Semgrep | USA',
+        title: 'Senior Customer Success Engineer',
+        dates: 'Feb 2024 - Jun 2025',
+        responsibilities: [
+          // Hard-wrapped fragment split into its own bullet.
+          'Resolved complex Tier 3/4 security platform issues across CI/CD pipelines, developer environments, APIs, containers, and enterprise-scale',
+          'integrations.',
+        ],
+      },
+      {
+        // Company and dates swapped into each other's fields, no title.
+        company: 'Feb 2019 - May 2020',
+        title: '',
+        dates: 'Bincom ICT Solutions | Nigeria',
+        responsibilities: ['Developed reusable, testable Python code for production systems.'],
+      },
+    ],
+    rawText: '',
+  };
+  const skeleton = tailor.buildCvSkeleton(corruptedCvData, jdData);
+
+  it('merges duplicate parses of the same role, preferring the copy with a real title and complete bullets', () => {
+    const dualMind = skeleton.roles.filter(r => r.company.includes('DualMind'));
+    expect(dualMind).toHaveLength(1);
+    expect(dualMind[0].title).toBe('MLOps / DevOps Engineer');
+    expect(dualMind[0].company).toBe('DualMind Tech Consulting Ltd | Birmingham, UK');
+    // The truncated duplicate bullet is absorbed by the complete one.
+    expect(dualMind[0].originalBullets).toHaveLength(1);
+    expect(dualMind[0].originalBullets[0]).toContain('cloud-native ML workloads');
+  });
+
+  it('never uses a location as a job title', () => {
+    expect(skeleton.roles.some(r => r.title === 'Birmingham, UK')).toBe(false);
+  });
+
+  it('swaps company and dates back when the parser scrambled them', () => {
+    const bincom = skeleton.roles.find(r => r.company.includes('Bincom'));
+    expect(bincom.company).toBe('Bincom ICT Solutions | Nigeria');
+    expect(bincom.dates).toBe('Feb 2019 - May 2020');
+  });
+
+  it('rejoins hard-wrapped bullet fragments split into separate responsibilities', () => {
+    const semgrep = skeleton.roles.find(r => r.company.includes('Semgrep'));
+    expect(semgrep.originalBullets).toHaveLength(1);
+    expect(semgrep.originalBullets[0]).toContain('enterprise-scale integrations.');
+  });
+
+  it('keeps genuinely distinct stints at the same company separate', () => {
+    const twoStints = tailor.buildCvSkeleton({
+      contactInfo: { name: 'X' },
+      experience: [
+        { company: 'Sourcegraph | UK', title: 'Platform Engineer', dates: 'Feb 2026 - Present', responsibilities: ['Did platform work.'] },
+        { company: 'Sourcegraph | USA / Remote', title: 'Senior Technical Support Engineer', dates: 'Jul 2021 - Feb 2024', responsibilities: ['Did support work.'] },
+      ],
+      rawText: '',
+    }, jdData);
+    expect(twoStints.roles).toHaveLength(2);
+  });
+});
+
 describe('parseStructuredContent', () => {
   it('parses clean JSON', () => {
     expect(tailor.parseStructuredContent('{"summary":"x"}')).toEqual({ summary: 'x' });

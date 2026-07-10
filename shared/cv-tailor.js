@@ -2206,17 +2206,8 @@ Do not add anything new. Return the complete corrected CV.`;
 
   buildCvSkeleton(cvData = {}, jdData = {}) {
     const contactInfo = cvData?.contactInfo || {};
-    const roles = (cvData?.experience || [])
-      .filter(exp => String(exp?.title || '').trim() || String(exp?.company || '').trim())
-      .map((exp, i) => ({
-        id: `role_${i}`,
-        company: String(exp.company || '').trim(),
-        dates: String(exp.dates || '').trim(),
-        title: String(exp.title || '').trim(),
-        originalBullets: (exp.responsibilities || [])
-          .map(b => String(b || '').trim())
-          .filter(Boolean),
-      }));
+    const roles = this._sanitiseSkeletonRoles(cvData?.experience || [])
+      .map((role, i) => ({ ...role, id: `role_${i}` }));
 
     return {
       name: String(contactInfo.name || '').trim(),
@@ -2225,6 +2216,107 @@ Do not add anything new. Return the complete corrected CV.`;
       roles,
       educationLines: this._extractEducationLines(cvData),
     };
+  }
+
+  // The locked skeleton is only as trustworthy as the CV parse, and real
+  // source documents (multi-column PDFs, or a previously exported CV
+  // re-uploaded as the source) produce corrupted parses: the same role
+  // parsed twice (once with the location in the title field), company and
+  // dates swapped into each other's fields, and hard-wrapped bullet
+  // fragments split into separate "responsibilities". Sanitise all of that
+  // deterministically before locking the skeleton.
+  _sanitiseSkeletonRoles(experience = []) {
+    const isDateRange = (value) => {
+      const text = String(value || '').trim();
+      return text.length <= 60 &&
+        /\b(?:19|20)\d{2}\b\s*(?:-|–|—|to)\s*(?:.*\b(?:19|20)\d{2}\b|\s*(?:present|current)\b)/i.test(text);
+    };
+    const isLocationLike = (value) => {
+      const text = String(value || '').trim();
+      if (!text || text.length > 45) return false;
+      if (/\b(engineer|developer|manager|architect|analyst|designer|consultant|lead|director|specialist|administrator|scientist)\b/i.test(text)) return false;
+      return /,/.test(text) || /^(remote|hybrid|onsite)$/i.test(text)
+        || /\b(uk|usa|united kingdom|united states|nigeria|remote)\b/i.test(text);
+    };
+
+    const cleaned = [];
+    for (const exp of experience) {
+      let company = String(exp?.company || '').trim();
+      let dates = String(exp?.dates || '').trim();
+      let title = String(exp?.title || '').trim();
+      if (!company && !title) continue;
+
+      // Swapped fields: "Feb 2019 - May 2020" parsed as the company while
+      // the real company sits in the dates field.
+      if (isDateRange(company) && !isDateRange(dates)) {
+        [company, dates] = [dates, company];
+      }
+      if (isDateRange(title) && !dates) {
+        dates = title;
+        title = '';
+      }
+      // Location parsed as the job title ("Birmingham, UK").
+      if (isLocationLike(title)) title = '';
+
+      cleaned.push({
+        company,
+        dates,
+        title,
+        originalBullets: this._joinWrappedBulletFragments(
+          (exp?.responsibilities || []).map(b => String(b || '').trim()).filter(Boolean)
+        ),
+      });
+    }
+
+    // Merge duplicate parses of the same role: same primary company segment
+    // + same dates. Keep the copy with a real title first so its (usually
+    // complete) bullets win the near-duplicate dedupe over truncated ones.
+    const merged = [];
+    const indexByKey = new Map();
+    for (const role of cleaned) {
+      const primaryCompany = this._normaliseText(String(role.company).split('|')[0]);
+      const key = `${primaryCompany}::${this._normaliseText(role.dates)}`;
+      if (!primaryCompany || !indexByKey.has(key)) {
+        if (primaryCompany) indexByKey.set(key, merged.length);
+        merged.push(role);
+        continue;
+      }
+      const existing = merged[indexByKey.get(key)];
+      const primary = existing.title ? existing : (role.title ? role : existing);
+      const secondary = primary === existing ? role : existing;
+      merged[indexByKey.get(key)] = {
+        company: primary.company.length >= secondary.company.length ? primary.company : secondary.company,
+        dates: primary.dates || secondary.dates,
+        title: primary.title || secondary.title,
+        originalBullets: this._dedupeSimilarBullets([
+          ...primary.originalBullets,
+          ...secondary.originalBullets,
+        ]),
+      };
+    }
+
+    return merged;
+  }
+
+  // Hard-wrapped PDF extraction can leave a bullet's continuation as its own
+  // "responsibility" ("...enterprise-scale" / "integrations."). Rejoin a
+  // fragment that starts lowercase onto a previous bullet that ends without
+  // terminal punctuation.
+  _joinWrappedBulletFragments(bullets = []) {
+    const output = [];
+    for (const bullet of bullets) {
+      const previous = output.length ? output[output.length - 1] : '';
+      if (
+        previous &&
+        /[a-z0-9,\-]$/i.test(previous) && !/[.!?:;]$/.test(previous) &&
+        /^[a-z]/.test(bullet)
+      ) {
+        output[output.length - 1] = `${previous} ${bullet}`;
+        continue;
+      }
+      output.push(bullet);
+    }
+    return output;
   }
 
   // Header contact lines verbatim from the original CV (location, phone,
