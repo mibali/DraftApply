@@ -52,6 +52,12 @@ const OPENROUTER_MODEL = (process.env.OPENROUTER_MODEL || '').trim();
 const OPENROUTER_SITE_URL = process.env.OPENROUTER_SITE_URL || 'https://draftapply.com';
 const OPENROUTER_APP_NAME = process.env.OPENROUTER_APP_NAME || 'DraftApply';
 const OPENROUTER_TAILOR_FALLBACK = !/^false$/i.test(process.env.OPENROUTER_TAILOR_FALLBACK || 'true');
+// Structured CV generation (docs/structured-cv-generation.md): the model
+// returns only mutable content as JSON against a locked skeleton, and the
+// final text is rendered deterministically. Default on; per-request fallback
+// to the legacy free-text path when the model output is unsalvageable. Set
+// STRUCTURED_CV_GENERATION=false as the kill-switch.
+const STRUCTURED_CV_GENERATION = !/^false$/i.test(process.env.STRUCTURED_CV_GENERATION || 'true');
 const OPENROUTER_USE_MODELS_ARRAY = !/^false$/i.test(process.env.OPENROUTER_USE_MODELS_ARRAY || 'true');
 const OPENROUTER_REQUIRE_DATA_PRIVACY = !/^false$/i.test(process.env.OPENROUTER_REQUIRE_DATA_PRIVACY || 'true');
 const OPENROUTER_PROVIDER_SORT = (process.env.OPENROUTER_PROVIDER_SORT || 'throughput').trim();
@@ -419,6 +425,7 @@ async function callProviderChat(provider, {
   metadata = false,
   attempt = 1,
   fallbackFrom = null,
+  responseFormat = null,
 }) {
   const config = llmProviderConfig(provider, model);
   if (!config.apiKey) {
@@ -447,6 +454,11 @@ async function callProviderChat(provider, {
         temperature,
         ...(maxTokens ? { max_tokens: maxTokens } : {}),
         ...(providerPreferences ? { provider: providerPreferences } : {}),
+        // JSON mode only on Groq: OpenRouter free-tier fallback models vary
+        // in support and a 400 there would burn the fallback chain. The
+        // structured path always salvage-parses regardless, so omitting it
+        // for other providers costs nothing but a lower JSON hit rate.
+        ...(responseFormat && provider === 'groq' ? { response_format: responseFormat } : {}),
         stream,
         messages,
       }),
@@ -1853,98 +1865,203 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
     tailorAgentContext = await applyEmbeddingRetrieval(tailorAgentContext, tailor);
     const matchMap = tailorAgentContext.matchMap;
 
-    const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(cvData, jdData, matchMap, {
-      domainRisk: tailorAgentContext.domainRisk,
-    });
-
-    const completion = await callChatCompletionWithFallback({
-      workflow: 'cv_tailor',
-      temperature: 0.3,
-      // CVs with many roles (senior candidates commonly have 6-7+) push the
-      // full regenerated text close to 4000 tokens; a model that spends any
-      // of its budget on preamble/reasoning before the CV body can then get
-      // cut off mid-sentence, silently dropping trailing bullets. 6000 gives
-      // real headroom without materially increasing cost for typical CVs.
-      maxTokens: 6000,
-      timeoutMs: 50000,
-      fallbackTimeoutMs: 50000,
-      maxFallbackModels: 2,
-      allowFallback: OPENROUTER_TAILOR_FALLBACK,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user',   content: userPrompt   }
-      ],
-    });
-
-    const tailorProvider = completion.provider;
-    const data = await completion.response.json().catch(() => null);
-    if (!data) {
-      console.error(`[DraftApply] ${tailorProvider} tailor response body failed to parse`);
-      return res.status(502).json({ error: 'Unexpected response from AI provider. Please try again.' });
-    }
-    const tailorTruncated = data?.choices?.[0]?.finish_reason === 'length';
-    if (tailorTruncated) {
-      console.warn(`[DraftApply] ${tailorProvider} tailor response was truncated (finish_reason=length) - output may be missing trailing content.`);
-    }
-    let tailoredCvText = tailor.finalizeTailoredCV(data?.choices?.[0]?.message?.content, {
-      cvData,
-      jdData,
-      matchMap,
-      confirmedSkills,
-    });
-    if (!tailoredCvText?.trim()) {
-      console.error(`[DraftApply] ${tailorProvider} returned empty tailor content`);
-      return res.status(502).json({ error: 'No output from provider' });
-    }
-
+    // Shared generation state, set by whichever path (structured or legacy)
+    // produces the final CV.
+    let completion = null;
+    let data = null;
+    let tailorProvider = null;
+    let tailoredCvText = '';
+    let tailorTruncated = false;
     let auditSkipped = false;
-    try {
-      const { systemPrompt: auditSystemPrompt, userPrompt: auditUserPrompt, temperature: auditTemperature } =
-        tailor.buildTailoredCvAuditPrompt(cvData, jdData, matchMap, tailoredCvText, confirmedSkills);
-      const auditCompletion = await callChatCompletionWithFallback({
+    let structuredCv = null;
+    let generationMode = 'legacy-text';
+
+    // ── Structured path (docs/structured-cv-generation.md) ──
+    // The model returns only mutable content JSON; companies/dates/titles/
+    // education come verbatim from cvData and are rendered by a template, so
+    // the malformed-structure bug class cannot occur. Any failure falls
+    // through to the legacy free-text path below.
+    if (STRUCTURED_CV_GENERATION && Array.isArray(cvData.experience) && cvData.experience.length > 0) {
+      try {
+        const structuredPrompt = tailor.buildStructuredTailoringPrompt(cvData, jdData, matchMap, {
+          domainRisk: tailorAgentContext.domainRisk,
+          confirmedSkills,
+        });
+        const skeleton = structuredPrompt.skeleton;
+        const structuredCompletion = await callChatCompletionWithFallback({
+          workflow: 'cv_tailor',
+          temperature: structuredPrompt.temperature,
+          maxTokens: 2500,
+          timeoutMs: 50000,
+          fallbackTimeoutMs: 50000,
+          maxFallbackModels: 2,
+          allowFallback: OPENROUTER_TAILOR_FALLBACK,
+          responseFormat: { type: 'json_object' },
+          messages: [
+            { role: 'system', content: structuredPrompt.systemPrompt },
+            { role: 'user',   content: structuredPrompt.userPrompt   },
+          ],
+        });
+        const structuredData = await structuredCompletion.response.json().catch(() => null);
+        const structuredRaw = structuredData?.choices?.[0]?.message?.content;
+        const structuredTruncated = structuredData?.choices?.[0]?.finish_reason === 'length';
+        let content = structuredTruncated
+          ? null
+          : tailor.validateStructuredContent(
+              tailor.parseStructuredContent(structuredRaw),
+              skeleton,
+              { matchMap, confirmedSkills, cvData }
+            );
+
+        if (content) {
+          // Structured audit: same JSON shape, unsupported claims removed.
+          // Invalid/truncated audit output keeps the pre-audit content.
+          auditSkipped = true;
+          try {
+            const auditPrompt = tailor.buildStructuredAuditPrompt(skeleton, content, matchMap);
+            const auditCompletion = await callChatCompletionWithFallback({
+              workflow: 'cv_tailor',
+              temperature: auditPrompt.temperature,
+              maxTokens: 2500,
+              timeoutMs: 30000,
+              fallbackTimeoutMs: 30000,
+              maxFallbackModels: 2,
+              allowFallback: OPENROUTER_TAILOR_FALLBACK,
+              responseFormat: { type: 'json_object' },
+              messages: [
+                { role: 'system', content: auditPrompt.systemPrompt },
+                { role: 'user',   content: auditPrompt.userPrompt   },
+              ],
+            });
+            const auditData = await auditCompletion.response.json().catch(() => null);
+            if (auditData?.choices?.[0]?.finish_reason !== 'length') {
+              const audited = tailor.validateStructuredContent(
+                tailor.parseStructuredContent(auditData?.choices?.[0]?.message?.content),
+                skeleton,
+                { matchMap, confirmedSkills, cvData }
+              );
+              if (audited) {
+                content = audited;
+                auditSkipped = false;
+              }
+            }
+          } catch (auditError) {
+            const detail = auditError instanceof LLMProviderError
+              ? `${auditError.provider} ${auditError.status}` : auditError.message;
+            console.warn('[DraftApply] Structured audit skipped:', detail);
+          }
+
+          structuredCv = { skeleton, content };
+          tailoredCvText = tailor.renderTailoredCV(skeleton, content);
+          generationMode = 'structured';
+          completion = structuredCompletion;
+          data = structuredData;
+          tailorProvider = structuredCompletion.provider;
+        } else {
+          console.warn(`[DraftApply] Structured generation output unsalvageable${structuredTruncated ? ' (truncated)' : ''}; falling back to legacy text path.`);
+        }
+      } catch (e) {
+        if (e?.name === 'AbortError') throw e;
+        const detail = e instanceof LLMProviderError ? `${e.provider} ${e.status}` : e.message;
+        console.warn('[DraftApply] Structured generation failed; falling back to legacy text path:', detail);
+      }
+    }
+
+    // ── Legacy free-text path (fallback + kill-switch) ──
+    if (generationMode !== 'structured') {
+      const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(cvData, jdData, matchMap, {
+        domainRisk: tailorAgentContext.domainRisk,
+      });
+
+      completion = await callChatCompletionWithFallback({
         workflow: 'cv_tailor',
-        temperature: auditTemperature,
-        maxTokens: 6500,
-        timeoutMs: 30000,
-        fallbackTimeoutMs: 30000,
+        temperature: 0.3,
+        // CVs with many roles (senior candidates commonly have 6-7+) push the
+        // full regenerated text close to 4000 tokens; a model that spends any
+        // of its budget on preamble/reasoning before the CV body can then get
+        // cut off mid-sentence, silently dropping trailing bullets. 6000 gives
+        // real headroom without materially increasing cost for typical CVs.
+        maxTokens: 6000,
+        timeoutMs: 50000,
+        fallbackTimeoutMs: 50000,
         maxFallbackModels: 2,
         allowFallback: OPENROUTER_TAILOR_FALLBACK,
         messages: [
-          { role: 'system', content: auditSystemPrompt },
-          { role: 'user',   content: auditUserPrompt },
+          { role: 'system', content: systemPrompt },
+          { role: 'user',   content: userPrompt   }
         ],
       });
 
-      const auditData = await auditCompletion.response.json().catch(() => null);
-      const auditedText = auditData?.choices?.[0]?.message?.content;
-      // The audit pass rewrites the ENTIRE CV, not a diff - if the provider's
-      // response was cut off by the token budget, the result is a shorter,
-      // truncated CV that still structurally "looks like" one (has all the
-      // section headers isValidCvOutput checks for). Reject it outright
-      // rather than let a truncated rewrite silently replace the complete
-      // pre-audit text.
-      if (auditData?.choices?.[0]?.finish_reason === 'length') {
-        auditSkipped = true;
-        console.warn('[DraftApply] Audit output rejected: response was truncated (finish_reason=length)');
-      } else if (auditedText?.trim() && tailor.isValidCvOutput(auditedText)) {
-        const finalizedAudit = tailor.finalizeTailoredCV(auditedText, {
-          cvData,
-          jdData,
-          matchMap,
-          confirmedSkills,
-        });
-        if (finalizedAudit?.trim()) tailoredCvText = finalizedAudit;
-        else auditSkipped = true;
-      } else {
-        auditSkipped = true;
-        if (auditedText?.trim()) {
-          console.warn('[DraftApply] Audit output rejected: response does not look like a CV');
-        }
+      tailorProvider = completion.provider;
+      data = await completion.response.json().catch(() => null);
+      if (!data) {
+        console.error(`[DraftApply] ${tailorProvider} tailor response body failed to parse`);
+        return res.status(502).json({ error: 'Unexpected response from AI provider. Please try again.' });
       }
-    } catch (e) {
-      auditSkipped = true;
-      const detail = e instanceof LLMProviderError ? `${e.provider} ${e.status}` : e.message;
-      console.warn('[DraftApply] Tailored CV audit skipped:', detail);
+      tailorTruncated = data?.choices?.[0]?.finish_reason === 'length';
+      if (tailorTruncated) {
+        console.warn(`[DraftApply] ${tailorProvider} tailor response was truncated (finish_reason=length) - output may be missing trailing content.`);
+      }
+      tailoredCvText = tailor.finalizeTailoredCV(data?.choices?.[0]?.message?.content, {
+        cvData,
+        jdData,
+        matchMap,
+        confirmedSkills,
+      });
+      if (!tailoredCvText?.trim()) {
+        console.error(`[DraftApply] ${tailorProvider} returned empty tailor content`);
+        return res.status(502).json({ error: 'No output from provider' });
+      }
+
+      auditSkipped = false;
+      try {
+        const { systemPrompt: auditSystemPrompt, userPrompt: auditUserPrompt, temperature: auditTemperature } =
+          tailor.buildTailoredCvAuditPrompt(cvData, jdData, matchMap, tailoredCvText, confirmedSkills);
+        const auditCompletion = await callChatCompletionWithFallback({
+          workflow: 'cv_tailor',
+          temperature: auditTemperature,
+          maxTokens: 6500,
+          timeoutMs: 30000,
+          fallbackTimeoutMs: 30000,
+          maxFallbackModels: 2,
+          allowFallback: OPENROUTER_TAILOR_FALLBACK,
+          messages: [
+            { role: 'system', content: auditSystemPrompt },
+            { role: 'user',   content: auditUserPrompt },
+          ],
+        });
+
+        const auditData = await auditCompletion.response.json().catch(() => null);
+        const auditedText = auditData?.choices?.[0]?.message?.content;
+        // The audit pass rewrites the ENTIRE CV, not a diff - if the provider's
+        // response was cut off by the token budget, the result is a shorter,
+        // truncated CV that still structurally "looks like" one (has all the
+        // section headers isValidCvOutput checks for). Reject it outright
+        // rather than let a truncated rewrite silently replace the complete
+        // pre-audit text.
+        if (auditData?.choices?.[0]?.finish_reason === 'length') {
+          auditSkipped = true;
+          console.warn('[DraftApply] Audit output rejected: response was truncated (finish_reason=length)');
+        } else if (auditedText?.trim() && tailor.isValidCvOutput(auditedText)) {
+          const finalizedAudit = tailor.finalizeTailoredCV(auditedText, {
+            cvData,
+            jdData,
+            matchMap,
+            confirmedSkills,
+          });
+          if (finalizedAudit?.trim()) tailoredCvText = finalizedAudit;
+          else auditSkipped = true;
+        } else {
+          auditSkipped = true;
+          if (auditedText?.trim()) {
+            console.warn('[DraftApply] Audit output rejected: response does not look like a CV');
+          }
+        }
+      } catch (e) {
+        auditSkipped = true;
+        const detail = e instanceof LLMProviderError ? `${e.provider} ${e.status}` : e.message;
+        console.warn('[DraftApply] Tailored CV audit skipped:', detail);
+      }
     }
 
     const warnings        = [
@@ -1972,6 +2089,8 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
       warnings,
       changedSections,
       auditSkipped,
+      structuredCv,
+      generationMode,
       jdAnalysisSource,
       atsKeywordGaps,
       atsKeywordCoverage,

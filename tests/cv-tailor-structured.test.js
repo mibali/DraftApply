@@ -1,0 +1,384 @@
+import { describe, expect, it } from 'vitest';
+import { CVTailor } from '../shared/cv-tailor.js';
+
+const tailor = new CVTailor();
+
+const cvData = {
+  contactInfo: {
+    name: 'Michael T Bali',
+    email: 'mtb@example.com',
+    phone: '07401731548',
+    linkedin: 'linkedin.com/in/michael-bali',
+  },
+  summary: 'Cloud, platform, and MLOps engineer with production support background.',
+  experience: [
+    {
+      company: 'DualMind Tech Consulting Ltd | Birmingham, UK',
+      title: 'MLOps / DevOps Engineer',
+      dates: 'Sep 2025 - Present',
+      responsibilities: [
+        'Designed end-to-end MLOps workflows covering model training, deployment, and monitoring.',
+        'Deployed ML inference services on Kubernetes using KServe patterns.',
+      ],
+    },
+    {
+      company: 'Semgrep | USA',
+      title: 'Senior Customer Success Engineer',
+      dates: 'Feb 2024 - Jun 2025',
+      responsibilities: [
+        'Resolved complex Tier 3/4 security platform issues across CI/CD pipelines.',
+      ],
+    },
+    {
+      company: 'Bincom ICT Solutions | Nigeria',
+      title: 'Python Developer',
+      dates: 'Feb 2019 - May 2020',
+      responsibilities: [
+        'Developed reusable, testable Python code for production systems.',
+      ],
+    },
+  ],
+  skills: ['Terraform', 'Kubernetes', 'MLflow', 'AWS', 'Python', 'Docker'],
+  education: [{ institution: 'University of Cape Coast', degree: 'BSc Information Technology', dates: '2018' }],
+  certifications: ['Certified Kubernetes Administrator (CKA)'],
+  rawText: [
+    'Michael T Bali',
+    'MLOps Engineer',
+    'mtb@example.com',
+    '07401731548',
+    'Birmingham, UK',
+    '',
+    'PROFESSIONAL SUMMARY',
+    'Cloud, platform, and MLOps engineer with production support background.',
+    '',
+    'PROFESSIONAL EXPERIENCE',
+    'DualMind Tech Consulting Ltd | Birmingham, UK',
+    'Sep 2025 - Present',
+    'MLOps / DevOps Engineer',
+    '• Designed end-to-end MLOps workflows covering model training, deployment, and monitoring.',
+    '',
+    'EDUCATION, CERTIFICATIONS & RECOGNITION',
+    'BSc Information Technology, University of Cape Coast, 2018',
+    'Certified Kubernetes Administrator (CKA)',
+    'UK Global Talent Endorsement - Tech Nation',
+  ].join('\n'),
+};
+
+const jdData = { jobTitle: 'Senior MLOps Engineer', company: 'ClimateAi', seniority: 'Senior' };
+
+describe('buildCvSkeleton', () => {
+  const skeleton = tailor.buildCvSkeleton(cvData, jdData);
+
+  it('locks company, dates, and title verbatim per role with stable ids', () => {
+    expect(skeleton.roles).toHaveLength(3);
+    expect(skeleton.roles[0]).toMatchObject({
+      id: 'role_0',
+      company: 'DualMind Tech Consulting Ltd | Birmingham, UK',
+      dates: 'Sep 2025 - Present',
+      title: 'MLOps / DevOps Engineer',
+    });
+    expect(skeleton.roles[1].id).toBe('role_1');
+    expect(skeleton.roles[0].originalBullets).toHaveLength(2);
+  });
+
+  it('uses the target job title as the headline', () => {
+    expect(skeleton.headline).toBe('Senior MLOps Engineer');
+  });
+
+  it('takes header contact lines verbatim from the raw CV, including location', () => {
+    expect(skeleton.contacts).toContain('Birmingham, UK');
+    expect(skeleton.contacts).toContain('mtb@example.com');
+    // The old professional headline is NOT a contact line.
+    expect(skeleton.contacts).not.toContain('MLOps Engineer');
+  });
+
+  it('extracts education lines verbatim from a compound raw section header', () => {
+    expect(skeleton.educationLines).toEqual([
+      'BSc Information Technology, University of Cape Coast, 2018',
+      'Certified Kubernetes Administrator (CKA)',
+      'UK Global Talent Endorsement - Tech Nation',
+    ]);
+  });
+
+  it('falls back to parsed education + certifications when raw text has no education section', () => {
+    const skel = tailor.buildCvSkeleton({ ...cvData, rawText: '' }, jdData);
+    expect(skel.educationLines).toContain('BSc Information Technology, University of Cape Coast, 2018');
+    expect(skel.educationLines).toContain('Certified Kubernetes Administrator (CKA)');
+  });
+});
+
+describe('parseStructuredContent', () => {
+  it('parses clean JSON', () => {
+    expect(tailor.parseStructuredContent('{"summary":"x"}')).toEqual({ summary: 'x' });
+  });
+
+  it('parses fenced JSON', () => {
+    expect(tailor.parseStructuredContent('```json\n{"summary":"x"}\n```')).toEqual({ summary: 'x' });
+  });
+
+  it('parses JSON wrapped in prose', () => {
+    expect(tailor.parseStructuredContent('Here is the result:\n{"summary":"x"}\nHope that helps!'))
+      .toEqual({ summary: 'x' });
+  });
+
+  it('returns null for garbage, arrays, and empty input', () => {
+    expect(tailor.parseStructuredContent('not json at all')).toBeNull();
+    expect(tailor.parseStructuredContent('[1,2,3]')).toBeNull();
+    expect(tailor.parseStructuredContent('')).toBeNull();
+    expect(tailor.parseStructuredContent('{"broken": ')).toBeNull();
+  });
+});
+
+describe('validateStructuredContent', () => {
+  const skeleton = tailor.buildCvSkeleton(cvData, jdData);
+  const opts = { matchMap: [], confirmedSkills: [], cvData };
+
+  it('returns null for unusable input', () => {
+    expect(tailor.validateStructuredContent(null, skeleton, opts)).toBeNull();
+    expect(tailor.validateStructuredContent({ summary: '' }, { roles: [] }, opts)).toBeNull();
+  });
+
+  it('backfills a role the model dropped from its original bullets - a role can never disappear', () => {
+    const content = tailor.validateStructuredContent({
+      summary: 'Engineer.',
+      competencies: [],
+      roles: [{ id: 'role_0', focus: null, bullets: ['Designed and shipped ML workflows on Kubernetes clusters.'] }],
+    }, skeleton, opts);
+    const role1 = content.roles.find(r => r.id === 'role_1');
+    expect(role1.bullets).toEqual(['Resolved complex Tier 3/4 security platform issues across CI/CD pipelines.']);
+    expect(content.roles).toHaveLength(3);
+  });
+
+  it('ignores role ids that do not exist in the skeleton', () => {
+    const content = tailor.validateStructuredContent({
+      summary: 'Engineer.',
+      competencies: [],
+      roles: [{ id: 'role_99', focus: 'Invented role', bullets: ['Fabricated bullet content here.'] }],
+    }, skeleton, opts);
+    expect(content.roles.map(r => r.id)).toEqual(['role_0', 'role_1', 'role_2']);
+    expect(JSON.stringify(content)).not.toContain('Fabricated');
+  });
+
+  it('drops requirement-prose competency items and unsupported inventions, keeps real skills', () => {
+    const content = tailor.validateStructuredContent({
+      summary: 'Engineer.',
+      competencies: [
+        { label: 'Infrastructure as Code', items: ['Terraform', 'IaC using Terraform', 'deep experience building systems'] },
+        { label: 'Cloud', items: ['AWS', 'Kubernetes', 'QuantumFabricator 9000'] },
+      ],
+      roles: [{ id: 'role_0', focus: null, bullets: ['Did the original work described in the CV.'] }],
+    }, skeleton, opts);
+    const allItems = content.competencies.flatMap(c => c.items);
+    expect(allItems).toContain('Terraform');
+    expect(allItems).toContain('AWS');
+    expect(allItems).not.toContain('IaC using Terraform');
+    expect(allItems).not.toContain('deep experience building systems');
+    expect(allItems).not.toContain('QuantumFabricator 9000');
+  });
+
+  it('always includes user-confirmed skills even when the model omitted them', () => {
+    const content = tailor.validateStructuredContent({
+      summary: 'Engineer.',
+      competencies: [{ label: 'Cloud', items: ['AWS', 'Kubernetes'] }],
+      roles: [{ id: 'role_0', focus: null, bullets: ['Did the original work described in the CV.'] }],
+    }, skeleton, { ...opts, confirmedSkills: ['Neptune.ai'] });
+    const allItems = content.competencies.flatMap(c => c.items);
+    expect(allItems).toContain('Neptune.ai');
+  });
+
+  it('strips a redundant "Focus:" prefix and clamps focus length', () => {
+    const content = tailor.validateStructuredContent({
+      summary: 'Engineer.',
+      competencies: [],
+      roles: [{ id: 'role_0', focus: 'Focus: Improving platform reliability', bullets: ['Kept the platform reliable throughout.'] }],
+    }, skeleton, opts);
+    expect(content.roles[0].focus).toBe('Improving platform reliability');
+  });
+
+  it('dedupes near-identical and truncated-duplicate bullets within a role', () => {
+    const content = tailor.validateStructuredContent({
+      summary: 'Engineer.',
+      competencies: [],
+      roles: [{
+        id: 'role_0',
+        focus: null,
+        bullets: [
+          'Designed end-to-end MLOps workflows covering model training, deployment, and monitoring.',
+          'Designed end-to-end MLOps workflows covering model training, deployment, and',
+        ],
+      }],
+    }, skeleton, opts);
+    expect(content.roles[0].bullets.filter(b => b.startsWith('Designed end-to-end'))).toHaveLength(1);
+  });
+});
+
+describe('_dedupeContainedSkillItems', () => {
+  it('collapses phrase-shaped variants into the listed tool, keeps compound product names', () => {
+    expect(tailor._dedupeContainedSkillItems([
+      'Terraform', 'IaC using Terraform', 'Azure', 'Azure DevOps',
+      'reproducible training', 'reproducible training workflows',
+    ])).toEqual(['Terraform', 'Azure', 'Azure DevOps', 'reproducible training']);
+  });
+});
+
+describe('buildStructuredTailoringPrompt', () => {
+  const matchMap = [
+    { requirement: 'Kubernetes', allowedToMention: true, confirmedByUser: false, type: 'tool' },
+    { requirement: 'Petabyte-scale datasets', allowedToMention: false, confirmedByUser: false, type: 'preferred' },
+  ];
+  const prompt = tailor.buildStructuredTailoringPrompt(cvData, jdData, matchMap, { confirmedSkills: ['Neptune.ai'] });
+
+  it('returns prompts, temperature, and the skeleton', () => {
+    expect(prompt.systemPrompt).toBeTruthy();
+    expect(prompt.userPrompt).toBeTruthy();
+    expect(prompt.temperature).toBeLessThanOrEqual(0.5);
+    expect(prompt.skeleton.roles).toHaveLength(3);
+  });
+
+  it('instructs JSON-only output with the exact schema and forbids locked fields', () => {
+    expect(prompt.systemPrompt).toContain('ONLY a single JSON object');
+    expect(prompt.systemPrompt).toContain('"competencies"');
+    expect(prompt.systemPrompt).toContain('"roles"');
+    expect(prompt.systemPrompt).toMatch(/No section headers, dates, company names/);
+  });
+
+  it('lists every role id with its original bullets for grounding', () => {
+    expect(prompt.userPrompt).toContain('role_0');
+    expect(prompt.userPrompt).toContain('role_2');
+    expect(prompt.userPrompt).toContain('Designed end-to-end MLOps workflows');
+  });
+
+  it('carries supported, unsupported, and confirmed requirements', () => {
+    expect(prompt.userPrompt).toContain('✓ Kubernetes');
+    expect(prompt.userPrompt).toContain('✗ Petabyte-scale datasets');
+    expect(prompt.userPrompt).toContain('+ Neptune.ai');
+  });
+});
+
+describe('buildStructuredAuditPrompt', () => {
+  it('audits the same JSON shape against original bullets', () => {
+    const skeleton = tailor.buildCvSkeleton(cvData, jdData);
+    const content = { summary: 'x', competencies: [], roles: [{ id: 'role_0', focus: null, bullets: ['b'] }] };
+    const prompt = tailor.buildStructuredAuditPrompt(skeleton, content, []);
+    expect(prompt.systemPrompt).toContain('same JSON shape');
+    expect(prompt.userPrompt).toContain('ORIGINAL ROLE BULLETS');
+    expect(prompt.userPrompt).toContain(JSON.stringify(content));
+  });
+});
+
+describe('renderTailoredCV', () => {
+  const skeleton = tailor.buildCvSkeleton(cvData, jdData);
+
+  it('renders the exact canonical Harvard shape (golden test)', () => {
+    const content = {
+      summary: 'Cloud, platform, and MLOps engineer targeting ML platform work.',
+      competencies: [
+        { label: 'Cloud & ML Platform', items: ['AWS', 'Kubernetes', 'MLflow'] },
+        { label: 'Automation', items: ['Terraform', 'Python'] },
+      ],
+      roles: [
+        { id: 'role_0', focus: 'Designing scalable ML workflows', bullets: ['Designed end-to-end MLOps workflows.'] },
+        { id: 'role_1', focus: null, bullets: ['Resolved complex Tier 3/4 security platform issues.'] },
+        { id: 'role_2', focus: null, bullets: ['Developed reusable, testable Python code.'] },
+      ],
+    };
+    expect(tailor.renderTailoredCV(skeleton, content)).toBe([
+      'Michael T Bali',
+      'Senior MLOps Engineer',
+      'mtb@example.com',
+      '07401731548',
+      'Birmingham, UK',
+      '',
+      'PROFESSIONAL SUMMARY',
+      'Cloud, platform, and MLOps engineer targeting ML platform work.',
+      '',
+      'CORE COMPETENCIES',
+      'Cloud & ML Platform: AWS, Kubernetes, MLflow',
+      'Automation: Terraform, Python',
+      '',
+      'PROFESSIONAL EXPERIENCE',
+      'DualMind Tech Consulting Ltd | Birmingham, UK',
+      'Sep 2025 - Present',
+      'MLOps / DevOps Engineer',
+      'Focus: Designing scalable ML workflows',
+      '• Designed end-to-end MLOps workflows.',
+      '',
+      'Semgrep | USA',
+      'Feb 2024 - Jun 2025',
+      'Senior Customer Success Engineer',
+      '• Resolved complex Tier 3/4 security platform issues.',
+      '',
+      'Bincom ICT Solutions | Nigeria',
+      'Feb 2019 - May 2020',
+      'Python Developer',
+      '• Developed reusable, testable Python code.',
+      '',
+      'EDUCATION, CERTIFICATIONS & RECOGNITION',
+      '• BSc Information Technology, University of Cape Coast, 2018',
+      '• Certified Kubernetes Administrator (CKA)',
+      '• UK Global Talent Endorsement - Tech Nation',
+      '',
+    ].join('\n'));
+  });
+
+  it('omits empty sections instead of emitting bare headers', () => {
+    const text = tailor.renderTailoredCV(
+      { ...skeleton, educationLines: [] },
+      { summary: '', competencies: [], roles: skeleton.roles.map(r => ({ id: r.id, focus: null, bullets: ['Did the work.'] })) }
+    );
+    expect(text).not.toContain('PROFESSIONAL SUMMARY');
+    expect(text).not.toContain('CORE COMPETENCIES');
+    expect(text).not.toContain('EDUCATION');
+    expect(text).toContain('PROFESSIONAL EXPERIENCE');
+  });
+});
+
+describe('structured pipeline end-to-end with a mocked model response (adversarial)', () => {
+  it('produces a clean CV even when the model response is fenced, disordered, and partially fabricated', () => {
+    const matchMap = [{ requirement: 'Kubernetes', allowedToMention: true, confirmedByUser: false, type: 'tool' }];
+    const prompt = tailor.buildStructuredTailoringPrompt(cvData, jdData, matchMap, { confirmedSkills: [] });
+
+    // Everything a misbehaving model might do: markdown fences, roles out of
+    // order, one role missing, a foreign role id, prose-shaped competency
+    // items, an invented tool, dates/companies smuggled into a bullet.
+    const mockModelResponse = [
+      '```json',
+      JSON.stringify({
+        summary: 'Cloud, platform, and MLOps engineer with hands-on Kubernetes and Terraform experience.',
+        competencies: [
+          { label: 'Infrastructure as Code', items: ['Terraform', 'IaC using Terraform'] },
+          { label: 'Cloud Platforms', items: ['AWS', 'Kubernetes', 'HyperCloud Ultra'] },
+        ],
+        roles: [
+          { id: 'role_2', focus: null, bullets: ['Developed reusable, testable Python code for production systems.'] },
+          { id: 'role_99', focus: 'Fake role', bullets: ['Fabricated achievement at a fabricated employer.'] },
+          { id: 'role_0', focus: 'Focus: ML platform engineering', bullets: ['Designed end-to-end MLOps workflows on Kubernetes at DualMind (Sep 2025 - Present).'] },
+        ],
+      }),
+      '```',
+    ].join('\n');
+
+    const content = tailor.validateStructuredContent(
+      tailor.parseStructuredContent(mockModelResponse),
+      prompt.skeleton,
+      { matchMap, confirmedSkills: [], cvData }
+    );
+    const text = tailor.renderTailoredCV(prompt.skeleton, content);
+
+    // Locked structure intact and in CV order, regardless of model disorder.
+    expect(text.indexOf('DualMind Tech Consulting Ltd')).toBeLessThan(text.indexOf('Semgrep | USA'));
+    expect(text.indexOf('Semgrep | USA')).toBeLessThan(text.indexOf('Bincom ICT Solutions'));
+    expect(text).toContain('Semgrep | USA\nFeb 2024 - Jun 2025\nSenior Customer Success Engineer');
+    // Dropped role backfilled from originals; fabricated role gone.
+    expect(text).toContain('Resolved complex Tier 3/4 security platform issues');
+    expect(text).not.toContain('Fabricated achievement');
+    // Competency hygiene.
+    expect(text).toContain('Terraform');
+    expect(text).not.toContain('IaC using Terraform');
+    expect(text).not.toContain('HyperCloud Ultra');
+    // Focus rendered in its fixed slot under the title.
+    expect(text).toContain('MLOps / DevOps Engineer\nFocus: ML platform engineering');
+    // Education verbatim at the end.
+    expect(text).toContain('EDUCATION, CERTIFICATIONS & RECOGNITION\n• BSc Information Technology');
+  });
+});

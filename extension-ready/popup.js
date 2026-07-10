@@ -852,8 +852,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
+  // Structured payload from the last generation (docs/structured-cv-generation.md).
+  // Passed to the export page so it can render HTML directly from structure
+  // instead of re-parsing text - but only while the textarea still matches
+  // the rendered text (a user edit invalidates the structured copy).
+  let lastStructuredCv = null;
+  let lastStructuredText = '';
+
   function displayTailorResults(result) {
     const { tailoredCvText, matchReport, warnings, provider, fallbackFrom, model, auditSkipped } = result;
+    lastStructuredCv = result.structuredCv || null;
+    lastStructuredText = tailoredCvText || '';
     displayMatchReport(matchReport, { reviewMode: false, domainSuggestions: [] });
     renderTailorAgentInsights(result.agentInsights || result);
 
@@ -1275,7 +1284,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         linkAnnotations = Array.isArray(cvResp?.linkAnnotations) ? cvResp.linkAnnotations : [];
       } catch { /* non-fatal */ }
 
-      await chrome.storage.local.set({ tailoredCvExport: text, tailoredCvContactUrls: contactUrls, tailoredCvLinkAnnotations: linkAnnotations });
+      const structuredForExport =
+        (lastStructuredCv && text === lastStructuredText) ? lastStructuredCv : null;
+      await chrome.storage.local.set({
+        tailoredCvExport: text,
+        tailoredCvContactUrls: contactUrls,
+        tailoredCvLinkAnnotations: linkAnnotations,
+        tailoredCvStructured: structuredForExport,
+      });
       await chrome.tabs.create({ url: chrome.runtime.getURL('cv-export.html') });
       await window.DraftApplyStats?.track?.('cvExports');
       await refreshStatsUI();

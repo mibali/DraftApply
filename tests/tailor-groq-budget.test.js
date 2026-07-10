@@ -14,11 +14,13 @@ function getCvTailorRoute(source) {
 }
 
 describe('Tailor CV Groq budget', () => {
-  it('keeps the production Tailor CV route to the main generation call plus audit', () => {
+  it('keeps the production Tailor CV route to generation + audit per path (structured primary, legacy fallback)', () => {
     const route = getCvTailorRoute(renderProxyServer);
     const llmCalls = route.match(/callChatCompletionWithFallback/g) || [];
 
-    expect(llmCalls).toHaveLength(2);
+    // 2 structured (generation + audit) + 2 legacy fallback (generation + audit).
+    // Only one path runs per request.
+    expect(llmCalls).toHaveLength(4);
     expect(route).toContain('buildTailoringPrompt');
     expect(route).toContain('buildTailoredCvAuditPrompt');
     expect(route).toContain('buildRecruiterReview');
@@ -27,6 +29,22 @@ describe('Tailor CV Groq budget', () => {
     expect(route).toContain('allowFallback: OPENROUTER_TAILOR_FALLBACK');
     expect(route).not.toContain('buildLLMAnalysisPrompt');
     expect(route).not.toContain('buildSemanticMatchPrompt');
+  });
+
+  it('runs the structured generation path first with legacy free-text as per-request fallback', () => {
+    const route = getCvTailorRoute(renderProxyServer);
+    expect(renderProxyServer).toContain("const STRUCTURED_CV_GENERATION = !/^false$/i.test(process.env.STRUCTURED_CV_GENERATION || 'true')");
+    expect(route).toContain('buildStructuredTailoringPrompt');
+    expect(route).toContain('validateStructuredContent');
+    expect(route).toContain('renderTailoredCV');
+    expect(route).toContain('buildStructuredAuditPrompt');
+    expect(route).toContain("generationMode = 'structured'");
+    expect(route).toContain("if (generationMode !== 'structured')");
+    expect(route).toContain('structuredCv,');
+    expect(route).toContain('generationMode,');
+    // JSON mode requested for structured calls; provider guard lives in callProviderChat.
+    expect(route).toContain("responseFormat: { type: 'json_object' }");
+    expect(renderProxyServer).toContain("responseFormat && provider === 'groq'");
   });
 
   it('uses OpenRouter only as a retry fallback behind Groq in production', () => {
@@ -69,13 +87,17 @@ describe('Tailor CV Groq budget', () => {
     expect(renderProxyServer).toContain('llmErrorResponse(e, { allowFallback: OPENROUTER_TAILOR_FALLBACK })');
   });
 
-  it('keeps the local Tailor CV route to the main generation call plus audit', () => {
+  it('keeps the local Tailor CV route to generation + audit per path (structured primary, legacy fallback)', () => {
     const route = getCvTailorRoute(backendServer);
     // Local dev uses generateWithFallback (same as production) so Groq failures
     // don't cause silent hangs when an Ollama or other local provider is available.
     const fallbackCalls = route.match(/await generateWithFallback\(FALLBACK_CHAIN/g) || [];
 
-    expect(fallbackCalls).toHaveLength(2);
+    // 2 structured + 2 legacy fallback; only one path runs per request.
+    expect(fallbackCalls).toHaveLength(4);
+    expect(route).toContain('buildStructuredTailoringPrompt');
+    expect(route).toContain('validateStructuredContent');
+    expect(route).toContain('renderTailoredCV');
     expect(route).toContain('buildTailoringPrompt');
     expect(route).toContain('buildTailoredCvAuditPrompt');
     expect(route).toContain('buildRecruiterReview');

@@ -461,6 +461,15 @@ describe('_isLikelySectionHeader compound headings (regression)', () => {
     expect(tailor._isLikelySectionHeader('TECHNICAL LEADERSHIP, ACHIEVEMENTS & INNOVATION')).toBe(true);
   });
 
+  it('recognises a slash-separated ALL-CAPS heading as a section boundary (regression)', () => {
+    // "/" previously disqualified the line entirely, so "EDUCATION /
+    // CERTIFICATIONS" was invisible to entry-boundary detection and the last
+    // experience entry's window swallowed the whole education section.
+    expect(tailor._isLikelySectionHeader('EDUCATION / CERTIFICATIONS')).toBe(true);
+    // Dates and contact-ish lines still never qualify.
+    expect(tailor._isLikelySectionHeader('FEB 2019 - MAY 2020')).toBe(false);
+  });
+
   it('does not treat a bare all-caps company acronym as a section boundary', () => {
     expect(tailor._isLikelySectionHeader('IBM')).toBe(false);
     expect(tailor._isLikelySectionHeader('NASA')).toBe(false);

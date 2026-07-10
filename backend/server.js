@@ -535,6 +535,61 @@ app.post('/api/cv/tailor', async (req, res) => {
     const tailor = new CVTailor();
     const matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
 
+    // Structured path (docs/structured-cv-generation.md), mirroring the
+    // production route in render-proxy/server.js: model returns only mutable
+    // JSON content against a locked skeleton; falls back to the legacy text
+    // path when the output is unsalvageable.
+    const structuredEnabled = !/^false$/i.test(process.env.STRUCTURED_CV_GENERATION || 'true');
+    let tailoredCvText = '';
+    let structuredCv = null;
+    let generationMode = 'legacy-text';
+    let auditSkipped = false;
+
+    if (structuredEnabled && Array.isArray(cvData.experience) && cvData.experience.length > 0) {
+      try {
+        const structuredPrompt = tailor.buildStructuredTailoringPrompt(cvData, jdData, matchMap, { confirmedSkills });
+        const structuredResult = await generateWithFallback(FALLBACK_CHAIN, [
+          { role: 'system', content: structuredPrompt.systemPrompt },
+          { role: 'user',   content: structuredPrompt.userPrompt   },
+        ], { temperature: structuredPrompt.temperature, max_tokens: 2500 });
+        let content = tailor.validateStructuredContent(
+          tailor.parseStructuredContent(structuredResult.answer),
+          structuredPrompt.skeleton,
+          { matchMap, confirmedSkills, cvData }
+        );
+        if (content) {
+          auditSkipped = true;
+          try {
+            const auditPrompt = tailor.buildStructuredAuditPrompt(structuredPrompt.skeleton, content, matchMap);
+            const auditResult = await generateWithFallback(FALLBACK_CHAIN, [
+              { role: 'system', content: auditPrompt.systemPrompt },
+              { role: 'user',   content: auditPrompt.userPrompt   },
+            ], { temperature: auditPrompt.temperature, max_tokens: 2500 });
+            const audited = tailor.validateStructuredContent(
+              tailor.parseStructuredContent(auditResult.answer),
+              structuredPrompt.skeleton,
+              { matchMap, confirmedSkills, cvData }
+            );
+            if (audited) {
+              content = audited;
+              auditSkipped = false;
+            }
+          } catch (auditError) {
+            console.warn('[Structured audit] skipped:', auditError.message);
+          }
+          structuredCv = { skeleton: structuredPrompt.skeleton, content };
+          tailoredCvText = tailor.renderTailoredCV(structuredPrompt.skeleton, content);
+          generationMode = 'structured';
+        } else {
+          console.warn('[Structured generation] output unsalvageable; falling back to legacy text path.');
+        }
+      } catch (e) {
+        console.warn('[Structured generation] failed; falling back to legacy text path:', e.message);
+      }
+    }
+
+    if (generationMode !== 'structured') {
+
     const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(cvData, jdData, matchMap);
 
     const messages = [
@@ -550,7 +605,7 @@ app.post('/api/cv/tailor', async (req, res) => {
       max_tokens: 6000
     });
 
-    let tailoredCvText = tailor.finalizeTailoredCV(result.answer, {
+    tailoredCvText = tailor.finalizeTailoredCV(result.answer, {
       cvData,
       jdData,
       matchMap,
@@ -560,7 +615,7 @@ app.post('/api/cv/tailor', async (req, res) => {
       return res.status(502).json({ error: 'No output from provider' });
     }
 
-    let auditSkipped = false;
+    auditSkipped = false;
     try {
       const { systemPrompt: auditSystemPrompt, userPrompt: auditUserPrompt, temperature: auditTemperature } =
         tailor.buildTailoredCvAuditPrompt(cvData, jdData, matchMap, tailoredCvText, confirmedSkills);
@@ -589,6 +644,8 @@ app.post('/api/cv/tailor', async (req, res) => {
       console.warn('[Tailored CV audit] LLM verification failed, using deterministic cleanup only:', e.message);
     }
 
+    } // end legacy text path
+
     const warnings        = [
       ...tailor.validateTailoredCV(cvData, tailoredCvText),
       ...tailor.validateTailoringQuality(cvData, jdData, matchMap, tailoredCvText, confirmedSkills),
@@ -607,7 +664,7 @@ app.post('/api/cv/tailor', async (req, res) => {
     const { missingKeywords: atsKeywordGaps, coverage: atsKeywordCoverage } =
       tailor.checkAtsKeywordCoverage(tailoredCvText, jdData);
 
-    res.json({ tailoredCvText, matchReport, recruiterReview, warnings, changedSections, auditSkipped, jdAnalysisSource, atsKeywordGaps, atsKeywordCoverage });
+    res.json({ tailoredCvText, structuredCv, generationMode, matchReport, recruiterReview, warnings, changedSections, auditSkipped, jdAnalysisSource, atsKeywordGaps, atsKeywordCoverage });
   } catch (error) {
     console.error('CV tailor error:', error);
     res.status(500).json({ error: 'Failed to tailor CV', details: error.message });

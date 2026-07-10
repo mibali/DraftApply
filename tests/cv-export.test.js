@@ -24,6 +24,23 @@ function loadFormatter() {
   return sandbox.__formatCvToHtml;
 }
 
+function loadStructuredFormatter() {
+  const code = fs.readFileSync(new URL('../extension-ready/cv-export.js', import.meta.url), 'utf8');
+  const fakeEl = { hidden: false, innerHTML: '', textContent: '' };
+  const sandbox = {
+    chrome: {
+      storage: { local: { async get() { return {}; }, async remove() {} } },
+      tabs: { async getCurrent() { return null; }, async remove() {} },
+    },
+    document: { getElementById() { return { ...fakeEl, addEventListener() {} }; } },
+    window: { print() {}, close() {} },
+    URL,
+    console,
+  };
+  vm.runInNewContext(`${code}\nglobalThis.__formatStructuredCvToHtml = formatStructuredCvToHtml;`, sandbox);
+  return sandbox.__formatStructuredCvToHtml;
+}
+
 function loadExportHelpers() {
   const code = fs.readFileSync(new URL('../extension-ready/cv-export.js', import.meta.url), 'utf8');
   const fakeEl = {
@@ -527,6 +544,65 @@ DevOps Engineer
     expect(html).toContain('<span class="cv-company">Opay Financial Services | Nigeria</span>');
     expect(html).toContain('<span class="cv-entry-dates">Mar 2021 - Jun 2021</span>');
     expect(html).toContain('<p class="cv-job-title">DevOps Engineer</p>');
+  });
+
+  it('renders a structured payload directly from data with no text parsing', () => {
+    const formatStructuredCvToHtml = loadStructuredFormatter();
+    const html = formatStructuredCvToHtml({
+      skeleton: {
+        name: 'Michael T Bali',
+        headline: 'Senior MLOps Engineer',
+        contacts: ['mtb@example.com', 'Birmingham, UK'],
+        roles: [
+          { id: 'role_0', company: 'Semgrep | USA', dates: 'Feb 2024 - Jun 2025', title: 'Senior Customer Success Engineer', originalBullets: [] },
+        ],
+        educationLines: ['BSc Information Technology, University of Cape Coast, 2018'],
+      },
+      content: {
+        summary: 'Cloud and MLOps engineer.',
+        competencies: [{ label: 'Cloud', items: ['AWS', 'Kubernetes'] }],
+        roles: [{ id: 'role_0', focus: 'Security platform reliability', bullets: ['Resolved complex Tier 3/4 security platform issues.'] }],
+      },
+    });
+
+    expect(html).toContain('<h1 class="cv-name">Michael T Bali</h1>');
+    expect(html).toContain('<p class="cv-headline">Senior MLOps Engineer</p>');
+    expect(html).toContain('<span class="cv-company">Semgrep | USA</span>');
+    expect(html).toContain('<span class="cv-entry-dates">Feb 2024 - Jun 2025</span>');
+    expect(html).toContain('<p class="cv-job-title">Senior Customer Success Engineer</p>');
+    expect(html).toContain('<p class="cv-role-focus">Focus: Security platform reliability</p>');
+    expect(html).toContain('<li>Resolved complex Tier 3/4 security platform issues.</li>');
+    expect(html).toContain('<strong>Cloud:</strong> AWS, Kubernetes');
+    expect(html).toContain('Education, Certifications &amp; Recognition');
+  });
+
+  it('returns empty HTML for a broken structured payload so the caller falls back to text parsing', () => {
+    const formatStructuredCvToHtml = loadStructuredFormatter();
+    expect(formatStructuredCvToHtml(null)).toBe('');
+    expect(formatStructuredCvToHtml({ skeleton: null, content: {} })).toBe('');
+    expect(formatStructuredCvToHtml({ skeleton: { roles: 'not-an-array' }, content: {} })).toBe('');
+  });
+
+  it('treats a slash-separated ALL-CAPS heading as a section header, not entry content (regression)', () => {
+    const formatCvToHtml = loadFormatter();
+    const html = formatCvToHtml(`Jordan Taylor
+Senior Engineer
+
+PROFESSIONAL EXPERIENCE
+Bincom ICT Solutions | Nigeria
+Feb 2019 - May 2020
+Python Developer
+
+• Developed reusable, testable Python code.
+
+EDUCATION / CERTIFICATIONS
+BSc Information Technology, University of Cape Coast, 2018
+Certified Kubernetes Administrator (CKA)`);
+
+    expect(html).toContain('<h2 class="cv-section-header">EDUCATION / CERTIFICATIONS</h2>');
+    // The BSc line must not be misparsed as right-aligned entry dates.
+    expect(html).not.toContain('cv-entry-dates">BSc');
+    expect(html).not.toContain('cv-company">EDUCATION');
   });
 
   it('builds an editable Word-compatible document from the rendered CV HTML', () => {

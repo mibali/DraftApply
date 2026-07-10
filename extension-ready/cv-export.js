@@ -18,10 +18,11 @@
     window.close();
   });
 
-  const stored = await chrome.storage.local.get(['tailoredCvExport', 'tailoredCvContactUrls', 'tailoredCvLinkAnnotations']);
+  const stored = await chrome.storage.local.get(['tailoredCvExport', 'tailoredCvContactUrls', 'tailoredCvLinkAnnotations', 'tailoredCvStructured']);
   const tailoredCvExport = stored.tailoredCvExport;
   const originalContactUrls = stored.tailoredCvContactUrls || {};
   const linkAnnotations = Array.isArray(stored.tailoredCvLinkAnnotations) ? stored.tailoredCvLinkAnnotations : [];
+  const structuredCv = stored.tailoredCvStructured || null;
   const loading = document.getElementById('loading');
   const content = document.getElementById('cv-content');
 
@@ -30,16 +31,93 @@
     return;
   }
 
-  await chrome.storage.local.remove(['tailoredCvExport', 'tailoredCvContactUrls', 'tailoredCvLinkAnnotations']);
+  await chrome.storage.local.remove(['tailoredCvExport', 'tailoredCvContactUrls', 'tailoredCvLinkAnnotations', 'tailoredCvStructured']);
 
   // Set page title (and therefore PDF filename) to "Full Name CV"
-  const candidateName = tailoredCvExport.split('\n').map(l => l.trim()).find(l => l.length > 0);
+  const candidateName = structuredCv?.skeleton?.name
+    || tailoredCvExport.split('\n').map(l => l.trim()).find(l => l.length > 0);
   if (candidateName) document.title = `${candidateName} CV`;
 
-  content.innerHTML = formatCvToHtml(tailoredCvExport, originalContactUrls, linkAnnotations);
+  // Structured payload renders directly from data - no text re-parsing, so
+  // none of the text-parsing failure modes apply. Any defect in the payload
+  // falls back to the legacy text renderer.
+  let html = '';
+  if (structuredCv) {
+    try {
+      html = formatStructuredCvToHtml(structuredCv, linkAnnotations);
+    } catch (e) {
+      console.warn('Structured render failed; falling back to text parsing:', e);
+      html = '';
+    }
+  }
+  content.innerHTML = html || formatCvToHtml(tailoredCvExport, originalContactUrls, linkAnnotations);
   loading.hidden = true;
   content.hidden = false;
 })();
+
+// ── Structured CV → HTML (no text parsing) ───────────────────────────────────
+// Renders directly from the locked skeleton + validated content produced by
+// the server (docs/structured-cv-generation.md). Reuses the same CSS classes
+// as the text renderer so print/Word output is identical.
+
+function formatStructuredCvToHtml(structuredCv, linkAnnotations = []) {
+  const skeleton = structuredCv?.skeleton;
+  const body = structuredCv?.content;
+  if (!skeleton || !body || !Array.isArray(skeleton.roles)) return '';
+
+  let html = '';
+  if (skeleton.name) html += `<h1 class="cv-name">${esc(skeleton.name)}</h1>`;
+  if (skeleton.headline) html += `<p class="cv-headline">${esc(skeleton.headline)}</p>`;
+  for (const contact of (skeleton.contacts || [])) {
+    html += `<p class="cv-contact">${renderInline(String(contact), linkAnnotations)}</p>`;
+  }
+  html += '<hr class="cv-header-rule">';
+
+  if (body.summary) {
+    html += '<h2 class="cv-section-header">Professional Summary</h2>';
+    html += `<p class="cv-body">${renderInline(body.summary, linkAnnotations)}</p>`;
+  }
+
+  if (Array.isArray(body.competencies) && body.competencies.length > 0) {
+    html += '<h2 class="cv-section-header">Core Competencies</h2>';
+    for (const cat of body.competencies) {
+      if (!cat?.label || !Array.isArray(cat.items) || cat.items.length === 0) continue;
+      html += `<p class="cv-skill-row"><strong>${esc(String(cat.label))}:</strong> ${renderInline(cat.items.join(', '), linkAnnotations)}</p>`;
+    }
+  }
+
+  if (skeleton.roles.length > 0) {
+    html += '<h2 class="cv-section-header">Professional Experience</h2>';
+    const contentById = new Map((body.roles || []).map(r => [r?.id, r]));
+    for (const role of skeleton.roles) {
+      const mutable = contentById.get(role.id);
+      html += '<div class="cv-entry"><div class="cv-entry-row">';
+      html += `<span class="cv-company">${esc(String(role.company || ''))}</span>`;
+      if (role.dates) html += `<span class="cv-entry-dates">${esc(String(role.dates))}</span>`;
+      html += '</div>';
+      if (role.title) html += `<p class="cv-job-title">${esc(String(role.title))}</p>`;
+      if (mutable?.focus) html += `<p class="cv-role-focus">Focus: ${esc(String(mutable.focus))}</p>`;
+      const bullets = Array.isArray(mutable?.bullets) ? mutable.bullets : [];
+      if (bullets.length > 0) {
+        html += '<ul class="cv-bullets">';
+        for (const bullet of bullets) html += `<li>${renderInline(String(bullet), linkAnnotations)}</li>`;
+        html += '</ul>';
+      }
+      html += '</div>';
+    }
+  }
+
+  if (Array.isArray(skeleton.educationLines) && skeleton.educationLines.length > 0) {
+    html += '<h2 class="cv-section-header">Education, Certifications &amp; Recognition</h2>';
+    html += '<ul class="cv-bullets">';
+    for (const line of skeleton.educationLines) {
+      html += `<li>${renderInline(String(line), linkAnnotations)}</li>`;
+    }
+    html += '</ul>';
+  }
+
+  return html;
+}
 
 // ── CV text → Harvard-style HTML ──────────────────────────────────────────────
 
@@ -55,8 +133,9 @@ function stripJobTitleLabel(line) {
 function isSectionHeader(line) {
   if (/^[\-•*●▪◦–—]\s/.test(line)) return false; // bullet lines are never section headers
   if (SECTION_RE.test(line)) return true;
-  // ALL CAPS line that reads as a heading
-  if (line.length >= 3 && line === line.toUpperCase() && /[A-Z]/.test(line) && !/[@+\d\/]/.test(line)) return true;
+  // ALL CAPS line that reads as a heading. "/" is allowed ("EDUCATION /
+  // CERTIFICATIONS"); digits, @ and + still disqualify (dates/contacts).
+  if (line.length >= 3 && line === line.toUpperCase() && /[A-Z]/.test(line) && !/[@+\d]/.test(line)) return true;
   return false;
 }
 
