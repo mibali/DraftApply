@@ -2282,10 +2282,31 @@ Do not add anything new. Return the complete corrected CV.`;
         if (headerish) { start = i; break; }
       }
       if (start !== -1) {
+        // Raw CV text (especially multi-page PDF extraction, or a previously
+        // exported CV re-uploaded as the source) can continue with EXPERIENCE
+        // content after the education header without any section header in
+        // between. Stop collecting the moment a line matches a known
+        // experience company/title from cvData, or looks like an experience
+        // entry header (short line carrying a full date RANGE - education
+        // lines carry single years like "..., 2018", never ranges).
+        const experienceMarkers = (cvData?.experience || [])
+          .flatMap(exp => [exp?.company, exp?.title])
+          .map(v => this._normaliseText(v))
+          .filter(marker => marker && marker.length >= 6);
+        const looksLikeExperienceContent = (trimmed) => {
+          const norm = this._normaliseText(trimmed);
+          if (norm && experienceMarkers.some(marker => norm === marker || norm.includes(marker))) {
+            return true;
+          }
+          return trimmed.length <= 80 &&
+            /\b(?:19|20)\d{2}\b\s*(?:-|–|—|to)\s*(?:.*\b(?:19|20)\d{2}\b|\s*(?:present|current)\b)/i.test(trimmed);
+        };
+
         const collected = [];
         for (let i = start + 1; i < lines.length; i++) {
           const trimmed = String(lines[i] || '').trim();
           if (OTHER_HEADER.test(trimmed)) break;
+          if (looksLikeExperienceContent(trimmed)) break;
           if (!trimmed) continue;
           if (trimmed.length >= 3 && !/\w/.test(trimmed)) continue;
           collected.push(trimmed.replace(/^[•\-*●▪◦–—]\s*/, ''));

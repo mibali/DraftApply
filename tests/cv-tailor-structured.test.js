@@ -105,6 +105,58 @@ describe('buildCvSkeleton', () => {
     expect(skel.educationLines).toContain('BSc Information Technology, University of Cape Coast, 2018');
     expect(skel.educationLines).toContain('Certified Kubernetes Administrator (CKA)');
   });
+
+  it('never swallows experience content that follows the education section in the raw CV (regression)', () => {
+    // Real defect: the stored CV's raw text (multi-page PDF extraction, or a
+    // previously exported CV re-uploaded as the source) continued with
+    // experience entries after the education header, with no section header
+    // in between. The extractor copied them verbatim into the locked
+    // education list, so the rendered CV showed Semgrep/Sourcegraph entries
+    // bulleted under EDUCATION.
+    const rawWithTrailingExperience = [
+      'Michael T Bali',
+      'mtb@example.com',
+      '',
+      'EDUCATION, CERTIFICATIONS & RECOGNITION',
+      'BSc Information Technology, University of Cape Coast, 2018',
+      'Certified Kubernetes Administrator (CKA)',
+      'UK Global Talent Endorsement - Tech Nation',
+      'Member of the British Computer Society (MBCS); British Computer Society Certificate in IT',
+      'Strategy Execution for Public Leadership, Harvard Online, 2025',
+      'Semgrep | USA Feb 2024 - Jun 2025',
+      'Senior Customer Success Engineer IC4',
+      'Resolved complex Tier 3/4 security platform issues across CI/CD pipelines, developer environments, APIs, containers, and enterprise-scale',
+      'integrations.',
+      'Sourcegraph | USA / Remote Jul 2021 - Feb 2024',
+      'Senior Technical Support Engineer',
+      'Delivered advanced customer-facing DevOps and platform support for enterprise SaaS deployments, improving resolution of complex',
+      'production and integration issues.',
+    ].join('\n');
+
+    const skel = tailor.buildCvSkeleton({ ...cvData, rawText: rawWithTrailingExperience }, jdData);
+    expect(skel.educationLines).toEqual([
+      'BSc Information Technology, University of Cape Coast, 2018',
+      'Certified Kubernetes Administrator (CKA)',
+      'UK Global Talent Endorsement - Tech Nation',
+      'Member of the British Computer Society (MBCS); British Computer Society Certificate in IT',
+      'Strategy Execution for Public Leadership, Harvard Online, 2025',
+    ]);
+    const joined = skel.educationLines.join('\n');
+    expect(joined).not.toContain('Semgrep');
+    expect(joined).not.toContain('Sourcegraph');
+    expect(joined).not.toContain('Tier 3/4');
+  });
+
+  it('stops at an unknown company header carrying a date range, even when cvData did not parse that entry', () => {
+    const raw = [
+      'EDUCATION / CERTIFICATIONS',
+      'BSc Information Technology, University of Cape Coast, 2018',
+      'SomeNewCo | Remote Jan 2020 - Present',
+      'Staff Engineer',
+    ].join('\n');
+    const skel = tailor.buildCvSkeleton({ ...cvData, rawText: raw }, jdData);
+    expect(skel.educationLines).toEqual(['BSc Information Technology, University of Cape Coast, 2018']);
+  });
 });
 
 describe('parseStructuredContent', () => {
