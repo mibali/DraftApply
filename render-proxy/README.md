@@ -159,6 +159,10 @@ If `RECIPE_PATH` is not set (or fails to load), the proxy uses the bundled recip
 | `REQUEST_DEADLINE_MS` | No | `90000` | Absolute budget shared by all provider attempts and body consumption. |
 | `REDIS_URL` | Production | — | Persistent, atomic multi-instance admission/quota store. |
 | `REQUIRE_DURABLE_QUOTAS` | No | `true` in production | Refuse startup with hosted keys when Redis is absent. Explicitly disable for local development only. |
+| `REDIS_PING_INTERVAL_MS` | No | `60000` | Application-level keepalive for managed Redis TLS connections. |
+| `REDIS_CONNECT_TIMEOUT_MS` | No | `10000` | Timeout for each Redis connection attempt. |
+| `REDIS_RECONNECT_MAX_MS` | No | `10000` | Maximum reconnect backoff after a Redis disconnect. |
+| `REDIS_STARTUP_TIMEOUT_MS` | No | `30000` | Overall deadline for the initial Redis connection before deployment fails. |
 | `CIRCUIT_FAILURE_THRESHOLD` / `CIRCUIT_OPEN_MS` | No | `3` / `30000` | Provider/model circuit policy. |
 
 ---

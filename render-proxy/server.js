@@ -9,7 +9,9 @@ import mammoth from 'mammoth';
 import { resolve } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { createClient } from 'redis';
-import { admissionMiddleware, MemoryAdmissionStore, RedisAdmissionStore } from './admission-control.js';
+import {
+  admissionMiddleware, connectRedisAtStartup, MemoryAdmissionStore, RedisAdmissionStore, redisClientOptions,
+} from './admission-control.js';
 import {
   CircuitBreaker, RedisCircuitBreaker, RequestDeadlineError, assertBudget, boundedTimeout,
   recordProviderTrace, recordProviderUsage, reconciledUsage, remainingMs,
@@ -96,6 +98,10 @@ const REQUEST_DEADLINE_MS = coercePositiveInteger(process.env.REQUEST_DEADLINE_M
 const OPENROUTER_ZDR_REQUIRED = true;
 const REDIS_URL = (process.env.REDIS_URL || '').trim();
 const REQUIRE_DURABLE_QUOTAS = /^true$/i.test(process.env.REQUIRE_DURABLE_QUOTAS || (process.env.NODE_ENV === 'production' ? 'true' : 'false'));
+const REDIS_PING_INTERVAL_MS = coercePositiveInteger(process.env.REDIS_PING_INTERVAL_MS, 60_000);
+const REDIS_CONNECT_TIMEOUT_MS = coercePositiveInteger(process.env.REDIS_CONNECT_TIMEOUT_MS, 10_000);
+const REDIS_RECONNECT_MAX_MS = coercePositiveInteger(process.env.REDIS_RECONNECT_MAX_MS, 10_000);
+const REDIS_STARTUP_TIMEOUT_MS = coercePositiveInteger(process.env.REDIS_STARTUP_TIMEOUT_MS, 30_000);
 
 // Recipe module – default is the bundled open-source recipe. Set RECIPE_PATH to override.
 const RECIPE_PATH = process.env.RECIPE_PATH || './recipe/index.js';
@@ -120,9 +126,36 @@ const SERVER_STARTED_AT = new Date().toISOString();
 let admissionStore;
 let redisClient;
 if (REDIS_URL) {
-  redisClient = createClient({ url: REDIS_URL });
-  redisClient.on('error', error => console.error('[DraftApply] Redis safety store error:', error.message));
-  await redisClient.connect();
+  redisClient = createClient(redisClientOptions(REDIS_URL, {
+    pingIntervalMs: REDIS_PING_INTERVAL_MS,
+    connectTimeoutMs: REDIS_CONNECT_TIMEOUT_MS,
+    reconnectMaxMs: REDIS_RECONNECT_MAX_MS,
+  }));
+  let lastRedisErrorAt = 0;
+  let lastRedisRecoveryAt = 0;
+  let suppressedRedisErrors = 0;
+  let redisReadyOnce = false;
+  redisClient.on('error', error => {
+    const now = Date.now();
+    if (now - lastRedisErrorAt < 30_000) {
+      suppressedRedisErrors += 1;
+      return;
+    }
+    const repeated = suppressedRedisErrors ? ` (${suppressedRedisErrors} repeated errors suppressed)` : '';
+    console.error(`[DraftApply] Redis safety store unavailable${repeated}:`, error.message);
+    lastRedisErrorAt = now;
+    suppressedRedisErrors = 0;
+  });
+  redisClient.on('ready', () => {
+    if (redisReadyOnce && lastRedisErrorAt && lastRedisRecoveryAt !== lastRedisErrorAt) {
+      const repeated = suppressedRedisErrors ? `; ${suppressedRedisErrors} repeated errors suppressed` : '';
+      console.log(`[DraftApply] Redis safety store reconnected${repeated}.`);
+      lastRedisRecoveryAt = lastRedisErrorAt;
+    }
+    redisReadyOnce = true;
+    suppressedRedisErrors = 0;
+  });
+  await connectRedisAtStartup(redisClient, REDIS_STARTUP_TIMEOUT_MS);
   admissionStore = new RedisAdmissionStore(redisClient);
 } else {
   if (REQUIRE_DURABLE_QUOTAS && (GROQ_API_KEY || OPENROUTER_API_KEY)) {
@@ -526,13 +559,16 @@ async function callProviderChat(provider, {
     const markSuccess = async (actualModel = requestedModel) => {
       if (finalized) return;
       finalized = true;
-      await circuitBreaker.success(circuitKey);
+      // Admission already succeeded before this provider call. If Redis drops
+      // mid-request, do not discard a complete paid-provider response merely
+      // because distributed circuit telemetry cannot be updated.
+      try { await circuitBreaker.success(circuitKey); } catch {}
       logLLMAttempt({ provider, model: actualModel, attempt, outcome: 'success', fallbackFrom, elapsedMs: Date.now() - startedAt });
     };
     const markFailure = async (error, actualModel = requestedModel) => {
       if (finalized) return;
       finalized = true;
-      await circuitBreaker.failure(circuitKey);
+      try { await circuitBreaker.failure(circuitKey); } catch {}
       logLLMAttempt({
         provider,
         model: actualModel,
@@ -564,7 +600,7 @@ async function callProviderChat(provider, {
       markFailure,
     };
   } catch (error) {
-    await circuitBreaker.failure(circuitKey);
+    try { await circuitBreaker.failure(circuitKey); } catch {}
     if (error?.name === 'AbortError') {
       logLLMAttempt({
         provider,
@@ -795,6 +831,10 @@ app.get('/api/health', embeddingProbeGate, async (req, res) => {
     build: {
       commit: process.env.RENDER_GIT_COMMIT || null,
       startedAt: SERVER_STARTED_AT,
+    },
+    safetyStore: {
+      type: redisClient ? 'redis' : 'memory',
+      ready: redisClient ? redisClient.isReady : true,
     },
     provider: GROQ_API_KEY ? 'groq' : OPENROUTER_API_KEY ? 'openrouter' : 'local-openai',
     model: GROQ_API_KEY ? GROQ_MODEL : OPENROUTER_API_KEY ? 'openrouter-free-dynamic' : LOCAL_LLM_MODEL,
@@ -1513,7 +1553,10 @@ app.post('/api/generate', authRequired, generateLimiter, costlyAdmission, async 
         res.write(`data: ${JSON.stringify({ draftapplyFinal: final })}\n\n`);
         res.write('data: [DONE]\n\n');
       } catch (streamError) {
-        await completion.markFailure?.(streamError);
+        // Redis may disconnect after SSE headers have already been sent.
+        // Circuit-state recording is best-effort here: never let it escape
+        // into Express 4 or replace the existing terminal SSE error event.
+        try { await completion.markFailure?.(streamError); } catch {}
         const code = streamError instanceof RequestDeadlineError || streamError?.name === 'AbortError'
           ? 'request_deadline_exceeded'
           : 'stream_generation_failed';

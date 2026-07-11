@@ -1,8 +1,8 @@
 import { spawn, spawnSync } from 'node:child_process';
 import net from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createClient } from 'redis';
-import { RedisAdmissionStore } from '../render-proxy/admission-control.js';
+import { connectRedisAtStartup, RedisAdmissionStore, redisClientOptions } from '../render-proxy/admission-control.js';
 import { RedisCircuitBreaker } from '../render-proxy/safety-runtime.js';
 
 const redisAvailable = spawnSync('redis-server', ['--version'], { stdio: 'ignore' }).status === 0;
@@ -99,5 +99,34 @@ suite('Redis-backed proxy safety', () => {
     expect(await second.permit('groq:model')).toBe(false);
     await first.success('groq:model');
     expect(await second.permit('groq:model')).toBe(true);
+  });
+});
+
+describe('managed Redis client configuration', () => {
+  it('keeps idle sockets alive and fails closed instead of queueing while offline', () => {
+    const options = redisClientOptions('rediss://example.test:6379', { random: () => 0 });
+    expect(options).toMatchObject({
+      url: 'rediss://example.test:6379',
+      pingInterval: 60_000,
+      disableOfflineQueue: true,
+      socket: { connectTimeout: 10_000, keepAlive: 5_000 },
+    });
+  });
+
+  it('uses bounded exponential reconnect backoff instead of a tight retry loop', () => {
+    const options = redisClientOptions('redis://localhost:6379', { random: () => 0 });
+    expect([0, 1, 2, 3, 4, 5, 6, 20].map(options.socket.reconnectStrategy)).toEqual([
+      250, 500, 1_000, 2_000, 4_000, 8_000, 10_000, 10_000,
+    ]);
+  });
+
+  it('bounds initial connection retries and closes the pending client', async () => {
+    const client = {
+      isOpen: true,
+      connect: vi.fn(() => new Promise(() => {})),
+      disconnect: vi.fn(async () => {}),
+    };
+    await expect(connectRedisAtStartup(client, 5)).rejects.toThrow('timed out after 5ms');
+    expect(client.disconnect).toHaveBeenCalledOnce();
   });
 });

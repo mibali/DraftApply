@@ -2,6 +2,48 @@ import crypto from 'crypto';
 
 export class AdmissionDeniedError extends Error { constructor(reason = 'quota_exceeded') { super(reason); this.code = reason; } }
 
+export function redisClientOptions(url, {
+  pingIntervalMs = 60_000,
+  connectTimeoutMs = 10_000,
+  reconnectMaxMs = 10_000,
+  random = Math.random,
+} = {}) {
+  return {
+    url,
+    // Managed Redis providers can close otherwise healthy idle TLS sockets.
+    // An application-level PING is more portable than relying only on TCP
+    // keepalive and lets node-redis detect a dead connection promptly.
+    pingInterval: pingIntervalMs,
+    // Quota enforcement must fail closed while Redis reconnects. Do not retain
+    // an unbounded queue of stale admission requests in process memory.
+    disableOfflineQueue: true,
+    socket: {
+      connectTimeout: connectTimeoutMs,
+      keepAlive: 5_000,
+      reconnectStrategy: retries => {
+        const backoff = Math.min(250 * (2 ** Math.min(retries, 6)), reconnectMaxMs);
+        const jitter = Math.floor(Math.max(0, Math.min(1, random())) * 250);
+        return Math.min(backoff + jitter, reconnectMaxMs);
+      },
+    },
+  };
+}
+
+export async function connectRedisAtStartup(client, timeoutMs = 30_000) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Redis startup connection timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+  try {
+    await Promise.race([client.connect(), timeout]);
+  } catch (error) {
+    if (client.isOpen) await client.disconnect().catch(() => {});
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export class MemoryAdmissionStore {
   constructor({
     maxConcurrent = 8, maxRequests = 1000, maxTokens = 2_000_000, maxSpendMicros = 100_000_000,
@@ -134,7 +176,10 @@ export function admissionMiddleware(store, estimate = req => {
     const release = () => {
       if (released) return;
       released = true;
-      void store.reconcile(id, actualUsage(req));
+      // A transient Redis outage after the response must not become an
+      // unhandled rejection that terminates Node. Keep the conservative
+      // reservation; its lease is reclaimed by the next successful reserve.
+      void store.reconcile(id, actualUsage(req)).catch(() => {});
     };
     req.admissionReservation = { id };
     res.once('finish', release); res.once('close', release); next();
