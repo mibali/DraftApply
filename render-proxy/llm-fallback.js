@@ -11,6 +11,15 @@ const DEFAULT_CACHE_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_STALE_TTL_MS = 6 * 60 * 60 * 1000;
 const NON_TEXT_MODEL_ID_RE = /(?:^|[/:._-])(audio|clip|dall-?e|embedding|embed|flux|image|imagen|lyria|moderation|rerank|stable-?diffusion|tts|video|vision|whisper)(?:$|[/:._-])/i;
 
+export function providerEndpoint(value, fallback, name = 'provider URL') {
+  const raw = String(value || fallback || '').trim();
+  let url;
+  try { url = new URL(raw); } catch { throw new Error(`${name} must be a valid absolute URL`); }
+  if (!['http:', 'https:'].includes(url.protocol)) throw new Error(`${name} must use http or https`);
+  if (url.username || url.password) throw new Error(`${name} must not contain credentials`);
+  return url.href;
+}
+
 export function coercePositiveInteger(value, fallback) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 1) return fallback;
@@ -136,26 +145,30 @@ export class OpenRouterFreeModelCache {
   constructor({
     fetchFn,
     apiKey,
+    modelsUrl = 'https://openrouter.ai/api/v1/models',
     ttlMs = DEFAULT_CACHE_TTL_MS,
     staleTtlMs = DEFAULT_STALE_TTL_MS,
+    fetchTimeoutMs = 10000,
     now = () => Date.now(),
   }) {
     this.fetchFn = fetchFn;
     this.apiKey = apiKey;
+    this.modelsUrl = providerEndpoint(modelsUrl, undefined, 'OpenRouter models URL');
     this.ttlMs = ttlMs;
     this.staleTtlMs = staleTtlMs;
+    this.fetchTimeoutMs = fetchTimeoutMs;
     this.now = now;
     this.cachedAt = 0;
     this.models = null;
     this.inFlight = null;
   }
 
-  async getModels() {
+  async getModels({ timeoutMs = this.fetchTimeoutMs } = {}) {
     const age = this.now() - this.cachedAt;
     if (this.models && age < this.ttlMs) return this.models;
     if (this.inFlight) return this.inFlight;
 
-    this.inFlight = this.fetchModels()
+    this.inFlight = this.fetchModels(timeoutMs)
       .then(models => {
         this.models = models;
         this.cachedAt = this.now();
@@ -173,13 +186,19 @@ export class OpenRouterFreeModelCache {
     return this.inFlight;
   }
 
-  async fetchModels() {
+  async fetchModels(timeoutMs = this.fetchTimeoutMs) {
     if (!this.fetchFn) throw new Error('OpenRouter model fetch is unavailable');
     const headers = this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {};
-    const response = await this.fetchFn('https://openrouter.ai/api/v1/models', { headers });
-    if (!response.ok) throw new Error(`OpenRouter models fetch failed (${response.status})`);
-    const data = await response.json();
-    if (!Array.isArray(data?.data)) throw new Error('OpenRouter models response was malformed');
-    return data.data;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), Math.max(1, timeoutMs));
+    try {
+      const response = await this.fetchFn(this.modelsUrl, { headers, signal: controller.signal });
+      if (!response.ok) throw new Error(`OpenRouter models fetch failed (${response.status})`);
+      const data = await response.json();
+      if (!Array.isArray(data?.data)) throw new Error('OpenRouter models response was malformed');
+      return data.data;
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 }

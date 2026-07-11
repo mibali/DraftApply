@@ -7,11 +7,18 @@ import multer from 'multer';
 import pdfParse from 'pdf-parse/lib/pdf-parse.js';
 import mammoth from 'mammoth';
 import { resolve } from 'path';
-import { pathToFileURL } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
+import { createClient } from 'redis';
+import { admissionMiddleware, MemoryAdmissionStore, RedisAdmissionStore } from './admission-control.js';
+import {
+  CircuitBreaker, RequestDeadlineError, assertBudget, boundedTimeout,
+  recordProviderTrace, remainingMs, requestSafetyMiddleware, safetyMetadata, telemetry,
+} from './safety-runtime.js';
 import { CVParser } from '../shared/cv-parser.js';
 import { JDParser } from '../shared/jd-parser.js';
 import { CVTailor } from '../shared/cv-tailor.js';
 import { evaluateAnswer, buildRegenerationFeedback } from '../shared/answer-evaluator.js';
+import { buildGroundingContext, validateApplicationAnswer } from '../shared/grounding-harness.js';
 import {
   rebuildTailoredCvAgentContext,
   runApplicationAnswerAgents,
@@ -29,6 +36,7 @@ import {
 } from '../shared/hf-inference-client.js';
 import {
   coercePositiveInteger,
+  providerEndpoint,
   OpenRouterFreeModelCache,
   PREFERRED_OPENROUTER_FREE_MODELS,
   buildOpenRouterFallbackModelOrder,
@@ -47,19 +55,21 @@ import {
 const PORT = Number(process.env.PORT || 10000);
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+const GROQ_API_URL = providerEndpoint(process.env.GROQ_API_URL, 'https://api.groq.com/openai/v1/chat/completions', 'GROQ_API_URL');
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const OPENROUTER_API_URL = providerEndpoint(process.env.OPENROUTER_API_URL, 'https://openrouter.ai/api/v1/chat/completions', 'OPENROUTER_API_URL');
+const OPENROUTER_MODELS_URL = providerEndpoint(process.env.OPENROUTER_MODELS_URL, 'https://openrouter.ai/api/v1/models', 'OPENROUTER_MODELS_URL');
 const OPENROUTER_MODEL = (process.env.OPENROUTER_MODEL || '').trim();
 const OPENROUTER_SITE_URL = process.env.OPENROUTER_SITE_URL || 'https://draftapply.com';
 const OPENROUTER_APP_NAME = process.env.OPENROUTER_APP_NAME || 'DraftApply';
 const OPENROUTER_TAILOR_FALLBACK = !/^false$/i.test(process.env.OPENROUTER_TAILOR_FALLBACK || 'true');
 // Structured CV generation (docs/structured-cv-generation.md): the model
 // returns only mutable content as JSON against a locked skeleton, and the
-// final text is rendered deterministically. Default on; per-request fallback
-// to the legacy free-text path when the model output is unsalvageable. Set
-// STRUCTURED_CV_GENERATION=false as the kill-switch.
+// final text is rendered deterministically. Default on; disabling it disables
+// hosted CV generation rather than falling back to model-authored free text.
 const STRUCTURED_CV_GENERATION = !/^false$/i.test(process.env.STRUCTURED_CV_GENERATION || 'true');
-const OPENROUTER_USE_MODELS_ARRAY = !/^false$/i.test(process.env.OPENROUTER_USE_MODELS_ARRAY || 'true');
-const OPENROUTER_REQUIRE_DATA_PRIVACY = !/^false$/i.test(process.env.OPENROUTER_REQUIRE_DATA_PRIVACY || 'true');
+const OPENROUTER_USE_MODELS_ARRAY = /^true$/i.test(process.env.OPENROUTER_USE_MODELS_ARRAY || 'false');
+const OPENROUTER_REQUIRE_DATA_PRIVACY = true;
 const OPENROUTER_PROVIDER_SORT = (process.env.OPENROUTER_PROVIDER_SORT || 'throughput').trim();
 const OPENROUTER_MODEL_CACHE_TTL_MS = Number(process.env.OPENROUTER_MODEL_CACHE_TTL_MS || 10 * 60 * 1000);
 const OPENROUTER_MAX_FALLBACK_MODELS = coercePositiveInteger(process.env.OPENROUTER_MAX_FALLBACK_MODELS, 6);
@@ -80,6 +90,11 @@ const LOCAL_EMBEDDING_TIMEOUT_MS = coercePositiveInteger(process.env.LOCAL_EMBED
 const LOCAL_EMBEDDING_PROMOTE_THRESHOLD = Number(process.env.LOCAL_EMBEDDING_PROMOTE_THRESHOLD || 0.60);
 const LOCAL_EMBEDDING_ENRICH_THRESHOLD = Number(process.env.LOCAL_EMBEDDING_ENRICH_THRESHOLD || 0.50);
 const TOKEN_SECRET = process.env.TOKEN_SECRET;
+const ALLOW_LEGACY_RAW_PROMPTS = /^true$/i.test(process.env.ALLOW_LEGACY_RAW_PROMPTS || 'false');
+const REQUEST_DEADLINE_MS = coercePositiveInteger(process.env.REQUEST_DEADLINE_MS, 90000);
+const OPENROUTER_ZDR_REQUIRED = true;
+const REDIS_URL = (process.env.REDIS_URL || '').trim();
+const REQUIRE_DURABLE_QUOTAS = /^true$/i.test(process.env.REQUIRE_DURABLE_QUOTAS || (process.env.NODE_ENV === 'production' ? 'true' : 'false'));
 
 // Recipe module – default is the bundled open-source recipe. Set RECIPE_PATH to override.
 const RECIPE_PATH = process.env.RECIPE_PATH || './recipe/index.js';
@@ -101,6 +116,24 @@ if ((!GROQ_API_KEY && !OPENROUTER_API_KEY && !LOCAL_LLM_BASE_URL) || !TOKEN_SECR
 
 const SERVER_STARTED_AT = new Date().toISOString();
 
+let admissionStore;
+if (REDIS_URL) {
+  const redis = createClient({ url: REDIS_URL });
+  redis.on('error', error => console.error('[DraftApply] Redis quota store error:', error.message));
+  await redis.connect();
+  admissionStore = new RedisAdmissionStore(redis);
+} else {
+  if (REQUIRE_DURABLE_QUOTAS && (GROQ_API_KEY || OPENROUTER_API_KEY)) {
+    console.error('Durable quota storage is required for paid providers; configure REDIS_URL or explicitly set REQUIRE_DURABLE_QUOTAS=false for local development.');
+    process.exit(1);
+  }
+  admissionStore = new MemoryAdmissionStore();
+}
+const circuitBreaker = new CircuitBreaker({
+  failureThreshold: coercePositiveInteger(process.env.CIRCUIT_FAILURE_THRESHOLD, 3),
+  openMs: coercePositiveInteger(process.env.CIRCUIT_OPEN_MS, 30000),
+});
+
 const app = express();
 app.disable('x-powered-by');
 // Render (and most PaaS/load-balancer setups) sit exactly one reverse-proxy
@@ -117,6 +150,7 @@ app.use(cors({
   exposedHeaders: ['RateLimit-Limit', 'RateLimit-Remaining', 'RateLimit-Reset', 'RateLimit-Policy']
 }));
 app.use(express.json({ limit: '1mb' }));
+app.use(requestSafetyMiddleware({ deadlineMs: REQUEST_DEADLINE_MS }));
 
 function base64url(buf) {
   return Buffer.from(buf)
@@ -180,6 +214,7 @@ class LLMProviderError extends Error {
 const openRouterModelCache = new OpenRouterFreeModelCache({
   fetchFn: fetch,
   apiKey: OPENROUTER_API_KEY,
+  modelsUrl: OPENROUTER_MODELS_URL,
   ttlMs: Number.isFinite(OPENROUTER_MODEL_CACHE_TTL_MS) ? OPENROUTER_MODEL_CACHE_TTL_MS : 10 * 60 * 1000,
 });
 
@@ -245,7 +280,8 @@ function retryAfterMsFromProviderDetail(detail = '') {
 }
 
 function logLLMAttempt({ provider, model, attempt, outcome, status, fallbackFrom, elapsedMs }) {
-  console.info('[DraftApply] llm_attempt', JSON.stringify({
+  const entry = {
+    stage: 'generation',
     provider,
     model,
     attempt,
@@ -253,7 +289,9 @@ function logLLMAttempt({ provider, model, attempt, outcome, status, fallbackFrom
     status: status || undefined,
     fallbackFrom: fallbackFrom || undefined,
     elapsedMs,
-  }));
+  };
+  recordProviderTrace(entry);
+  telemetry({ stage: entry.stage, provider, model, outcome, latency: elapsedMs });
 }
 
 function llmErrorResponse(error, context = {}) {
@@ -303,7 +341,7 @@ function llmProviderConfig(provider, model) {
       provider,
       apiKey: GROQ_API_KEY,
       model: GROQ_MODEL,
-      url: 'https://api.groq.com/openai/v1/chat/completions',
+      url: GROQ_API_URL,
       headers: {},
     };
   }
@@ -312,7 +350,7 @@ function llmProviderConfig(provider, model) {
     provider: 'openrouter',
     apiKey: OPENROUTER_API_KEY,
     model: model || OPENROUTER_MODEL || 'openrouter/free',
-    url: 'https://openrouter.ai/api/v1/chat/completions',
+    url: OPENROUTER_API_URL,
     headers: {
       'HTTP-Referer': OPENROUTER_SITE_URL,
       'X-Title': OPENROUTER_APP_NAME,
@@ -339,7 +377,7 @@ async function callEmbeddingEndpoint(texts, {
 
   const useHfNativeShape = isHfInferenceRouterUrl(LOCAL_EMBEDDING_BASE_URL);
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const timeout = setTimeout(() => controller.abort(), boundedTimeout(timeoutMs));
   const startedAt = Date.now();
   try {
     const response = await fetch(localEmbeddingsUrl(LOCAL_EMBEDDING_BASE_URL, model), {
@@ -383,6 +421,7 @@ async function callEmbeddingEndpoint(texts, {
         elapsedMs: Date.now() - startedAt,
       });
     }
+    if (error?.name === 'AbortError' && remainingMs() <= 0) throw new RequestDeadlineError();
     throw error;
   } finally {
     clearTimeout(timeout);
@@ -436,8 +475,11 @@ async function callProviderChat(provider, {
     throw new LLMProviderError(provider, 0, 'Missing model', null, config.model);
   }
 
+  assertBudget();
+  const circuitKey = `${provider}:${config.model || (models || []).join(',')}`;
+  if (!circuitBreaker.permit(circuitKey)) throw new LLMProviderError(provider, 503, 'Circuit open', null, config.model);
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const timeout = setTimeout(() => controller.abort(), boundedTimeout(timeoutMs));
   const startedAt = Date.now();
   try {
     const response = await fetch(config.url, {
@@ -473,14 +515,33 @@ async function callProviderChat(provider, {
     }
 
     const requestedModel = useModelsArray ? models[0] : config.model;
-    logLLMAttempt({ provider, model: requestedModel, attempt, outcome: 'success', fallbackFrom, elapsedMs: Date.now() - startedAt });
+    let finalized = false;
+    const markSuccess = (actualModel = requestedModel) => {
+      if (finalized) return;
+      finalized = true;
+      circuitBreaker.success(circuitKey);
+      logLLMAttempt({ provider, model: actualModel, attempt, outcome: 'success', fallbackFrom, elapsedMs: Date.now() - startedAt });
+    };
+    const originalJson = response.json.bind(response);
+    response.json = async () => {
+      try {
+        const body = await originalJson();
+        markSuccess(body?.model || requestedModel);
+        return body;
+      } catch (error) {
+        if (!finalized) circuitBreaker.failure(circuitKey);
+        throw error;
+      }
+    };
     return {
       response,
       provider: config.provider,
       model: requestedModel,
       requestedModels: useModelsArray ? models : undefined,
+      markSuccess,
     };
   } catch (error) {
+    circuitBreaker.failure(circuitKey);
     if (error?.name === 'AbortError') {
       logLLMAttempt({
         provider,
@@ -492,13 +553,13 @@ async function callProviderChat(provider, {
       });
     }
     throw error;
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
 async function getOpenRouterFallbackModelOrder() {
-  const models = await openRouterModelCache.getModels();
+  assertBudget();
+  const models = await openRouterModelCache.getModels({ timeoutMs: boundedTimeout(10000) });
+  assertBudget();
   const preferred = OPENROUTER_MODEL
     ? [OPENROUTER_MODEL, ...PREFERRED_OPENROUTER_FREE_MODELS.filter(model => model !== OPENROUTER_MODEL)]
     : PREFERRED_OPENROUTER_FREE_MODELS;
@@ -514,6 +575,7 @@ async function callOpenRouterFreeFallback(options, { callStart, fallbackFrom = '
   try {
     orderedModels = await getOpenRouterFallbackModelOrder();
   } catch (error) {
+    if (error instanceof RequestDeadlineError || (error?.name === 'AbortError' && remainingMs() <= 0)) throw new RequestDeadlineError();
     throw new LLMProviderError('openrouter', 0, error.message || 'Could not load OpenRouter free model catalogue');
   }
   if (Number.isFinite(Number(options.maxFallbackModels)) && Number(options.maxFallbackModels) > 0) {
@@ -527,6 +589,7 @@ async function callOpenRouterFreeFallback(options, { callStart, fallbackFrom = '
     allow_fallbacks: true,
     sort: OPENROUTER_PROVIDER_SORT || 'throughput',
     ...(OPENROUTER_REQUIRE_DATA_PRIVACY ? { data_collection: 'deny' } : {}),
+    ...(OPENROUTER_ZDR_REQUIRED ? { zdr: true } : {}),
   };
 
   if (OPENROUTER_USE_MODELS_ARRAY) {
@@ -554,6 +617,7 @@ async function callOpenRouterFreeFallback(options, { callStart, fallbackFrom = '
 
   let lastError = null;
   for (let i = 0; i < orderedModels.length; i += 1) {
+    assertBudget();
     const model = orderedModels[i];
     const timeoutMs = Math.max(8000, options.fallbackTimeoutMs || options.timeoutMs || 60000);
     try {
@@ -583,6 +647,7 @@ async function callOpenRouterFreeFallback(options, { callStart, fallbackFrom = '
 }
 
 async function callChatCompletionWithFallback(options) {
+  assertBudget();
   const route = selectModelRoute(options.workflow || 'application_answer', {
     hasLocal: Boolean(LOCAL_LLM_BASE_URL),
     hasHosted: Boolean(GROQ_API_KEY || OPENROUTER_API_KEY),
@@ -613,6 +678,10 @@ async function callChatCompletionWithFallback(options) {
     if (primary === 'openrouter') return { ...(await callOpenRouterFreeFallback(options, { callStart, fallbackFrom: null })), fallbackFrom: null, route };
     return { ...(await callProviderChat(primary, { ...options, attempt: 1 })), fallbackFrom: null, route };
   } catch (error) {
+    if (error instanceof RequestDeadlineError || error?.name === 'AbortError') {
+      if (error instanceof RequestDeadlineError) throw error;
+      try { assertBudget(); } catch (deadline) { throw deadline; }
+    }
     const canFallback = shouldUseOpenRouterFallback(error, {
       primary,
       hasOpenRouter: Boolean(OPENROUTER_API_KEY),
@@ -642,6 +711,7 @@ const generateLimiter = rateLimit({
     return `${t}:${req.ip}`;
   }
 });
+const costlyAdmission = admissionMiddleware(admissionStore);
 
 // /api/health itself is intentionally open (no auth, no limiter) for uptime
 // monitors. But ?probe=embedding makes one real, billed call to the
@@ -666,7 +736,9 @@ function authRequired(req, res, next) {
 // Only gate the paid ?probe=embedding path - plain /api/health stays open
 // and unthrottled for uptime monitors.
 function embeddingProbeGate(req, res, next) {
-  if (req.query.probe === 'embedding') return healthProbeLimiter(req, res, next);
+  if (req.query.probe === 'embedding') {
+    return healthProbeLimiter(req, res, () => costlyAdmission(req, res, next));
+  }
   return next();
 }
 
@@ -693,6 +765,7 @@ app.get('/api/health', embeddingProbeGate, async (req, res) => {
 
   res.json({
     ok: true,
+    capabilities: { apiVersion: 2, streamFinal: true, answerValidation: true },
     // Which code is actually running: Render injects RENDER_GIT_COMMIT on
     // every deploy, and startedAt shows when this process last restarted.
     // Without these there is no way to tell whether a pushed fix is live yet.
@@ -832,6 +905,7 @@ function summarizeAgentRun(context = {}) {
   if (!context) return undefined;
   return {
     workflow: context.workflow,
+    pipelineStages: context.pipelineStages || context.agentChain,
     agentChain: context.agentChain,
     questionType: context.questionType,
     evidenceCount: context.candidateEvidenceMap?.evidenceItems?.length,
@@ -975,6 +1049,68 @@ function buildTruthfulnessReport(context = {}) {
   };
 }
 
+const GROUNDING_SCHEMA_VERSION = '1.0';
+const ANSWER_VALIDATOR_VERSION = '1.0';
+
+function answerValidation(answer, context, body, question, questionType) {
+  return validateApplicationAnswer(answer, {
+    context: buildGroundingContext(context?.cvData || {}, {
+      targetCompany: body.company || '',
+      confirmedFacts: Array.isArray(body.confirmedFacts) ? body.confirmedFacts.filter(value => typeof value === 'string') : [],
+    }),
+    question,
+    questionType,
+  });
+}
+
+function pipelineMetadata(context) {
+  const inputGroundingReport = buildTruthfulnessReport(context);
+  const pipelineRun = summarizeAgentRun(context);
+  const pipelineInsights = buildAgentInsights(context);
+  return {
+    groundingSchemaVersion: GROUNDING_SCHEMA_VERSION,
+    validatorVersion: ANSWER_VALIDATOR_VERSION,
+    inputGroundingReport,
+    truthfulnessReport: inputGroundingReport, // Deprecated compatibility alias for one release.
+    pipelineStages: context?.pipelineStages || context?.agentChain,
+    pipelineRun,
+    pipelineInsights,
+    agentChain: context?.agentChain, // Deprecated aliases.
+    agentRun: pipelineRun,
+    agentInsights: pipelineInsights,
+  };
+}
+
+async function consumeOpenAIStream(body) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let answer = '';
+  let model;
+  let openRouterMetadata;
+  const consumeEvent = event => {
+    const data = event.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n').trim();
+    if (!data || data === '[DONE]') return;
+    try {
+      const json = JSON.parse(data);
+      answer += json.choices?.[0]?.delta?.content || '';
+      model = json.model || model;
+      openRouterMetadata = json.openrouter_metadata || openRouterMetadata;
+    } catch (_) { /* malformed provider events are not forwarded */ }
+  };
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const events = buffer.split(/\r?\n\r?\n/);
+    buffer = events.pop() || '';
+    events.forEach(consumeEvent);
+  }
+  buffer += decoder.decode();
+  if (buffer.trim()) consumeEvent(buffer); // final unterminated SSE event
+  return { answer, model, openRouterMetadata };
+}
+
 function compactText(value, max = 160) {
   const text = String(value || '').replace(/\s+/g, ' ').trim();
   if (text.length <= max) return text;
@@ -1019,6 +1155,7 @@ function buildAgentInsights(context = {}) {
 
   const base = {
     workflow: context.workflow,
+    pipelineStages: context.pipelineStages || context.agentChain,
     agentChain: context.agentChain,
     questionType: context.questionType,
     domainRisk: summarizeDomainRisk(context.domainRisk),
@@ -1136,6 +1273,7 @@ async function applyEmbeddingRetrieval(tailorAgentContext, tailor = new CVTailor
       },
     };
   } catch (error) {
+    if (error instanceof RequestDeadlineError) throw error;
     console.warn('[DraftApply] Embedding retrieval skipped:', String(error.message || error).slice(0, 160));
     return {
       ...tailorAgentContext,
@@ -1164,7 +1302,7 @@ function cleanFieldLabel(raw) {
     .trim();
 }
 
-app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
+app.post('/api/generate', authRequired, generateLimiter, costlyAdmission, async (req, res) => {
   const body = req.body || {};
 
   let systemPrompt, userPrompt, temperature, maxTokens, questionType;
@@ -1184,18 +1322,6 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Question is empty after cleaning' });
     }
 
-    // Short-circuit: plain data fields (name, email, phone, LinkedIn, etc.)
-    // can be answered directly from the CV without calling the LLM.
-    const deterministicAnswer = tryDeterministicExtract(cleanedQuestion, body.cvText);
-    if (deterministicAnswer) {
-      const deterministicQuality = buildQualityMetadata({ provider: 'deterministic' });
-      return res.json({
-        answer: deterministicAnswer,
-        provider: 'deterministic',
-        ...deterministicQuality,
-      });
-    }
-
     // Deterministic stage-2 agents parse CV/JD, build the candidate evidence
     // map, construct the role requirement map, and score supported/missing
     // requirements before the recipe builds the final prompt.
@@ -1208,6 +1334,19 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
         company: body.company || '',
       });
     } catch (_) {}
+
+    // Direct extraction still receives the same final grounding contract.
+    const deterministicAnswer = tryDeterministicExtract(cleanedQuestion, body.cvText);
+    if (deterministicAnswer) {
+      const validation = answerValidation(deterministicAnswer, answerAgentContext, body, cleanedQuestion, 'data_extraction');
+      return res.json({
+        answer: deterministicAnswer, validation,
+        provider: 'deterministic', model: 'deterministic-extraction',
+        ...buildQualityMetadata({ provider: 'deterministic' }),
+        ...pipelineMetadata(answerAgentContext),
+        ...safetyMetadata(),
+      });
+    }
 
     try {
       const result = recipe.buildPrompts({
@@ -1239,6 +1378,11 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
     }
   } else if (typeof body.systemPrompt === 'string' && typeof body.userPrompt === 'string') {
     // ── Legacy raw prompt payload (backward-compat) ──
+    if (!ALLOW_LEGACY_RAW_PROMPTS) return res.status(400).json({
+      error: 'Raw legacy prompts are disabled.',
+      code: 'legacy_raw_prompts_disabled',
+      ...safetyMetadata(),
+    });
     systemPrompt = body.systemPrompt;
     userPrompt   = body.userPrompt;
     temperature  = typeof body.temperature === 'number' ? body.temperature : 0.7;
@@ -1291,26 +1435,64 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
           fallbackFrom: completion.fallbackFrom || undefined,
           workflow: completion.route?.workflow || 'applicationAnswer',
           agentChain: completion.route?.agentChain || WORKFLOW_AGENT_CHAINS.applicationAnswer,
-          agentRun: summarizeAgentRun(answerAgentContext),
-          agentInsights: buildAgentInsights(answerAgentContext),
           domainRisk: summarizeDomainRisk(answerAgentContext?.domainRisk),
-          truthfulnessReport: buildTruthfulnessReport(answerAgentContext),
+          pipelineStages: completion.route?.agentChain || WORKFLOW_AGENT_CHAINS.applicationAnswer,
         }
       })}\n\n`);
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-
+      const keepAlive = setInterval(() => {
+        if (!res.writableEnded) res.write(': draftapply-keepalive\n\n');
+      }, 10000);
       try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          // Forward raw SSE bytes from Groq directly to the client.
-          // The background service worker parses OpenAI-compatible SSE, so no
-          // transformation is needed — just pass it through.
-          res.write(decoder.decode(value, { stream: true }));
+        const streamed = await consumeOpenAIStream(response.body);
+        let answer = streamed.answer;
+        if (!answer.trim()) throw new Error('No answer from provider');
+        let finalCompletion = completion;
+        let responseModel = streamed.model || completion.model;
+        completion.markSuccess?.(responseModel);
+        let openRouterMetadata = streamed.openRouterMetadata;
+        if (questionType && !body.skipEvaluation) {
+          const evaluation = evaluateAnswer(answer, questionType);
+          if (evaluation.shouldRegenerate) {
+            try {
+              assertBudget(5000);
+              const retry = await callChatCompletionWithFallback({
+                workflow: 'application_answer', temperature: Math.min(temperature + 0.15, 0.95), maxTokens,
+                stream: false, timeoutMs: 30000,
+                messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt },
+                  { role: 'assistant', content: answer }, { role: 'user', content: buildRegenerationFeedback(evaluation.flags) }],
+              });
+              const retryData = await retry.response.json();
+              const retryAnswer = retryData?.choices?.[0]?.message?.content;
+              if (retryAnswer?.trim() && evaluateAnswer(retryAnswer, questionType).score > evaluation.score) {
+                answer = retryAnswer; finalCompletion = retry;
+                responseModel = retryData.model || retry.model;
+                openRouterMetadata = retryData.openrouter_metadata;
+              }
+            } catch (error) {
+              if (error instanceof RequestDeadlineError || (error?.name === 'AbortError' && remainingMs() <= 0)) throw new RequestDeadlineError();
+              /* provider failure leaves the original complete answer */
+            }
+          }
         }
+        const validation = answerValidation(answer, answerAgentContext, body, cleanFieldLabel(body.question || ''), questionType);
+        assertBudget();
+        const final = {
+          version: 1, answer, validation,
+          provider: finalCompletion.provider, model: responseModel,
+          finalModel: responseModel,
+          openRouterMetadata, fallbackFrom: finalCompletion.fallbackFrom || undefined,
+          ...buildQualityMetadata(finalCompletion), ...pipelineMetadata(answerAgentContext), ...safetyMetadata(),
+          finalProvider: { provider: finalCompletion.provider, model: responseModel, stage: 'generation' },
+        };
+        res.write(`data: ${JSON.stringify({ draftapplyFinal: final })}\n\n`);
+        res.write('data: [DONE]\n\n');
+      } catch (streamError) {
+        const code = streamError instanceof RequestDeadlineError || streamError?.name === 'AbortError'
+          ? 'request_deadline_exceeded'
+          : 'stream_generation_failed';
+        res.write(`data: ${JSON.stringify({ draftapplyError: { code, error: code === 'request_deadline_exceeded' ? 'Request deadline exceeded.' : 'Answer generation failed.' } })}\n\n`);
       } finally {
+        clearInterval(keepAlive);
         res.end();
       }
       return;
@@ -1320,11 +1502,12 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
     let answer = data?.choices?.[0]?.message?.content;
     if (!answer?.trim()) return res.status(502).json({ error: 'No answer from provider' });
     let responseModel = data?.model || completion.model;
+    let finalCompletion = completion;
     let openRouterMetadata = data?.openrouter_metadata || undefined;
 
     // Quality gate: one conditional regeneration attempt for low-scoring answers.
-    // Only runs for structured payloads (questionType set), never for streaming,
-    // and never for prefetch requests (skipEvaluation: true) — prefetch uses
+    // Only runs for structured payloads (questionType set) and never for
+    // prefetch requests (skipEvaluation: true) — prefetch uses
     // one LLM call so cached answers arrive faster.
     if (questionType && !body.skipEvaluation) {
       const evaluation = evaluateAnswer(answer, questionType);
@@ -1353,21 +1536,29 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
             const retryEval = evaluateAnswer(retryAnswer, questionType);
             if (retryEval.score > evaluation.score) {
               answer = retryAnswer;
+              finalCompletion = retry;
               responseModel = retryData?.model || retry.model || responseModel;
               openRouterMetadata = retryData?.openrouter_metadata || openRouterMetadata;
             }
           }
-        } catch (_) {
+        } catch (error) {
+          if (error instanceof RequestDeadlineError || (error?.name === 'AbortError' && remainingMs() <= 0)) throw new RequestDeadlineError();
           // Regeneration failed — use original answer.
         }
       }
     }
 
+    const validation = answerAgentContext
+      ? answerValidation(answer, answerAgentContext, body, cleanFieldLabel(body.question || ''), questionType)
+      : undefined;
+    assertBudget();
     res.json({
       answer,
-      provider: completion.provider,
+      validation,
+      provider: finalCompletion.provider,
       model: responseModel,
-      ...buildQualityMetadata(completion),
+      finalModel: responseModel,
+      ...buildQualityMetadata(finalCompletion),
       requestedModel: completion.model,
       requestedModels: completion.requestedModels,
       openRouterMetadata,
@@ -1375,17 +1566,17 @@ app.post('/api/generate', authRequired, generateLimiter, async (req, res) => {
       fallbackFrom: completion.fallbackFrom || undefined,
       workflow: completion.route?.workflow || 'applicationAnswer',
       agentChain: completion.route?.agentChain || WORKFLOW_AGENT_CHAINS.applicationAnswer,
-      agentRun: summarizeAgentRun(answerAgentContext),
-      agentInsights: buildAgentInsights(answerAgentContext),
       domainRisk: summarizeDomainRisk(answerAgentContext?.domainRisk),
-      truthfulnessReport: buildTruthfulnessReport(answerAgentContext),
+      ...pipelineMetadata(answerAgentContext),
+      ...safetyMetadata(),
+      finalProvider: { provider: finalCompletion.provider, model: responseModel, stage: 'generation' },
     });
   } catch (e) {
-    if (e?.name === 'AbortError') {
-      return res.status(504).json({ error: 'AI service timed out. Please try again.' });
+    if (e?.name === 'AbortError' || e instanceof RequestDeadlineError) {
+      return res.status(504).json({ error: 'Request deadline exceeded.', code: 'request_deadline_exceeded', ...safetyMetadata() });
     }
     if (e instanceof LLMProviderError) {
-      console.error(`[DraftApply] ${e.provider} generate error ${e.status}:`, String(e.detail || '').slice(0, 400));
+      console.error(`[DraftApply] ${e.provider} generate error`, { status: e.status });
       const { status, body } = llmErrorResponse(e);
       return res.status(status).json(body);
     }
@@ -1535,7 +1726,7 @@ function linkLabelFromUrl(url = '') {
  * long pasted postings before CV/JD analysis. The popup falls back to raw text
  * if this fails, but production should still provide the route it calls.
  */
-app.post('/api/jd/extract', authRequired, generateLimiter, async (req, res) => {
+app.post('/api/jd/extract', authRequired, generateLimiter, costlyAdmission, async (req, res) => {
   try {
     const { text } = req.body || {};
 
@@ -1596,11 +1787,11 @@ Preserve the original bullet point structure and section headings. Output only t
       agentChain: completion.route?.agentChain || WORKFLOW_AGENT_CHAINS.tailoredCv,
     });
   } catch (e) {
-    if (e?.name === 'AbortError') {
-      return res.status(504).json({ error: 'Job description extraction timed out. Please try again.' });
+    if (e?.name === 'AbortError' || e instanceof RequestDeadlineError) {
+      return res.status(504).json({ error: 'Request deadline exceeded.', code: 'request_deadline_exceeded', ...safetyMetadata() });
     }
     if (e instanceof LLMProviderError) {
-      console.error(`[DraftApply] ${e.provider} JD extract error ${e.status}:`, String(e.detail || '').slice(0, 400));
+      console.error(`[DraftApply] ${e.provider} JD extract error`, { status: e.status });
       const { status, body } = llmErrorResponse(e);
       return res.status(status).json(body);
     }
@@ -1654,7 +1845,8 @@ async function fetchLLMDomainSuggestions(jobTitle, jdTools) {
       .filter(t => typeof t === 'string' && t.trim().length > 0)
       .map(t => t.trim())
       .slice(0, 15);
-  } catch {
+  } catch (error) {
+    if (error instanceof RequestDeadlineError || (error?.name === 'AbortError' && remainingMs() <= 0)) throw new RequestDeadlineError();
     return null;
   }
 }
@@ -1729,12 +1921,13 @@ async function enrichJdData(jdParser, regexParsed, jdText) {
     jdCacheSet(cacheKey, enriched);
     return { jdData: enriched, source: 'llm' };
   } catch (err) {
+    if (err instanceof RequestDeadlineError || (err?.name === 'AbortError' && remainingMs() <= 0)) throw new RequestDeadlineError();
     console.warn('[DraftApply] JD LLM enrichment failed, using regex fallback:', err.message);
     return { jdData: regexParsed, source: 'regex' };
   }
 }
 
-app.post('/api/cv/analyze', authRequired, generateLimiter, async (req, res) => {
+app.post('/api/cv/analyze', authRequired, generateLimiter, costlyAdmission, async (req, res) => {
   const { cvText, jobTitle = '', company = '', jobDescription, confirmedSkills = [] } = req.body || {};
 
   if (!cvText || cvText.length < 100) {
@@ -1797,6 +1990,7 @@ app.post('/api/cv/analyze', authRequired, generateLimiter, async (req, res) => {
       if (filtered.length > 0) domainSuggestions = filtered;
     }
 
+    assertBudget();
     return res.json({
       matchReport: tailorAgentContext.matchReport,
       jobTitle: jdData.jobTitle,
@@ -1822,12 +2016,15 @@ app.post('/api/cv/analyze', authRequired, generateLimiter, async (req, res) => {
       }),
     });
   } catch (e) {
+    if (e?.name === 'AbortError' || e instanceof RequestDeadlineError) {
+      return res.status(504).json({ error: 'Request deadline exceeded.', code: 'request_deadline_exceeded', ...safetyMetadata() });
+    }
     console.error('[DraftApply] Analyze error:', e.message);
     return res.status(500).json({ error: 'Failed to analyze CV match.' });
   }
 });
 
-app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
+app.post('/api/cv/tailor', authRequired, generateLimiter, costlyAdmission, async (req, res) => {
   const { cvText, jobTitle = '', company = '', jobDescription, confirmedSkills = [] } = req.body || {};
 
   if (!cvText || cvText.length < 100) {
@@ -1865,23 +2062,34 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
     tailorAgentContext = await applyEmbeddingRetrieval(tailorAgentContext, tailor);
     const matchMap = tailorAgentContext.matchMap;
 
-    // Shared generation state, set by whichever path (structured or legacy)
-    // produces the final CV.
+    // Structured generation is mandatory: the model may only fill mutable
+    // content slots, while deterministic code owns identity and formatting.
     let completion = null;
     let data = null;
     let tailorProvider = null;
     let tailoredCvText = '';
-    let tailorTruncated = false;
     let auditSkipped = false;
     let structuredCv = null;
-    let generationMode = 'legacy-text';
+    const generationMode = 'structured';
 
     // ── Structured path (docs/structured-cv-generation.md) ──
     // The model returns only mutable content JSON; companies/dates/titles/
     // education come verbatim from cvData and are rendered by a template, so
-    // the malformed-structure bug class cannot occur. Any failure falls
-    // through to the legacy free-text path below.
-    if (STRUCTURED_CV_GENERATION && Array.isArray(cvData.experience) && cvData.experience.length > 0) {
+    // the malformed-structure bug class cannot occur. We deliberately fail
+    // closed instead of returning a model-authored free-text CV.
+    if (!STRUCTURED_CV_GENERATION) {
+      return res.status(503).json({
+        error: 'Structured CV generation is disabled. DraftApply will not generate an ungrounded free-text CV.',
+        code: 'structured_cv_generation_required',
+      });
+    }
+    if (!Array.isArray(cvData.experience) || cvData.experience.length === 0) {
+      return res.status(422).json({
+        error: 'No work-experience roles could be parsed from this CV. Review the CV formatting and try again.',
+        code: 'cv_experience_parse_failed',
+      });
+    }
+    {
       try {
         const structuredPrompt = tailor.buildStructuredTailoringPrompt(cvData, jdData, matchMap, {
           domainRisk: tailorAgentContext.domainRisk,
@@ -1912,6 +2120,8 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
               skeleton,
               { matchMap, confirmedSkills, cvData }
             );
+        let acceptedCompletion = structuredCompletion;
+        let acceptedData = structuredData;
 
         if (content) {
           // Structured audit: same JSON shape, unsupported claims removed.
@@ -1943,9 +2153,12 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
               if (audited) {
                 content = audited;
                 auditSkipped = false;
+                acceptedCompletion = auditCompletion;
+                acceptedData = auditData;
               }
             }
           } catch (auditError) {
+            if (auditError instanceof RequestDeadlineError || (auditError?.name === 'AbortError' && remainingMs() <= 0)) throw new RequestDeadlineError();
             const detail = auditError instanceof LLMProviderError
               ? `${auditError.provider} ${auditError.status}` : auditError.message;
             console.warn('[DraftApply] Structured audit skipped:', detail);
@@ -1953,119 +2166,25 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
 
           structuredCv = { skeleton, content };
           tailoredCvText = tailor.renderTailoredCV(skeleton, content);
-          generationMode = 'structured';
-          completion = structuredCompletion;
-          data = structuredData;
-          tailorProvider = structuredCompletion.provider;
+          completion = acceptedCompletion;
+          data = acceptedData;
+          tailorProvider = acceptedCompletion.provider;
         } else {
-          console.warn(`[DraftApply] Structured generation output unsalvageable${structuredTruncated ? ' (truncated)' : ''}; falling back to legacy text path.`);
+          console.warn(`[DraftApply] Structured generation output rejected${structuredTruncated ? ' (truncated)' : ''}.`);
+          return res.status(502).json({
+            error: 'The provider did not return a grounded structured CV. Please try again.',
+            code: 'structured_cv_output_invalid',
+          });
         }
       } catch (e) {
         if (e?.name === 'AbortError') throw e;
         const detail = e instanceof LLMProviderError ? `${e.provider} ${e.status}` : e.message;
-        console.warn('[DraftApply] Structured generation failed; falling back to legacy text path:', detail);
-      }
-    }
-
-    // ── Legacy free-text path (fallback + kill-switch) ──
-    if (generationMode !== 'structured') {
-      const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(cvData, jdData, matchMap, {
-        domainRisk: tailorAgentContext.domainRisk,
-      });
-
-      completion = await callChatCompletionWithFallback({
-        workflow: 'cv_tailor',
-        temperature: 0.3,
-        // CVs with many roles (senior candidates commonly have 6-7+) push the
-        // full regenerated text close to 4000 tokens; a model that spends any
-        // of its budget on preamble/reasoning before the CV body can then get
-        // cut off mid-sentence, silently dropping trailing bullets. 6000 gives
-        // real headroom without materially increasing cost for typical CVs.
-        maxTokens: 6000,
-        timeoutMs: 50000,
-        fallbackTimeoutMs: 50000,
-        maxFallbackModels: 2,
-        allowFallback: OPENROUTER_TAILOR_FALLBACK,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user',   content: userPrompt   }
-        ],
-      });
-
-      tailorProvider = completion.provider;
-      data = await completion.response.json().catch(() => null);
-      if (!data) {
-        console.error(`[DraftApply] ${tailorProvider} tailor response body failed to parse`);
-        return res.status(502).json({ error: 'Unexpected response from AI provider. Please try again.' });
-      }
-      tailorTruncated = data?.choices?.[0]?.finish_reason === 'length';
-      if (tailorTruncated) {
-        console.warn(`[DraftApply] ${tailorProvider} tailor response was truncated (finish_reason=length) - output may be missing trailing content.`);
-      }
-      tailoredCvText = tailor.finalizeTailoredCV(data?.choices?.[0]?.message?.content, {
-        cvData,
-        jdData,
-        matchMap,
-        confirmedSkills,
-      });
-      if (!tailoredCvText?.trim()) {
-        console.error(`[DraftApply] ${tailorProvider} returned empty tailor content`);
-        return res.status(502).json({ error: 'No output from provider' });
-      }
-
-      auditSkipped = false;
-      try {
-        const { systemPrompt: auditSystemPrompt, userPrompt: auditUserPrompt, temperature: auditTemperature } =
-          tailor.buildTailoredCvAuditPrompt(cvData, jdData, matchMap, tailoredCvText, confirmedSkills);
-        const auditCompletion = await callChatCompletionWithFallback({
-          workflow: 'cv_tailor',
-          temperature: auditTemperature,
-          maxTokens: 6500,
-          timeoutMs: 30000,
-          fallbackTimeoutMs: 30000,
-          maxFallbackModels: 2,
-          allowFallback: OPENROUTER_TAILOR_FALLBACK,
-          messages: [
-            { role: 'system', content: auditSystemPrompt },
-            { role: 'user',   content: auditUserPrompt },
-          ],
-        });
-
-        const auditData = await auditCompletion.response.json().catch(() => null);
-        const auditedText = auditData?.choices?.[0]?.message?.content;
-        // The audit pass rewrites the ENTIRE CV, not a diff - if the provider's
-        // response was cut off by the token budget, the result is a shorter,
-        // truncated CV that still structurally "looks like" one (has all the
-        // section headers isValidCvOutput checks for). Reject it outright
-        // rather than let a truncated rewrite silently replace the complete
-        // pre-audit text.
-        if (auditData?.choices?.[0]?.finish_reason === 'length') {
-          auditSkipped = true;
-          console.warn('[DraftApply] Audit output rejected: response was truncated (finish_reason=length)');
-        } else if (auditedText?.trim() && tailor.isValidCvOutput(auditedText)) {
-          const finalizedAudit = tailor.finalizeTailoredCV(auditedText, {
-            cvData,
-            jdData,
-            matchMap,
-            confirmedSkills,
-          });
-          if (finalizedAudit?.trim()) tailoredCvText = finalizedAudit;
-          else auditSkipped = true;
-        } else {
-          auditSkipped = true;
-          if (auditedText?.trim()) {
-            console.warn('[DraftApply] Audit output rejected: response does not look like a CV');
-          }
-        }
-      } catch (e) {
-        auditSkipped = true;
-        const detail = e instanceof LLMProviderError ? `${e.provider} ${e.status}` : e.message;
-        console.warn('[DraftApply] Tailored CV audit skipped:', detail);
+        console.warn('[DraftApply] Structured generation failed:', detail);
+        throw e;
       }
     }
 
     const warnings        = [
-      ...(tailorTruncated ? ['The AI response may have been cut short for this CV (it has a lot of experience to cover) - please check the end of each role for missing content before using it.'] : []),
       ...tailor.validateTailoredCV(cvData, tailoredCvText),
       ...tailor.validateTailoringQuality(cvData, jdData, matchMap, tailoredCvText, confirmedSkills),
     ];
@@ -2082,6 +2201,7 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
     const { missingKeywords: atsKeywordGaps, coverage: atsKeywordCoverage } =
       tailor.checkAtsKeywordCoverage(tailoredCvText, jdData);
 
+    assertBudget();
     res.json({
       tailoredCvText,
       matchReport,
@@ -2115,11 +2235,11 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
       agentInsights: buildAgentInsights(tailorAgentContext),
     });
   } catch (e) {
-    if (e?.name === 'AbortError') {
-      return res.status(504).json({ error: 'AI service timed out. Please try again.' });
+    if (e?.name === 'AbortError' || e instanceof RequestDeadlineError) {
+      return res.status(504).json({ error: 'Request deadline exceeded.', code: 'request_deadline_exceeded', ...safetyMetadata() });
     }
     if (e instanceof LLMProviderError) {
-      console.error(`[DraftApply] ${e.provider} tailor error ${e.status}:`, String(e.detail || '').slice(0, 400));
+      console.error(`[DraftApply] ${e.provider} tailor error`, { status: e.status });
       const { status, body } = llmErrorResponse(e, { allowFallback: OPENROUTER_TAILOR_FALLBACK });
       return res.status(status).json(body);
     }
@@ -2128,6 +2248,10 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`DraftApply Render proxy listening on :${PORT}`);
-});
+export { app };
+
+if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
+  app.listen(PORT, () => {
+    console.log(`DraftApply Render proxy listening on :${PORT}`);
+  });
+}

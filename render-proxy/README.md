@@ -2,6 +2,8 @@
 
 This service keeps your **Groq API key server-side** and exposes a small HTTPS API that the DraftApply Chrome extension calls to generate answers.
 
+It is the compatible backend for either the official extension/proxy deployment or a generated self-hosted extension pointed at a self-hosted proxy. The trusted-loopback `backend/` + `frontend/` web app is a third, separate product: it does not implement this service's token or extension protocol.
+
 The proxy uses a **pluggable recipe interface**: the default recipe (`recipe/index.js`) is fully open source and includes prompt logic for data extraction, cover letters, "why company" questions, and anti-recency-bias answers. You can override it with `RECIPE_PATH` to use a custom module.
 
 ---
@@ -64,11 +66,16 @@ Extension  ──(structured JSON)──▶  Proxy Engine  ──▶  Recipe Mod
 {
   "answer": "Generated answer text...",
   "provider": "groq",
-  "model": "llama-3.3-70b-versatile"
+  "model": "llama-3.3-70b-versatile",
+  "inputGroundingReport": {},
+  "validation": {},
+  "providerTrace": []
 }
 ```
 
-### Legacy Payload (backward-compatible)
+`inputGroundingReport` describes evidence available before generation. `validation` checks the produced answer; neither is a provider privacy control. `providerTrace`/final-provider metadata identifies routing where the response protocol permits. `/api/health` advertises `capabilities.answerValidation` so clients can fail closed when final validation is required.
+
+### Legacy Payload (disabled by default)
 
 ```json
 {
@@ -78,7 +85,7 @@ Extension  ──(structured JSON)──▶  Proxy Engine  ──▶  Recipe Mod
 }
 ```
 
-The proxy accepts either format. Structured payloads are routed through the recipe module; legacy payloads are passed directly to the LLM.
+Hosted raw prompts are rejected with stable code `legacy_raw_prompts_disabled` unless an operator explicitly sets `ALLOW_LEGACY_RAW_PROMPTS=true`. Structured internal CV generation remains supported.
 
 ---
 
@@ -121,12 +128,15 @@ If `RECIPE_PATH` is not set (or fails to load), the proxy uses the bundled recip
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `GROQ_API_KEY` | Yes, unless `OPENROUTER_API_KEY` or `LOCAL_LLM_BASE_URL` is set | — | Groq API key; used as the primary hosted LLM provider when present |
+| `GROQ_API_URL` | No | Groq API endpoint | Override with an HTTP(S) OpenAI-compatible gateway endpoint. |
 | `OPENROUTER_API_KEY` | No | — | OpenRouter API key; used as fallback when Groq is rate-limited, times out, or returns a transient error. Free fallback models are discovered from OpenRouter's official models API. |
+| `OPENROUTER_API_URL` | No | OpenRouter chat endpoint | Override the HTTP(S) compatible chat endpoint. |
+| `OPENROUTER_MODELS_URL` | No | OpenRouter models endpoint | Override the HTTP(S) models catalogue endpoint. Useful for compatible gateways and isolated integration tests. |
 | `OPENROUTER_MODEL` | No | — | Optional configured OpenRouter model. Use this when you want a paid/reliable OpenRouter route ahead of free fallback. |
 | `OPENROUTER_MAX_FALLBACK_MODELS` | No | `6` | Maximum OpenRouter free models to try per request after Groq fails |
-| `OPENROUTER_USE_MODELS_ARRAY` | No | `true` | Send the ranked fallback chain to OpenRouter as one `models` request so OpenRouter handles model/provider failover. Set `false` to use DraftApply's older manual loop. |
+| `OPENROUTER_USE_MODELS_ARRAY` | No | `false` | Opt into OpenRouter's opaque `models` fallback array. The default manual loop preserves model attribution. |
 | `OPENROUTER_PROVIDER_SORT` | No | `throughput` | Provider routing preference for OpenRouter fallback. `throughput` is the default for reducing free-model stalls. |
-| `OPENROUTER_REQUIRE_DATA_PRIVACY` | No | `true` | Adds OpenRouter provider routing preferences that deny providers marked as collecting data. |
+| OpenRouter privacy controls | — | — | Hosted requests unconditionally set `provider.zdr=true` and deny data-collecting providers. |
 | `OPENROUTER_MODEL_CACHE_TTL_MS` | No | `600000` | How long to cache OpenRouter's official models catalogue in memory |
 | `OPENROUTER_TAILOR_FALLBACK` | No | `true` | Tailor CV generation/audit falls back to OpenRouter by default when `OPENROUTER_API_KEY` is set. Set to `false` only if you want Tailor CV to hard-fail rather than use OpenRouter as backup. |
 | `OPENROUTER_SITE_URL` | No | `https://draftapply.com` | Optional OpenRouter attribution header |
@@ -139,16 +149,25 @@ If `RECIPE_PATH` is not set (or fails to load), the proxy uses the bundled recip
 | `LOCAL_EMBEDDING_API_KEY` | No | `LOCAL_LLM_API_KEY` or `local` | Bearer token for the embeddings endpoint. |
 | `LOCAL_EMBEDDING_MODEL` | No | `mixedbread-ai/mxbai-embed-large-v1` | Live-benchmarked embedding model for CV/JD evidence matching (see below). |
 | `LOCAL_EMBEDDING_TIMEOUT_MS` | No | `12000` | Timeout for the optional embeddings call. On failure, DraftApply falls back to deterministic matching. |
-| `LOCAL_EMBEDDING_PROMOTE_THRESHOLD` | No | `0.60` | Minimum cosine similarity to promote a missing requirement to transferable/partial evidence. |
-| `LOCAL_EMBEDDING_ENRICH_THRESHOLD` | No | `0.50` | Minimum cosine similarity to enrich already-supported requirements with better evidence snippets. |
+| `LOCAL_EMBEDDING_PROMOTE_THRESHOLD` | No | `0.60` | Legacy-named similarity threshold used for evidence ranking; embeddings do not promote unsupported requirements. |
+| `LOCAL_EMBEDDING_ENRICH_THRESHOLD` | No | `0.50` | Similarity threshold for ranking snippets attached to already-supported requirements. |
 | `TOKEN_SECRET` | Yes | — | Random long string for signing install tokens |
 | `GROQ_MODEL` | No | `llama-3.3-70b-versatile` | Groq model identifier |
 | `RECIPE_PATH` | No | `./recipe/index.js` | Path to recipe module (optional override) |
 | `PORT` | No | `10000` | Server listen port |
+| `ALLOW_LEGACY_RAW_PROMPTS` | No | `false` | Allow caller-controlled raw prompts (not recommended when hosted). |
+| `REQUEST_DEADLINE_MS` | No | `90000` | Absolute budget shared by all provider attempts and body consumption. |
+| `REDIS_URL` | Production | — | Persistent, atomic multi-instance admission/quota store. |
+| `REQUIRE_DURABLE_QUOTAS` | No | `true` in production | Refuse startup with hosted keys when Redis is absent. Explicitly disable for local development only. |
+| `CIRCUIT_FAILURE_THRESHOLD` / `CIRCUIT_OPEN_MS` | No | `3` / `30000` | Provider/model circuit policy. |
 
 ---
 
 ## Deploy on Render
+
+Production deployments using Groq or OpenRouter must provision Redis and set `REDIS_URL`. With `NODE_ENV=production`, the server refuses to start with hosted keys and no durable quota store. Admission atomically reserves request, token/spend, and concurrency capacity across instances and releases concurrency on success, error, or disconnect. Unknown model pricing still retains token/concurrency enforcement.
+
+Provider attempts produce payload-safe structured telemetry. JSON responses and streaming metadata include `requestId`, `providerTrace`, and the final mutating provider where protocol permits; traces never contain prompts, CV/JD text, bodies, or credentials. OpenRouter defaults to `data_collection: deny`, `zdr: true`, and observable manual model fallback. Absolute deadline failures use stable HTTP 504 code `request_deadline_exceeded`.
 
 1. Push this repo to GitHub.
 2. Render → New → Web Service → connect repo.
@@ -208,25 +227,26 @@ currently pulls `Qwen/Qwen3-1.7B` instead, pending a speed benchmark on the same
 it as its own Space, then point `LOCAL_LLM_BASE_URL` at it — see that directory's README for setup,
 the required `LLM_API_KEY` secret, and current benchmark notes.
 
-### Stage-2/3/4 agents, UI insights, and retrieval
+### Deterministic pipeline, UI insights, and retrieval
 
-The proxy also runs a shared deterministic agent layer before final model calls:
+Before and after the final model call, the proxy runs ordinary deterministic pipeline stages—not autonomous agents:
 
-- Application answers: question classification, CV grounding, job-context matching, truthfulness guard metadata.
-- Tailored CVs: JD analysis, CV parsing, match scoring, gap analysis, keyword optimisation, ATS formatting hints, truthfulness guard metadata.
+- Application answers: validation, question classification, CV grounding, job-context matching, prompt construction, model routing, and final-answer validation.
+- Tailored CVs: JD analysis, CV parsing, match scoring, gap analysis, keyword analysis, prompt construction, model routing, and final-output validation.
 
-These agents live in `shared/agent-workflows.js`. They do not add extra LLM calls; they turn existing parser/matcher output into stable workflow packages that the recipe, Tailor CV flow, and UI can consume safely. Stage 3 exposes compact `agentInsights` to the extension so users can see evidence, gaps, supported keywords, ATS hints, and truthfulness-guard counts without sending prompts from the browser.
+The deterministic helpers live in `shared/agent-workflows.js`. They turn parser/matcher output into stable packages consumed by the recipe, Tailor CV flow, and UI. Compact `agentInsights` can expose evidence, gaps, supported keywords, and ATS hints.
 
-Stage 4 adds optional embedding retrieval in `shared/evidence-retrieval.js`. When `LOCAL_EMBEDDING_BASE_URL` is configured, the proxy embeds compact CV evidence snippets and JD requirements, reranks evidence, and may promote high-confidence missing requirements to transferable partial matches. The promotion threshold is deliberately conservative, and any embedding failure falls back to deterministic matching.
+Optional retrieval in `shared/evidence-retrieval.js` embeds compact CV evidence snippets and JD requirements to rank relevant evidence. Similarity is not proof and cannot promote a missing requirement to supported or transferable status. Failure falls back to deterministic matching.
 
 `shared/domain-packs/domain-pack.snapshot.json` provides additional review cues for high-risk role families such as legal, clinical healthcare, aviation, clearance-heavy government roles, academic/research CVs, creative portfolios, licensed trades, and sparse job descriptions. These packs are refreshed offline through the repository workflow and reviewed as pull requests. The proxy must treat them as local read-only metadata during generation; it should not fetch live third-party domain datasets in the request path.
 
 ### Reliability and truthfulness contract
 
-All generated or analyzed outputs now include explicit risk metadata:
+Generated or analyzed outputs include explicit risk metadata where supported by the endpoint/protocol:
 
 - `qualityMode` and `qualityModeReason` identify the route used, for example `hosted_primary`, `local_private`, `configured_openrouter`, `openrouter_fallback`, or `best_effort_free_fallback`.
-- `truthfulnessReport` groups JD/CV claims into `supportedClaims`, `transferableClaims`, `userConfirmedClaims`, and `blockedClaims`.
+- `inputGroundingReport` groups pre-generation JD/CV claims into `supportedClaims`, `transferableClaims`, `userConfirmedClaims`, and `blockedClaims`; `truthfulnessReport` is a deprecated compatibility alias.
+- Final-validation metadata evaluates claims in the generated output rather than treating input grounding as proof of the answer.
 - `reviewRequired` is `true` when transferable or blocked claims exist, so the extension can keep review-before-sending visible without parsing model text.
 
 This is intentionally an open-source product contract: contributors can add providers or UI views without hiding model reliability or unsupported-claim risk.
@@ -244,14 +264,17 @@ npm run verify:architecture
 
 ---
 
-## Privacy Guarantees
+## Privacy and operator responsibilities
 
 - **No logging of CV text, job descriptions, or generated answers** in the proxy engine.
 - **GROQ_API_KEY**, **OPENROUTER_API_KEY**, and **TOKEN_SECRET** are read from env vars only — never committed.
 - **Rate limiting** and **token auth** are built into the engine.
-- The extension stores the CV locally in `chrome.storage.local` — it is never persisted server-side.
-- Groq is configured with **Zero Data Retention (ZDR)** — prompts and completions are not stored by the LLM provider.
-- If OpenRouter fallback is enabled, provider retention depends on the selected OpenRouter model/provider. Review that model's privacy notes before sending sensitive CVs.
+- The extension stores the CV in `chrome.storage.local`; proxy application code does not intentionally persist CV/job payloads or answers. Hosting, Redis, reverse proxies, and security systems may still retain operational metadata according to operator configuration.
+- Operators must enable and verify Groq ZDR in their own account console. Repository code cannot prove that account control is active.
+- OpenRouter calls request `zdr: true` and deny data collection by default. Operators must still verify OpenRouter settings and disclose the actually selected downstream provider and its policy.
+- Local OpenAI-compatible endpoints have their own logging and retention behavior; “local” does not itself guarantee no retention.
+
+See the full [privacy/provider deployment matrix](../docs/privacy-provider-matrix.md). Grounding and final validation improve claim safety, not data privacy.
 
 ---
 

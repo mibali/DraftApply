@@ -31,10 +31,22 @@ describe('render proxy agent architecture', () => {
     expect(serverJs).toContain('tailoredCvText,');
     expect(serverJs).toContain('agentChain: completion.route?.agentChain');
     expect(serverJs).toContain('agentInsights: buildAgentInsights');
-    expect(serverJs).toContain('truthfulnessReport: buildTruthfulnessReport');
+    expect(serverJs).toContain('inputGroundingReport');
+    expect(serverJs).toContain('truthfulnessReport: inputGroundingReport');
     expect(serverJs).toContain('domainRisk: summarizeDomainRisk');
     expect(serverJs).toContain('...buildQualityMetadata(completion)');
     expect(serverJs).toContain('draftapplyMeta');
+  });
+
+  it('buffers provider streams and emits only a validated final answer event', () => {
+    expect(serverJs).toContain('consumeOpenAIStream(response.body)');
+    expect(serverJs).toContain('validateApplicationAnswer(answer');
+    expect(serverJs).toContain('draftapplyFinal: final');
+    expect(serverJs).toContain(': draftapply-keepalive');
+    expect(serverJs).toContain('draftapplyError:');
+    expect(serverJs).toContain("res.write('data: [DONE]\\n\\n')");
+    expect(serverJs).not.toContain('Forward raw SSE bytes from Groq directly');
+    expect(serverJs).toContain('capabilities: { apiVersion: 2, streamFinal: true, answerValidation: true }');
   });
 
   it('exposes explicit reliability and truthfulness contracts for open-source deployments', () => {
@@ -100,6 +112,7 @@ describe('render proxy agent architecture', () => {
     expect(serverJs).toContain('rerankMatchMapWithEmbeddings');
     expect(serverJs).toContain('Embedding endpoint failed; deterministic matching was used');
     expect(evidenceRetrievalJs).toContain('promoteThreshold');
-    expect(evidenceRetrievalJs).toContain("status: 'partial_match'");
+    expect(evidenceRetrievalJs).toContain("authorizationMode: 'ranking-only'");
+    expect(evidenceRetrievalJs).not.toContain("allowedToMention: true");
   });
 });

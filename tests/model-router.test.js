@@ -72,8 +72,8 @@ describe('model router', () => {
     }, 'applicationAnswer');
 
     expect(prompts.systemPrompt).toMatch(/DRAFTAPPLY ORCHESTRATION CHAIN/);
-    expect(prompts.systemPrompt).toMatch(/Question Classifier Agent/);
-    expect(prompts.systemPrompt).toMatch(/Truthfulness Guard Agent/);
+    expect(prompts.systemPrompt).toMatch(/Question Classification/);
+    expect(prompts.systemPrompt).toMatch(/Grounding Validation/);
     expect(prompts.userPrompt).toBe('Question: Why us?');
     expect(prompts.agentChain).toEqual(WORKFLOW_AGENT_CHAINS.applicationAnswer);
   });

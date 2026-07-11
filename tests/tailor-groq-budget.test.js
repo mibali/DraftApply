@@ -14,15 +14,13 @@ function getCvTailorRoute(source) {
 }
 
 describe('Tailor CV Groq budget', () => {
-  it('keeps the production Tailor CV route to generation + audit per path (structured primary, legacy fallback)', () => {
+  it('keeps the production Tailor CV route to one structured generation and audit path', () => {
     const route = getCvTailorRoute(renderProxyServer);
     const llmCalls = route.match(/callChatCompletionWithFallback/g) || [];
 
-    // 2 structured (generation + audit) + 2 legacy fallback (generation + audit).
-    // Only one path runs per request.
-    expect(llmCalls).toHaveLength(4);
-    expect(route).toContain('buildTailoringPrompt');
-    expect(route).toContain('buildTailoredCvAuditPrompt');
+    expect(llmCalls).toHaveLength(2);
+    expect(route).not.toContain('buildTailoringPrompt');
+    expect(route).not.toContain('buildTailoredCvAuditPrompt');
     expect(route).toContain('buildRecruiterReview');
     expect(route).toContain('truthfulnessReport: buildTruthfulnessReport');
     expect(route).toContain('...buildQualityMetadata(completion)');
@@ -31,15 +29,17 @@ describe('Tailor CV Groq budget', () => {
     expect(route).not.toContain('buildSemanticMatchPrompt');
   });
 
-  it('runs the structured generation path first with legacy free-text as per-request fallback', () => {
+  it('requires structured generation and fails closed instead of returning a free-text CV', () => {
     const route = getCvTailorRoute(renderProxyServer);
     expect(renderProxyServer).toContain("const STRUCTURED_CV_GENERATION = !/^false$/i.test(process.env.STRUCTURED_CV_GENERATION || 'true')");
     expect(route).toContain('buildStructuredTailoringPrompt');
     expect(route).toContain('validateStructuredContent');
     expect(route).toContain('renderTailoredCV');
     expect(route).toContain('buildStructuredAuditPrompt');
-    expect(route).toContain("generationMode = 'structured'");
-    expect(route).toContain("if (generationMode !== 'structured')");
+    expect(route).toContain("const generationMode = 'structured'");
+    expect(route).toContain("code: 'structured_cv_generation_required'");
+    expect(route).toContain("code: 'structured_cv_output_invalid'");
+    expect(route).not.toContain('legacy free-text path');
     expect(route).toContain('structuredCv,');
     expect(route).toContain('generationMode,');
     // JSON mode requested for structured calls; provider guard lives in callProviderChat.
@@ -50,7 +50,8 @@ describe('Tailor CV Groq budget', () => {
   it('uses OpenRouter only as a retry fallback behind Groq in production', () => {
     expect(renderProxyServer).toContain('const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY');
     expect(renderProxyServer).toContain("const OPENROUTER_TAILOR_FALLBACK = !/^false$/i.test");
-    expect(renderProxyServer).toContain("url: 'https://openrouter.ai/api/v1/chat/completions'");
+    expect(renderProxyServer).toContain("const OPENROUTER_API_URL = providerEndpoint(process.env.OPENROUTER_API_URL, 'https://openrouter.ai/api/v1/chat/completions'");
+    expect(renderProxyServer).toContain('url: OPENROUTER_API_URL');
     expect(renderProxyServer).toContain("const primary = GROQ_API_KEY ? 'groq' : 'openrouter'");
     expect(renderProxyServer).toContain('shouldUseOpenRouterFallback(error');
     expect(renderProxyServer).toContain('buildOpenRouterFallbackModelOrder');
@@ -59,7 +60,10 @@ describe('Tailor CV Groq budget', () => {
     expect(renderProxyServer).toContain('? [OPENROUTER_MODEL, ...PREFERRED_OPENROUTER_FREE_MODELS.filter');
     expect(renderProxyServer).toContain('!order.includes(OPENROUTER_MODEL)');
     expect(renderProxyServer).toContain('OPENROUTER_MAX_FALLBACK_MODELS');
-    expect(renderProxyServer).toContain('const OPENROUTER_USE_MODELS_ARRAY = !/^false$/i.test');
+    // Manual fallback is the hardened default so every attempted model is
+    // visible in DraftApply's provider trace. Operators may opt into the
+    // opaque OpenRouter models-array strategy explicitly.
+    expect(renderProxyServer).toContain("const OPENROUTER_USE_MODELS_ARRAY = /^true$/i.test");
     expect(renderProxyServer).toContain('providerPreferences');
     expect(renderProxyServer).toContain('models: orderedModels');
     expect(renderProxyServer).toContain("metadata: true");
@@ -70,8 +74,8 @@ describe('Tailor CV Groq budget', () => {
   it('gives Tailor CV fallback enough time after a Groq timeout instead of spending the exhausted primary budget', () => {
     const route = getCvTailorRoute(renderProxyServer);
     expect(renderProxyServer).toContain('options.fallbackTimeoutMs || options.timeoutMs || 60000');
-    // Primary + audit must fit inside the 150 s SW background timeout with headroom.
-    // 50 s primary + 30 s audit = 80 s max LLM time, well inside the limit.
+    // Per-stage ceilings are additionally clamped by the request-wide
+    // absolute deadline, so fallback attempts cannot multiply this budget.
     expect(route).toContain('timeoutMs: 50000');
     expect(route).toContain('fallbackTimeoutMs: 50000');
     expect(route).toContain('maxFallbackModels: 2');
@@ -105,9 +109,10 @@ describe('Tailor CV Groq budget', () => {
     expect(route).not.toContain('buildSemanticMatchPrompt');
   });
 
-  it('guards audit output with isValidCvOutput on the raw LLM response before replacing the tailored CV in production', () => {
+  it('validates structured audit output before replacing generated content in production', () => {
     const route = getCvTailorRoute(renderProxyServer);
-    expect(route).toContain('tailor.isValidCvOutput(auditedText)');
+    expect(route).toContain('tailor.validateStructuredContent');
+    expect(route).toContain('if (audited)');
     expect(route).toContain('auditSkipped');
   });
 
@@ -117,21 +122,21 @@ describe('Tailor CV Groq budget', () => {
     expect(route).toContain('auditSkipped');
   });
 
-  it('uses 6500 max tokens for the audit call in production', () => {
+  it('uses a bounded structured JSON budget for the production audit call', () => {
     const route = getCvTailorRoute(renderProxyServer);
-    expect(route).toContain('maxTokens: 6500');
-    expect(route).not.toContain('maxTokens: 3500');
+    expect(route.match(/maxTokens: 2500/g)).toHaveLength(2);
+    expect(route).not.toContain('maxTokens: 6500');
   });
 
   it('rejects a truncated audit response instead of replacing the tailored CV with a cut-off rewrite', () => {
     const route = getCvTailorRoute(renderProxyServer);
-    expect(route).toContain("auditData?.choices?.[0]?.finish_reason === 'length'");
+    expect(route).toContain("auditData?.choices?.[0]?.finish_reason !== 'length'");
   });
 
-  it('surfaces a warning when the primary tailor response was truncated', () => {
+  it('rejects a truncated primary structured response', () => {
     const route = getCvTailorRoute(renderProxyServer);
-    expect(route).toContain("tailorTruncated = data?.choices?.[0]?.finish_reason === 'length'");
-    expect(route).toContain('tailorTruncated ?');
+    expect(route).toContain("structuredData?.choices?.[0]?.finish_reason === 'length'");
+    expect(route).toContain('structuredTruncated\n          ? null');
   });
 
   it('exposes the deployed commit and process start time in /api/health so deploy state is verifiable', () => {
