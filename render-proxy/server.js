@@ -102,6 +102,12 @@ const REDIS_PING_INTERVAL_MS = coercePositiveInteger(process.env.REDIS_PING_INTE
 const REDIS_CONNECT_TIMEOUT_MS = coercePositiveInteger(process.env.REDIS_CONNECT_TIMEOUT_MS, 10_000);
 const REDIS_RECONNECT_MAX_MS = coercePositiveInteger(process.env.REDIS_RECONNECT_MAX_MS, 10_000);
 const REDIS_STARTUP_TIMEOUT_MS = coercePositiveInteger(process.env.REDIS_STARTUP_TIMEOUT_MS, 30_000);
+const SUBJECT_QUOTA_OPTIONS = {
+  maxConcurrentPerSubject: coercePositiveInteger(process.env.QUOTA_MAX_CONCURRENT_PER_SUBJECT, 1),
+  maxRequestsPerSubject: coercePositiveInteger(process.env.QUOTA_MAX_REQUESTS_PER_SUBJECT, 20),
+  maxTokensPerSubject: coercePositiveInteger(process.env.QUOTA_MAX_TOKENS_PER_SUBJECT, 500_000),
+  maxSpendMicrosPerSubject: coercePositiveInteger(process.env.QUOTA_MAX_SPEND_MICROS_PER_SUBJECT, 500_000),
+};
 
 // Recipe module – default is the bundled open-source recipe. Set RECIPE_PATH to override.
 const RECIPE_PATH = process.env.RECIPE_PATH || './recipe/index.js';
@@ -156,13 +162,13 @@ if (REDIS_URL) {
     suppressedRedisErrors = 0;
   });
   await connectRedisAtStartup(redisClient, REDIS_STARTUP_TIMEOUT_MS);
-  admissionStore = new RedisAdmissionStore(redisClient);
+  admissionStore = new RedisAdmissionStore(redisClient, SUBJECT_QUOTA_OPTIONS);
 } else {
   if (REQUIRE_DURABLE_QUOTAS && (GROQ_API_KEY || OPENROUTER_API_KEY)) {
     console.error('Durable quota storage is required for paid providers; configure REDIS_URL or explicitly set REQUIRE_DURABLE_QUOTAS=false for local development.');
     process.exit(1);
   }
-  admissionStore = new MemoryAdmissionStore();
+  admissionStore = new MemoryAdmissionStore(SUBJECT_QUOTA_OPTIONS);
 }
 const circuitOptions = {
   failureThreshold: coercePositiveInteger(process.env.CIRCUIT_FAILURE_THRESHOLD, 3),

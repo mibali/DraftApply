@@ -56,6 +56,20 @@ describe('production proxy safety primitives', () => {
     await store.release(second);
   });
 
+  it('allows a legitimate CV tailoring reservation to be retried under default subject limits', async () => {
+    const store = new MemoryAdmissionStore();
+    const estimatedTailorTokens = 58_368;
+    const estimatedTailorSpendMicros = 58_368;
+    const first = await store.reserve({
+      subjectKey: 'install-a', tokens: estimatedTailorTokens, spendMicros: estimatedTailorSpendMicros,
+    });
+    await store.release(first);
+    const second = await store.reserve({
+      subjectKey: 'install-a', tokens: estimatedTailorTokens, spendMicros: estimatedTailorSpendMicros,
+    });
+    await expect(store.release(second)).resolves.toBeUndefined();
+  });
+
   it('reconciles usage only when every successful provider call reports it', () => {
     const middleware = requestSafetyMiddleware({ deadlineMs: 100 });
     middleware({ get: () => null }, { setHeader() {} }, () => {

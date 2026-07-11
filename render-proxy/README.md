@@ -163,6 +163,10 @@ If `RECIPE_PATH` is not set (or fails to load), the proxy uses the bundled recip
 | `REDIS_CONNECT_TIMEOUT_MS` | No | `10000` | Timeout for each Redis connection attempt. |
 | `REDIS_RECONNECT_MAX_MS` | No | `10000` | Maximum reconnect backoff after a Redis disconnect. |
 | `REDIS_STARTUP_TIMEOUT_MS` | No | `30000` | Overall deadline for the initial Redis connection before deployment fails. |
+| `QUOTA_MAX_CONCURRENT_PER_SUBJECT` | No | `1` | Maximum simultaneous paid workflows per installation. |
+| `QUOTA_MAX_REQUESTS_PER_SUBJECT` | No | `20` | Maximum admitted paid workflows per installation per 24-hour UTC bucket. |
+| `QUOTA_MAX_TOKENS_PER_SUBJECT` | No | `500000` | Maximum reconciled/reserved provider tokens per installation per 24-hour UTC bucket. |
+| `QUOTA_MAX_SPEND_MICROS_PER_SUBJECT` | No | `500000` | Maximum estimated/reconciled spend per installation per 24-hour UTC bucket, in millionths of a dollar (`500000` = $0.50). |
 | `CIRCUIT_FAILURE_THRESHOLD` / `CIRCUIT_OPEN_MS` | No | `3` / `30000` | Provider/model circuit policy. |
 
 ---
