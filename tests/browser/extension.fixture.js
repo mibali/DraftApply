@@ -36,6 +36,9 @@ export const test = base.extend({
         const answer = block ? 'This unsupported claim must not be inserted.' : 'I built deterministic JavaScript tooling at scale.';
         if (!body?.stream) return json(200, { answer, validation: { status: block ? 'block' : 'pass' } });
         res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+        // Keep the in-flight state observable so the smoke test can verify
+        // insertion remains disabled before the validated final event arrives.
+        await new Promise(resolve => setTimeout(resolve, 50));
         res.write(`data: ${JSON.stringify({ draftapplyFinal: { answer, validation: { status: block ? 'block' : 'pass' } } })}\n\n`);
         res.end('data: [DONE]\n\n'); return;
       }

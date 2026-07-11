@@ -165,7 +165,7 @@ If `RECIPE_PATH` is not set (or fails to load), the proxy uses the bundled recip
 
 ## Deploy on Render
 
-Production deployments using Groq or OpenRouter must provision Redis and set `REDIS_URL`. With `NODE_ENV=production`, the server refuses to start with hosted keys and no durable quota store. Admission atomically reserves request, token/spend, and concurrency capacity across instances and releases concurrency on success, error, or disconnect. Unknown model pricing still retains token/concurrency enforcement.
+Production deployments using Groq or OpenRouter must provision Redis and set `REDIS_URL`. With `NODE_ENV=production`, the server refuses to start with hosted keys and no durable quota store. Admission atomically reserves request, token/spend, and lease-based concurrency capacity across instances, then reconciles provider-reported usage when every attempt reports it. Missing usage remains conservatively reserved. Redis also coordinates provider/model circuit breakers across proxy instances and permits only one half-open probe.
 
 Provider attempts produce payload-safe structured telemetry. JSON responses and streaming metadata include `requestId`, `providerTrace`, and the final mutating provider where protocol permits; traces never contain prompts, CV/JD text, bodies, or credentials. OpenRouter defaults to `data_collection: deny`, `zdr: true`, and observable manual model fallback. Absolute deadline failures use stable HTTP 504 code `request_deadline_exceeded`.
 

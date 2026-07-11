@@ -185,10 +185,15 @@ describe('skeleton sanitisation of a corrupted CV parse (regression, from live o
         company: 'Semgrep | USA',
         title: 'Senior Customer Success Engineer',
         dates: 'Feb 2024 - Jun 2025',
+        sourceId: 'experience:2',
         responsibilities: [
           // Hard-wrapped fragment split into its own bullet.
           'Resolved complex Tier 3/4 security platform issues across CI/CD pipelines, developer environments, APIs, containers, and enterprise-scale',
           'integrations.',
+        ],
+        responsibilityEvidence: [
+          { sourceId: 'experience:2:responsibility:0' },
+          { sourceId: 'experience:2:responsibility:1' },
         ],
       },
       {
@@ -227,6 +232,11 @@ describe('skeleton sanitisation of a corrupted CV parse (regression, from live o
     const semgrep = skeleton.roles.find(r => r.company.includes('Semgrep'));
     expect(semgrep.originalBullets).toHaveLength(1);
     expect(semgrep.originalBullets[0]).toContain('enterprise-scale integrations.');
+    expect(semgrep.originalBulletEvidence[0].sourceIds).toEqual([
+      'experience:2:responsibility:0',
+      'experience:2:responsibility:1',
+    ]);
+    expect(semgrep.allowedSourceIds).toEqual(semgrep.originalBulletEvidence[0].sourceIds);
   });
 
   it('keeps genuinely distinct stints at the same company separate', () => {
@@ -336,6 +346,24 @@ describe('validateStructuredContent', () => {
       roles: [{ id: 'role_0', focus: 'Focus: Improving platform reliability', bullets: ['Kept the platform reliable throughout.'] }],
     }, skeleton, opts);
     expect(content.roles[0].focus).toBeNull();
+  });
+
+  it('rejects cross-role source ids instead of exposing them in accepted provenance', () => {
+    const roleSourceId = skeleton.roles[0].allowedSourceIds[0];
+    const crossRoleSourceId = skeleton.roles[1].allowedSourceIds[0];
+    const original = skeleton.roles[0].originalBullets[0];
+    const content = tailor.validateStructuredContent({
+      summary: { text: 'Cloud, platform, and MLOps engineer with production support background.', sourceIds: ['summary:0'] },
+      competencies: [],
+      roles: [{
+        id: 'role_0',
+        focus: { text: original, sourceIds: [roleSourceId, crossRoleSourceId] },
+        bullets: [{ text: original, sourceIds: [roleSourceId, crossRoleSourceId] }],
+      }],
+    }, skeleton, opts);
+
+    expect(content.roles[0].focus).toBeNull();
+    expect(content.roles[0].bulletEvidence.flatMap(item => item.sourceIds)).not.toContain(crossRoleSourceId);
   });
 
   it('dedupes near-identical and truncated-duplicate bullets within a role', () => {

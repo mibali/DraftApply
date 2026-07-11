@@ -71,14 +71,23 @@ export function selectEvidence(context, text, { roleSourceId = null, limit = 6 }
     .slice(0, limit).map(item => item.record);
 }
 
-export function isTextSupported(text, context, { roleSourceId = null, sourceIds = [], requireSourceIds = false } = {}) {
+export function isTextSupported(text, context, { roleSourceId = null, allowedSourceIds = null, sourceIds = [], requireSourceIds = false } = {}) {
+  const allowed = Array.isArray(allowedSourceIds) ? new Set(allowedSourceIds) : null;
   const roleCandidates = (context?.records || []).filter(record => !roleSourceId || record.roleSourceId === roleSourceId);
-  const validProposedSourceIds = sourceIds.filter(id => context?.sourceIndex?.[id] && (!roleSourceId || context.sourceIndex[id].roleSourceId === roleSourceId));
-  const candidates = sourceIds.length > 0
+  const validProposedSourceIds = sourceIds.filter(id => context?.sourceIndex?.[id]
+    && (!roleSourceId || context.sourceIndex[id].roleSourceId === roleSourceId)
+    && (!allowed || allowed.has(id)));
+  let candidates = sourceIds.length > 0
     ? validProposedSourceIds.map(id => context.sourceIndex[id])
     : roleCandidates;
   if ((requireSourceIds && validProposedSourceIds.length === 0) || candidates.length === 0) {
     return { supported: false, validProposedSourceIds };
+  }
+  if (validProposedSourceIds.length > 1) {
+    candidates = [{
+      ...candidates[0],
+      text: candidates.map(record => record.text).join(' '),
+    }, ...candidates];
   }
   const claimMetrics = metrics(text);
   const claimTokens = tokens(text);

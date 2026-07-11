@@ -72,6 +72,26 @@ describe('deterministic grounding harness', () => {
     expect(result.validProposedSourceIds).toEqual([]);
   });
 
+  it('combines only explicitly cited fragments from the same allowed bullet provenance', () => {
+    const fragmented = buildGroundingContext({
+      evidenceIndex: [
+        { sourceId: 'experience:0:responsibility:0', roleSourceId: 'experience:0', text: 'Built enterprise-scale' },
+        { sourceId: 'experience:0:responsibility:1', roleSourceId: 'experience:0', text: 'payment integrations in Python.' },
+        { sourceId: 'experience:1:responsibility:0', roleSourceId: 'experience:1', text: 'Rust platform.' },
+      ],
+    });
+    expect(isTextSupported('Built enterprise-scale payment integrations in Python.', fragmented, {
+      sourceIds: ['experience:0:responsibility:0', 'experience:0:responsibility:1'],
+      allowedSourceIds: ['experience:0:responsibility:0', 'experience:0:responsibility:1'],
+      requireSourceIds: true,
+    }).supported).toBe(true);
+    expect(isTextSupported('Built enterprise-scale Rust platform.', fragmented, {
+      sourceIds: ['experience:0:responsibility:0', 'experience:1:responsibility:0'],
+      allowedSourceIds: ['experience:0:responsibility:0'],
+      requireSourceIds: true,
+    }).supported).toBe(false);
+  });
+
   it('drops injection/audit content and backfills originals when every generated bullet is invalid', () => {
     const tailor = new CVTailor();
     const skeleton = tailor.buildCvSkeleton(groundingCv, {});

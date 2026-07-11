@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 const requests = [];
 let providerServer;
@@ -7,6 +7,7 @@ let proxyServer;
 let providerBase;
 let proxyBase;
 let token;
+let malformedStructuredResponses = false;
 
 const cvText = `Jane Example\nPlatform Engineer\n\nWORK EXPERIENCE\nPlatform Engineer | Acme Ltd | 2020-2025\n- Built Python automation for Kubernetes deployments and production diagnostics.\n- Led incident reviews and wrote operational runbooks.\n\nSKILLS\nPython, Kubernetes, production diagnostics`;
 
@@ -14,13 +15,18 @@ function listen(server) {
   return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 }
 
-async function jsonRequest(path, body) {
+async function jsonRequest(path, body, authToken = token) {
   const response = await fetch(`${proxyBase}${path}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${authToken}` },
     body: JSON.stringify(body),
   });
   return { response, body: await response.json() };
+}
+
+async function registerToken() {
+  const response = await fetch(`${proxyBase}/api/register`, { method: 'POST' });
+  return (await response.json()).token;
 }
 
 describe.sequential('Render proxy real HTTP routes', () => {
@@ -43,16 +49,36 @@ describe.sequential('Render proxy real HTTP routes', () => {
       if (provider === 'groq' && prompt.includes('DEADLINE')) {
         return setTimeout(() => { res.statusCode = 503; res.end('{"error":"late"}'); }, 300);
       }
+      if (provider === 'groq' && prompt.includes('MALFORMED_BODY')) {
+        res.setHeader('content-type', 'application/json');
+        return res.end('{');
+      }
+      const structuredCvRequest = prompt.includes('professional CV tailoring engine') || prompt.includes('structured CV');
+      const roleIds = [...prompt.matchAll(/\b(role_\d+)\b/g)].map(match => match[1]);
+      const sourceIds = [...prompt.matchAll(/\[(experience:\d+:responsibility:\d+)/g)].map(match => match[1]);
       const answer = prompt.includes('RISKY')
         ? 'I have ten years of Redis production experience and hold an AWS certification.'
         : 'At Acme, I built Python automation for Kubernetes deployments and production diagnostics.';
       res.setHeader('content-type', body.stream ? 'text/event-stream' : 'application/json');
       if (body.stream) {
+        if (prompt.includes('STREAM_FAILURE')) return res.end('data: [DONE]\n\n');
         res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: answer.slice(0, 30) } }], model: `${provider}-model` })}\n\n`);
         res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: answer.slice(30) } }] })}\n\n`);
         return res.end('data: [DONE]\n\n');
       }
-      res.end(JSON.stringify({ choices: [{ message: { content: answer } }], model: `${provider}-model` }));
+      const content = structuredCvRequest
+        ? malformedStructuredResponses
+          ? 'not-json'
+          : JSON.stringify({
+              summary: { text: 'Platform Engineer', sourceIds: ['summary:0'] },
+              competencies: [],
+              roles: [...new Set(roleIds)].map((id, index) => ({
+                id, focus: null,
+                bullets: [{ text: index === 0 ? 'Built Python automation for Kubernetes deployments and production diagnostics.' : 'Led incident reviews and wrote operational runbooks.', sourceIds: [sourceIds[index] || sourceIds[0]] }],
+              })),
+            })
+        : answer;
+      res.end(JSON.stringify({ choices: [{ message: { content } }], model: `${provider}-model`, usage: { total_tokens: 321, cost: 0.0001 } }));
     });
     providerBase = `http://127.0.0.1:${await listen(providerServer)}`;
     Object.assign(process.env, {
@@ -67,8 +93,7 @@ describe.sequential('Render proxy real HTTP routes', () => {
     const { app } = await import('../render-proxy/server.js');
     proxyServer = http.createServer(app);
     proxyBase = `http://127.0.0.1:${await listen(proxyServer)}`;
-    const registration = await fetch(`${proxyBase}/api/register`, { method: 'POST' });
-    token = (await registration.json()).token;
+    token = await registerToken();
   });
 
   afterAll(async () => {
@@ -106,6 +131,32 @@ describe.sequential('Render proxy real HTTP routes', () => {
     expect(text).not.toContain('"delta"');
   });
 
+  it('records body parse failures as incomplete provider attempts', async () => {
+    const events = [];
+    const info = vi.spyOn(console, 'info').mockImplementation(value => events.push(JSON.parse(value)));
+    try {
+      const failureToken = await registerToken();
+      const { response } = await jsonRequest('/api/generate', { question: 'MALFORMED_BODY: Why suitable?', cvText, skipEvaluation: true }, failureToken);
+      expect(response.status).toBe(500);
+    } finally {
+      info.mockRestore();
+    }
+    expect(events).toContainEqual(expect.objectContaining({ event: 'proxy_safety', provider: 'groq', outcome: 'error' }));
+  });
+
+  it('marks an empty stream as a provider failure instead of closing a half-open circuit', async () => {
+    const events = [];
+    const info = vi.spyOn(console, 'info').mockImplementation(value => events.push(JSON.parse(value)));
+    try {
+      const failureToken = await registerToken();
+      const response = await fetch(`${proxyBase}/api/generate`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${failureToken}` }, body: JSON.stringify({ question: 'STREAM_FAILURE: Why suitable?', cvText, stream: true, skipEvaluation: true }) });
+      expect(await response.text()).toContain('stream_generation_failed');
+    } finally {
+      info.mockRestore();
+    }
+    expect(events).toContainEqual(expect.objectContaining({ event: 'proxy_safety', provider: 'groq', outcome: 'error' }));
+  });
+
   it('falls back with privacy controls, ordered trace, and final attribution', async () => {
     const { response, body } = await jsonRequest('/api/generate', { question: 'FALLBACK: Why suitable?', cvText, skipEvaluation: true });
     expect(response.status).toBe(200);
@@ -130,5 +181,34 @@ describe.sequential('Render proxy real HTTP routes', () => {
     expect(success.body.validation.status).toBe('block');
     const next = await jsonRequest('/api/generate', { question: 'Why are you suitable after error?', cvText, skipEvaluation: true });
     expect(next.response.status).toBe(200);
+  });
+
+  it('returns only citation-validated structured CV output and attributes the accepted audit', async () => {
+    const { response, body } = await jsonRequest('/api/cv/tailor', {
+      cvText,
+      jobTitle: 'Platform Engineer',
+      company: 'Example Co',
+      jobDescription: 'We need a platform engineer with Kubernetes, Python automation, incident response, and production diagnostics experience.',
+    });
+    expect(response.status).toBe(200);
+    expect(body.generationMode).toBe('structured');
+    expect(body.structuredCv.content.roles[0].bulletEvidence[0].sourceIds[0]).toMatch(/^experience:/);
+    expect(body.provider).toBe('groq');
+    expect(body.tailoredCvText).toContain('PROFESSIONAL EXPERIENCE');
+  });
+
+  it('fails closed when structured CV output is malformed', async () => {
+    const before = requests.length;
+    malformedStructuredResponses = true;
+    const { response, body } = await jsonRequest('/api/cv/tailor', {
+        cvText,
+        jobTitle: 'Platform Engineer',
+        company: 'Example Co',
+        jobDescription: 'Platform role requiring Kubernetes automation, incident response, and reliable production diagnostics.',
+      })
+      .finally(() => { malformedStructuredResponses = false; });
+    expect(response.status).toBe(502);
+    expect(body.code).toBe('structured_cv_output_invalid');
+    expect(requests.slice(before).filter(request => request.body.max_tokens === 6000)).toHaveLength(0);
   });
 });

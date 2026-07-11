@@ -2217,8 +2217,15 @@ Do not add anything new. Return the complete corrected CV.`;
         sourceId: role.sourceId || `experience:${i}`,
         originalBulletEvidence: role.originalBullets.map((text, bulletIndex) => ({
           text,
-          sourceId: role.originalBulletEvidence?.[bulletIndex]?.sourceId || `${role.sourceId || `experience:${i}`}:responsibility:${bulletIndex}`,
+          sourceIds: role.originalBulletEvidence?.[bulletIndex]?.sourceIds?.length
+            ? role.originalBulletEvidence[bulletIndex].sourceIds
+            : [role.originalBulletEvidence?.[bulletIndex]?.sourceId || `${role.sourceId || `experience:${i}`}:responsibility:${bulletIndex}`],
         })),
+        allowedSourceIds: [...new Set(role.originalBullets.flatMap((_, bulletIndex) =>
+          role.originalBulletEvidence?.[bulletIndex]?.sourceIds?.length
+            ? role.originalBulletEvidence[bulletIndex].sourceIds
+            : [role.originalBulletEvidence?.[bulletIndex]?.sourceId || `${role.sourceId || `experience:${i}`}:responsibility:${bulletIndex}`]
+        ))],
       }));
 
     return {
@@ -2273,7 +2280,7 @@ Do not add anything new. Return the complete corrected CV.`;
       const bulletPairs = this._joinWrappedBulletEvidence(
         (exp?.responsibilities || []).map((text, index) => ({
           text: String(text || '').trim(),
-          evidence: exp?.responsibilityEvidence?.[index] || null,
+          sourceIds: [exp?.responsibilityEvidence?.[index]?.sourceId].filter(Boolean),
         })).filter(item => item.text)
       );
       cleaned.push({
@@ -2281,7 +2288,8 @@ Do not add anything new. Return the complete corrected CV.`;
         dates,
         title,
         sourceId: exp?.sourceId,
-        originalBulletEvidence: bulletPairs.map(item => item.evidence),
+        roleSourceIds: [exp?.sourceId].filter(Boolean),
+        originalBulletEvidence: bulletPairs.map(item => ({ text: item.text, sourceIds: item.sourceIds })),
         originalBullets: bulletPairs.map(item => item.text),
       });
     }
@@ -2316,9 +2324,10 @@ Do not add anything new. Return the complete corrected CV.`;
         dates: primary.dates || secondary.dates,
         title: primary.title || secondary.title,
         sourceId: primary.sourceId,
+        roleSourceIds: [...new Set([...(primary.roleSourceIds || []), ...(secondary.roleSourceIds || [])])],
         originalBulletEvidence: originalBullets.map(text => evidenceByText.find(record =>
           this._normaliseBulletForSimilarity(record?.text) === this._normaliseBulletForSimilarity(text)
-        ) || null),
+        ) || { text, sourceIds: [] }),
         originalBullets,
       };
     }
@@ -2353,8 +2362,7 @@ Do not add anything new. Return the complete corrected CV.`;
       const previous = output.at(-1);
       if (previous && /[a-z0-9,\-]$/i.test(previous.text) && !/[.!?:;]$/.test(previous.text) && /^[a-z]/.test(item.text)) {
         previous.text = `${previous.text} ${item.text}`;
-        // The joined claim may cite both original parser records.
-        previous.evidence = previous.evidence || item.evidence;
+        previous.sourceIds = [...new Set([...(previous.sourceIds || []), ...(item.sourceIds || [])])];
       } else {
         output.push({ ...item });
       }
@@ -2505,7 +2513,7 @@ STRICT RULES:
 
     const rolesBlock = skeleton.roles.map(role => {
       const bullets = role.originalBullets.length
-        ? role.originalBullets.map((b, i) => `    - [${role.originalBulletEvidence[i]?.sourceId}] ${b}`).join('\n')
+        ? role.originalBullets.map((b, i) => `    - [${(role.originalBulletEvidence[i]?.sourceIds || []).join(', ')}] ${b}`).join('\n')
         : '    (no bullets in original)';
       return `${role.id}: ${role.title || '(untitled)'} @ ${role.company || '(no company)'} (${role.dates || 'no dates'})\n  ORIGINAL BULLETS:\n${bullets}`;
     }).join('\n\n');
@@ -2623,11 +2631,17 @@ Return the corrected JSON object now.`;
           text: this._cleanStructuredBullet(typeof b === 'string' ? b : b?.text),
           sourceIds: Array.isArray(b?.sourceIds) ? b.sourceIds.filter(id => typeof id === 'string') : [],
         }))
-        .filter(item => item.text && isTextSupported(item.text, groundingContext, {
-          roleSourceId: skel.sourceId,
-          sourceIds: item.sourceIds,
-          requireSourceIds: true,
-        }).supported)
+        .map(item => ({
+          ...item,
+          support: isTextSupported(item.text, groundingContext, {
+            allowedSourceIds: skel.allowedSourceIds,
+            sourceIds: item.sourceIds,
+            requireSourceIds: true,
+          }),
+        }))
+        .filter(item => item.text && item.support.supported
+          && item.support.validProposedSourceIds.length === item.sourceIds.length)
+        .map(({ support, ...item }) => ({ ...item, sourceIds: support.validProposedSourceIds }))
         .filter(Boolean);
       let bullets = acceptedBullets.map(item => item.text);
       let bulletEvidence = acceptedBullets.map(item => ({ text: item.text, sourceIds: item.sourceIds }));
@@ -2638,7 +2652,7 @@ Return the corrected JSON object now.`;
         bullets = skel.originalBullets.slice(0, 6);
         bulletEvidence = bullets.map((text, index) => ({
           text,
-          sourceIds: [skel.originalBulletEvidence?.[index]?.sourceId].filter(Boolean),
+          sourceIds: skel.originalBulletEvidence?.[index]?.sourceIds || [],
         }));
       } else if (skel.originalBullets.length >= 2 && bullets.length < 2) {
         for (const original of skel.originalBullets) {
@@ -2656,7 +2670,7 @@ Return the corrected JSON object now.`;
         }
         bulletEvidence = bullets.map(text => bulletEvidence.find(item => item.text === text) || {
           text,
-          sourceIds: [skel.originalBulletEvidence?.[skel.originalBullets.indexOf(text)]?.sourceId].filter(Boolean),
+          sourceIds: skel.originalBulletEvidence?.[skel.originalBullets.indexOf(text)]?.sourceIds || [],
         });
       }
       bullets = bullets.slice(0, 6);
@@ -2665,13 +2679,16 @@ Return the corrected JSON object now.`;
       const focusClaim = typeof supplied?.focus === 'string' ? { text: supplied.focus, sourceIds: [] } : supplied?.focus;
       let focus = this._clampInline(focusClaim?.text, 140);
       focus = focus ? focus.replace(/^focus\s*:\s*/i, '').trim() : '';
-      if (focus && !isTextSupported(focus, groundingContext, {
-        roleSourceId: skel.sourceId,
-        sourceIds: Array.isArray(focusClaim?.sourceIds) ? focusClaim.sourceIds : [],
+      const focusSourceIds = Array.isArray(focusClaim?.sourceIds) ? focusClaim.sourceIds.filter(id => typeof id === 'string') : [];
+      const focusSupport = isTextSupported(focus, groundingContext, {
+        allowedSourceIds: skel.allowedSourceIds,
+        sourceIds: focusSourceIds,
         requireSourceIds: true,
-      }).supported) focus = '';
+      });
+      if (focus && (!focusSupport.supported
+        || focusSupport.validProposedSourceIds.length !== focusSourceIds.length)) focus = '';
 
-      const focusEvidence = focus ? (Array.isArray(focusClaim?.sourceIds) ? focusClaim.sourceIds : []) : [];
+      const focusEvidence = focus ? focusSupport.validProposedSourceIds : [];
       return { id: skel.id, focus: focus || null, focusEvidence, bullets, bulletEvidence };
     });
 

@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { CircuitBreaker, RequestDeadlineError, boundedTimeout, requestSafetyMiddleware } from '../render-proxy/safety-runtime.js';
+import {
+  CircuitBreaker, RequestDeadlineError, boundedTimeout, recordProviderTrace,
+  recordProviderUsage, reconciledUsage, requestSafetyMiddleware,
+} from '../render-proxy/safety-runtime.js';
 import { MemoryAdmissionStore } from '../render-proxy/admission-control.js';
 
 describe('production proxy safety primitives', () => {
@@ -51,5 +54,16 @@ describe('production proxy safety primitives', () => {
     const second = await store.reserve({ subjectKey: 'install-b', tokens: 1 });
     await store.release(first);
     await store.release(second);
+  });
+
+  it('reconciles usage only when every successful provider call reports it', () => {
+    const middleware = requestSafetyMiddleware({ deadlineMs: 100 });
+    middleware({ get: () => null }, { setHeader() {} }, () => {
+      recordProviderUsage({ total_tokens: 120, cost: 0.00004 });
+      recordProviderTrace({ provider: 'groq', outcome: 'success' });
+      expect(reconciledUsage()).toEqual({ tokens: 120, spendMicros: 40 });
+      recordProviderTrace({ provider: 'openrouter', outcome: 'success' });
+      expect(reconciledUsage()).toEqual({});
+    });
   });
 });

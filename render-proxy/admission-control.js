@@ -77,17 +77,31 @@ export class RedisAdmissionStore {
     const holdsKey = `${this.key}:holds`;
     const expiriesKey = `${this.key}:hold-expiries`;
     const now = Date.now();
-    const lua = `local expired=redis.call('ZRANGEBYSCORE',KEYS[4],'-inf',ARGV[13]); for _,hold in ipairs(expired) do local subject=redis.call('HGET',KEYS[3],hold); if subject then local global=string.match(subject,'^(.*):subject:'); local gc=tonumber(redis.call('HGET',global,'concurrent') or '0'); if gc>0 then redis.call('HINCRBY',global,'concurrent',-1) end; local sc=tonumber(redis.call('HGET',subject,'concurrent') or '0'); if sc>0 then redis.call('HINCRBY',subject,'concurrent',-1) end; redis.call('HDEL',KEYS[3],hold) end; redis.call('ZREM',KEYS[4],hold) end; local gc=tonumber(redis.call('HGET',KEYS[1],'concurrent') or '0'); local gr=tonumber(redis.call('HGET',KEYS[1],'requests') or '0'); local gt=tonumber(redis.call('HGET',KEYS[1],'tokens') or '0'); local gs=tonumber(redis.call('HGET',KEYS[1],'spend') or '0'); local sc=tonumber(redis.call('HGET',KEYS[2],'concurrent') or '0'); local sr=tonumber(redis.call('HGET',KEYS[2],'requests') or '0'); local st=tonumber(redis.call('HGET',KEYS[2],'tokens') or '0'); local ss=tonumber(redis.call('HGET',KEYS[2],'spend') or '0'); if gc>=tonumber(ARGV[3]) or gr+1>tonumber(ARGV[4]) or gt+tonumber(ARGV[1])>tonumber(ARGV[5]) or gs+tonumber(ARGV[2])>tonumber(ARGV[6]) or sc>=tonumber(ARGV[7]) or sr+1>tonumber(ARGV[8]) or st+tonumber(ARGV[1])>tonumber(ARGV[9]) or ss+tonumber(ARGV[2])>tonumber(ARGV[10]) then return 0 end; for _,k in ipairs({KEYS[1],KEYS[2]}) do redis.call('HINCRBY',k,'concurrent',1); redis.call('HINCRBY',k,'requests',1); redis.call('HINCRBY',k,'tokens',ARGV[1]); redis.call('HINCRBY',k,'spend',ARGV[2]); redis.call('EXPIRE',k,ARGV[12]) end; redis.call('HSET',KEYS[3],ARGV[11],KEYS[2]); redis.call('ZADD',KEYS[4],ARGV[14],ARGV[11]); return 1`;
+    const lua = `local expired=redis.call('ZRANGEBYSCORE',KEYS[4],'-inf',ARGV[13]); for _,hold in ipairs(expired) do local raw=redis.call('HGET',KEYS[3],hold); if raw then local ok,info=pcall(cjson.decode,raw); if not ok then info={subject=raw,global=string.match(raw,'^(.*):subject:')} end; local gc=tonumber(redis.call('HGET',info.global,'concurrent') or '0'); if gc>0 then redis.call('HINCRBY',info.global,'concurrent',-1) end; local sc=tonumber(redis.call('HGET',info.subject,'concurrent') or '0'); if sc>0 then redis.call('HINCRBY',info.subject,'concurrent',-1) end; redis.call('HDEL',KEYS[3],hold) end; redis.call('ZREM',KEYS[4],hold) end; local gc=tonumber(redis.call('HGET',KEYS[1],'concurrent') or '0'); local gr=tonumber(redis.call('HGET',KEYS[1],'requests') or '0'); local gt=tonumber(redis.call('HGET',KEYS[1],'tokens') or '0'); local gs=tonumber(redis.call('HGET',KEYS[1],'spend') or '0'); local sc=tonumber(redis.call('HGET',KEYS[2],'concurrent') or '0'); local sr=tonumber(redis.call('HGET',KEYS[2],'requests') or '0'); local st=tonumber(redis.call('HGET',KEYS[2],'tokens') or '0'); local ss=tonumber(redis.call('HGET',KEYS[2],'spend') or '0'); if gc>=tonumber(ARGV[3]) or gr+1>tonumber(ARGV[4]) or gt+tonumber(ARGV[1])>tonumber(ARGV[5]) or gs+tonumber(ARGV[2])>tonumber(ARGV[6]) or sc>=tonumber(ARGV[7]) or sr+1>tonumber(ARGV[8]) or st+tonumber(ARGV[1])>tonumber(ARGV[9]) or ss+tonumber(ARGV[2])>tonumber(ARGV[10]) then return 0 end; for _,k in ipairs({KEYS[1],KEYS[2]}) do redis.call('HINCRBY',k,'concurrent',1); redis.call('HINCRBY',k,'requests',1); redis.call('HINCRBY',k,'tokens',ARGV[1]); redis.call('HINCRBY',k,'spend',ARGV[2]); redis.call('EXPIRE',k,ARGV[12]) end; redis.call('HSET',KEYS[3],ARGV[11],cjson.encode({subject=KEYS[2],global=KEYS[1],tokens=tonumber(ARGV[1]),spend=tonumber(ARGV[2])})); redis.call('ZADD',KEYS[4],ARGV[14],ARGV[11]); return 1`;
     const ok = await this.client.eval(lua, { keys: [globalKey, subjectRedisKey, holdsKey, expiriesKey], arguments: [String(tokens), String(spendMicros), String(this.maxConcurrent), String(this.maxRequests), String(this.maxTokens), String(this.maxSpendMicros), String(this.maxConcurrentPerSubject), String(this.maxRequestsPerSubject), String(this.maxTokensPerSubject), String(this.maxSpendMicrosPerSubject), id, String(this.windowSeconds * 2), String(now), String(now + this.leaseSeconds * 1000)] });
     if (!ok) throw new AdmissionDeniedError(); return id;
   }
   async release(id) {
     const holdsKey = `${this.key}:holds`;
     const expiriesKey = `${this.key}:hold-expiries`;
-    const lua = `local subject=redis.call('HGET',KEYS[1],ARGV[1]); if not subject then redis.call('ZREM',KEYS[2],ARGV[1]); return 0 end; redis.call('HDEL',KEYS[1],ARGV[1]); redis.call('ZREM',KEYS[2],ARGV[1]); local global=string.match(subject,'^(.*):subject:'); for _,k in ipairs({global,subject}) do local c=tonumber(redis.call('HGET',k,'concurrent') or '0'); if c>0 then redis.call('HINCRBY',k,'concurrent',-1) end end; return 1`;
+    const lua = `local raw=redis.call('HGET',KEYS[1],ARGV[1]); if not raw then redis.call('ZREM',KEYS[2],ARGV[1]); return 0 end; local ok,info=pcall(cjson.decode,raw); if not ok then info={subject=raw,global=string.match(raw,'^(.*):subject:')} end; redis.call('HDEL',KEYS[1],ARGV[1]); redis.call('ZREM',KEYS[2],ARGV[1]); for _,k in ipairs({info.global,info.subject}) do local c=tonumber(redis.call('HGET',k,'concurrent') or '0'); if c>0 then redis.call('HINCRBY',k,'concurrent',-1) end end; return 1`;
     await this.client.eval(lua, { keys: [holdsKey, expiriesKey], arguments: [id] });
   }
-  async reconcile(id) { await this.release(id); }
+  async reconcile(id, actual = {}) {
+    const holdsKey = `${this.key}:holds`;
+    const expiriesKey = `${this.key}:hold-expiries`;
+    const hasActual = Number.isFinite(actual.tokens) || Number.isFinite(actual.spendMicros);
+    if (!hasActual) return this.release(id);
+    const lua = `local raw=redis.call('HGET',KEYS[1],ARGV[1]); if not raw then redis.call('ZREM',KEYS[2],ARGV[1]); return 0 end; local ok,info=pcall(cjson.decode,raw); if not ok then info={subject=raw,global=string.match(raw,'^(.*):subject:'),legacy=true} end; for _,k in ipairs({info.global,info.subject}) do if not info.legacy then local actualTokens=tonumber(ARGV[2]); if actualTokens<0 then actualTokens=tonumber(info.tokens) end; local actualSpend=tonumber(ARGV[3]); if actualSpend<0 then actualSpend=tonumber(info.spend) end; redis.call('HINCRBY',k,'tokens',actualTokens-tonumber(info.tokens)); redis.call('HINCRBY',k,'spend',actualSpend-tonumber(info.spend)) end; local c=tonumber(redis.call('HGET',k,'concurrent') or '0'); if c>0 then redis.call('HINCRBY',k,'concurrent',-1) end end; redis.call('HDEL',KEYS[1],ARGV[1]); redis.call('ZREM',KEYS[2],ARGV[1]); return 1`;
+    await this.client.eval(lua, {
+      keys: [holdsKey, expiriesKey],
+      arguments: [
+        id,
+        String(Number.isFinite(actual.tokens) ? Math.max(0, actual.tokens) : -1),
+        String(Number.isFinite(actual.spendMicros) ? Math.max(0, actual.spendMicros) : -1),
+      ],
+    });
+  }
 }
 
 export function admissionMiddleware(store, estimate = req => {
@@ -106,7 +120,7 @@ export function admissionMiddleware(store, estimate = req => {
   const identity = req.installToken?.jti || req.ip || 'anonymous';
   const subjectKey = crypto.createHash('sha256').update(String(identity)).digest('hex').slice(0, 32);
   return { subjectKey, tokens, spendMicros: Math.ceil(tokens * microsPerThousandTokens / 1000) };
-}) {
+}, actualUsage = () => ({})) {
   return async (req, res, next) => {
     let id;
     try { id = await store.reserve(estimate(req)); } catch (error) {
@@ -116,7 +130,12 @@ export function admissionMiddleware(store, estimate = req => {
         code: denied ? error.code : 'quota_store_unavailable',
       });
     }
-    let released = false; const release = () => { if (!released) { released = true; void store.release(id); } };
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      void store.reconcile(id, actualUsage(req));
+    };
     req.admissionReservation = { id };
     res.once('finish', release); res.once('close', release); next();
   };

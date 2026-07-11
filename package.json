@@ -27,6 +27,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",
+    "redis": "^4.7.1",
     "vitest": "^2.1.0"
   },
   "keywords": [

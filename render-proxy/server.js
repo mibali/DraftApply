@@ -11,8 +11,9 @@ import { fileURLToPath, pathToFileURL } from 'url';
 import { createClient } from 'redis';
 import { admissionMiddleware, MemoryAdmissionStore, RedisAdmissionStore } from './admission-control.js';
 import {
-  CircuitBreaker, RequestDeadlineError, assertBudget, boundedTimeout,
-  recordProviderTrace, remainingMs, requestSafetyMiddleware, safetyMetadata, telemetry,
+  CircuitBreaker, RedisCircuitBreaker, RequestDeadlineError, assertBudget, boundedTimeout,
+  recordProviderTrace, recordProviderUsage, reconciledUsage, remainingMs,
+  requestSafetyMiddleware, safetyMetadata, telemetry,
 } from './safety-runtime.js';
 import { CVParser } from '../shared/cv-parser.js';
 import { JDParser } from '../shared/jd-parser.js';
@@ -117,11 +118,12 @@ if ((!GROQ_API_KEY && !OPENROUTER_API_KEY && !LOCAL_LLM_BASE_URL) || !TOKEN_SECR
 const SERVER_STARTED_AT = new Date().toISOString();
 
 let admissionStore;
+let redisClient;
 if (REDIS_URL) {
-  const redis = createClient({ url: REDIS_URL });
-  redis.on('error', error => console.error('[DraftApply] Redis quota store error:', error.message));
-  await redis.connect();
-  admissionStore = new RedisAdmissionStore(redis);
+  redisClient = createClient({ url: REDIS_URL });
+  redisClient.on('error', error => console.error('[DraftApply] Redis safety store error:', error.message));
+  await redisClient.connect();
+  admissionStore = new RedisAdmissionStore(redisClient);
 } else {
   if (REQUIRE_DURABLE_QUOTAS && (GROQ_API_KEY || OPENROUTER_API_KEY)) {
     console.error('Durable quota storage is required for paid providers; configure REDIS_URL or explicitly set REQUIRE_DURABLE_QUOTAS=false for local development.');
@@ -129,10 +131,14 @@ if (REDIS_URL) {
   }
   admissionStore = new MemoryAdmissionStore();
 }
-const circuitBreaker = new CircuitBreaker({
+const circuitOptions = {
   failureThreshold: coercePositiveInteger(process.env.CIRCUIT_FAILURE_THRESHOLD, 3),
   openMs: coercePositiveInteger(process.env.CIRCUIT_OPEN_MS, 30000),
-});
+  halfOpenLeaseMs: REQUEST_DEADLINE_MS + 5000,
+};
+const circuitBreaker = redisClient
+  ? new RedisCircuitBreaker(redisClient, circuitOptions)
+  : new CircuitBreaker(circuitOptions);
 
 const app = express();
 app.disable('x-powered-by');
@@ -477,7 +483,7 @@ async function callProviderChat(provider, {
 
   assertBudget();
   const circuitKey = `${provider}:${config.model || (models || []).join(',')}`;
-  if (!circuitBreaker.permit(circuitKey)) throw new LLMProviderError(provider, 503, 'Circuit open', null, config.model);
+  if (!await circuitBreaker.permit(circuitKey)) throw new LLMProviderError(provider, 503, 'Circuit open', null, config.model);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), boundedTimeout(timeoutMs));
   const startedAt = Date.now();
@@ -502,6 +508,7 @@ async function callProviderChat(provider, {
         // for other providers costs nothing but a lower JSON hit rate.
         ...(responseFormat && provider === 'groq' ? { response_format: responseFormat } : {}),
         stream,
+        ...(stream && provider === 'groq' ? { stream_options: { include_usage: true } } : {}),
         messages,
       }),
     });
@@ -516,20 +523,35 @@ async function callProviderChat(provider, {
 
     const requestedModel = useModelsArray ? models[0] : config.model;
     let finalized = false;
-    const markSuccess = (actualModel = requestedModel) => {
+    const markSuccess = async (actualModel = requestedModel) => {
       if (finalized) return;
       finalized = true;
-      circuitBreaker.success(circuitKey);
+      await circuitBreaker.success(circuitKey);
       logLLMAttempt({ provider, model: actualModel, attempt, outcome: 'success', fallbackFrom, elapsedMs: Date.now() - startedAt });
+    };
+    const markFailure = async (error, actualModel = requestedModel) => {
+      if (finalized) return;
+      finalized = true;
+      await circuitBreaker.failure(circuitKey);
+      logLLMAttempt({
+        provider,
+        model: actualModel,
+        attempt,
+        outcome: error?.name === 'AbortError' ? 'timeout' : 'error',
+        status: error?.status,
+        fallbackFrom,
+        elapsedMs: Date.now() - startedAt,
+      });
     };
     const originalJson = response.json.bind(response);
     response.json = async () => {
       try {
         const body = await originalJson();
-        markSuccess(body?.model || requestedModel);
+        recordProviderUsage(body?.usage);
+        await markSuccess(body?.model || requestedModel);
         return body;
       } catch (error) {
-        if (!finalized) circuitBreaker.failure(circuitKey);
+        await markFailure(error);
         throw error;
       }
     };
@@ -539,9 +561,10 @@ async function callProviderChat(provider, {
       model: requestedModel,
       requestedModels: useModelsArray ? models : undefined,
       markSuccess,
+      markFailure,
     };
   } catch (error) {
-    circuitBreaker.failure(circuitKey);
+    await circuitBreaker.failure(circuitKey);
     if (error?.name === 'AbortError') {
       logLLMAttempt({
         provider,
@@ -711,7 +734,7 @@ const generateLimiter = rateLimit({
     return `${t}:${req.ip}`;
   }
 });
-const costlyAdmission = admissionMiddleware(admissionStore);
+const costlyAdmission = admissionMiddleware(admissionStore, undefined, reconciledUsage);
 
 // /api/health itself is intentionally open (no auth, no limiter) for uptime
 // monitors. But ?probe=embedding makes one real, billed call to the
@@ -1088,6 +1111,7 @@ async function consumeOpenAIStream(body) {
   let answer = '';
   let model;
   let openRouterMetadata;
+  let usage;
   const consumeEvent = event => {
     const data = event.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n').trim();
     if (!data || data === '[DONE]') return;
@@ -1096,6 +1120,7 @@ async function consumeOpenAIStream(body) {
       answer += json.choices?.[0]?.delta?.content || '';
       model = json.model || model;
       openRouterMetadata = json.openrouter_metadata || openRouterMetadata;
+      usage = json.usage || usage;
     } catch (_) { /* malformed provider events are not forwarded */ }
   };
   while (true) {
@@ -1108,7 +1133,7 @@ async function consumeOpenAIStream(body) {
   }
   buffer += decoder.decode();
   if (buffer.trim()) consumeEvent(buffer); // final unterminated SSE event
-  return { answer, model, openRouterMetadata };
+  return { answer, model, openRouterMetadata, usage };
 }
 
 function compactText(value, max = 160) {
@@ -1448,7 +1473,8 @@ app.post('/api/generate', authRequired, generateLimiter, costlyAdmission, async 
         if (!answer.trim()) throw new Error('No answer from provider');
         let finalCompletion = completion;
         let responseModel = streamed.model || completion.model;
-        completion.markSuccess?.(responseModel);
+        recordProviderUsage(streamed.usage);
+        await completion.markSuccess?.(responseModel);
         let openRouterMetadata = streamed.openRouterMetadata;
         if (questionType && !body.skipEvaluation) {
           const evaluation = evaluateAnswer(answer, questionType);
@@ -1487,6 +1513,7 @@ app.post('/api/generate', authRequired, generateLimiter, costlyAdmission, async 
         res.write(`data: ${JSON.stringify({ draftapplyFinal: final })}\n\n`);
         res.write('data: [DONE]\n\n');
       } catch (streamError) {
+        await completion.markFailure?.(streamError);
         const code = streamError instanceof RequestDeadlineError || streamError?.name === 'AbortError'
           ? 'request_deadline_exceeded'
           : 'stream_generation_failed';

@@ -145,10 +145,9 @@ describe('extension critical modal behavior', () => {
     expect(contentJs).toContain('id="da-btn-insert" disabled');
     expect(contentJs).toContain("if (message.type === 'STREAM_FINAL')");
     expect(contentJs).toContain('if (this.currentRequestId !== message.requestId) return');
-    expect(contentJs).toContain("button.disabled = !hasAnswer || !['pass', 'review'].includes(status)");
-    expect(contentJs).toContain("this.answerValidation.status === 'block'");
-    expect(contentJs).toContain("this.answerValidation.status === 'review' && !this.reviewAcknowledged");
-    expect(contentJs).toContain('window.confirm(');
+    expect(contentJs).toContain("this.answerValidation.status !== 'pass'");
+    expect(contentJs).toContain("button.disabled = !hasAnswer || status !== 'pass'");
+    expect(contentJs).not.toContain('Review & Insert');
   });
 
   it('shows the exact OpenRouter model when answer generation falls back from Groq', () => {

@@ -1784,14 +1784,9 @@ class DraftApplyExtension {
     const answerToInsert = current || this.lastAnswer;
     const insertBtn = this.modal?.querySelector?.('#da-btn-insert');
 
-    if (!this.answerValidation || this.answerUserEdited || answerToInsert !== this.validatedAnswer || this.answerValidation.status === 'block') {
+    if (!this.answerValidation || this.answerUserEdited || answerToInsert !== this.validatedAnswer || this.answerValidation.status !== 'pass') {
       this.showNotification('This answer is not grounded and cannot be inserted. You can edit, copy, or regenerate it.', 'error');
       return;
-    }
-    if (this.answerValidation.status === 'review' && !this.reviewAcknowledged) {
-      const acknowledged = window.confirm('This answer contains facts DraftApply could not verify. Review it carefully. Insert anyway?');
-      if (!acknowledged) return;
-      this.reviewAcknowledged = true;
     }
 
     if (!answerToInsert) {
@@ -1868,9 +1863,9 @@ class DraftApplyExtension {
     if (!button) return;
     const status = validation?.status;
     const hasAnswer = Boolean(this.modal?.querySelector?.('#da-answer-output')?.value?.trim());
-    button.disabled = !hasAnswer || !['pass', 'review'].includes(status);
-    button.textContent = status === 'review' ? 'Review & Insert' : status === 'block' ? 'Insertion Blocked' : 'Insert Answer';
-    this.lastAnswer = status === 'pass' || status === 'review'
+    button.disabled = !hasAnswer || status !== 'pass';
+    button.textContent = status === 'review' ? 'Review Required' : status === 'block' ? 'Insertion Blocked' : 'Insert Answer';
+    this.lastAnswer = status === 'pass'
       ? String(this.modal?.querySelector?.('#da-answer-output')?.value || '')
       : null;
   }
