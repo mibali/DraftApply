@@ -25,6 +25,15 @@ Platform Engineer`);
 
     expect(cv.contactInfo.website).toBe('www.janedoe.dev');
   });
+
+  it('repairs PDF whitespace inserted inside hyphenated words', () => {
+    const cv = new CVParser().parse(`Jane Doe
+jane@example.com
+SUMMARY
+Customer- facing engineer with hands- on production support experience.`);
+    expect(cv.summary).toBe('Customer-facing engineer with hands-on production support experience.');
+    expect(cv.rawText).not.toMatch(/customer- facing|hands- on/i);
+  });
 });
 
 describe('CVParser multi-column PDF recovery', () => {

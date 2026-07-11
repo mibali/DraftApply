@@ -241,6 +241,24 @@ describe('skeleton sanitisation of a corrupted CV parse (regression, from live o
     expect(semgrep.allowedSourceIds).toEqual(semgrep.originalBulletEvidence[0].sourceIds);
   });
 
+  it('removes a trailing PDF fragment after the last complete source sentence', () => {
+    const skeleton = tailor.buildCvSkeleton({
+      contactInfo: { name: 'X' },
+      experience: [{
+        company: 'Example Co',
+        title: 'Software Engineer',
+        dates: 'Jan 2020 - Dec 2021',
+        responsibilities: [
+          'Used iterative delivery to improve the product based on user feedback. Additionally, I analysed recurring themes, prioritizing',
+        ],
+      }],
+      rawText: '',
+    }, jdData);
+    expect(skeleton.roles[0].originalBullets).toEqual([
+      'Used iterative delivery to improve the product based on user feedback.',
+    ]);
+  });
+
   it('keeps genuinely distinct stints at the same company separate', () => {
     const twoStints = tailor.buildCvSkeleton({
       contactInfo: { name: 'X' },

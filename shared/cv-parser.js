@@ -31,7 +31,9 @@ export class CVParser {
    * @returns {Object} Structured CV data
    */
   parse(text) {
-    const normalizedText = this._insertMissingSpaceBeforeMonths(this._normaliseSpacedHeadings(text));
+    const normalizedText = this._normaliseExtractionSpacing(
+      this._insertMissingSpaceBeforeMonths(this._normaliseSpacedHeadings(text))
+    );
     this.rawText = normalizedText;
     const experience = this.extractExperience(normalizedText);
     const summary = this.extractSummary(normalizedText);
@@ -59,6 +61,13 @@ export class CVParser {
     };
 
     return this.structured;
+  }
+
+  _normaliseExtractionSpacing(text) {
+    // PDF extraction can insert whitespace after a visible hyphen when a
+    // hyphenated word wraps across text boxes ("customer- facing"). Restore
+    // the single lexical token without changing spaced dashes or date ranges.
+    return String(text || '').replace(/\b([A-Za-z]{2,})-\s+([a-z]{2,})\b/g, '$1-$2');
   }
 
   /**

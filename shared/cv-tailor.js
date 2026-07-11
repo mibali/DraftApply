@@ -2402,7 +2402,20 @@ Do not add anything new. Return the complete corrected CV.`;
         output.push({ ...item });
       }
     }
-    return output;
+    return output.map(item => ({ ...item, text: this._trimIncompleteTrailingSentence(item.text) }));
+  }
+
+  _trimIncompleteTrailingSentence(value) {
+    const text = String(value || '').trim();
+    if (!text || /[.!?]$/.test(text)) return text;
+    const completeEnd = Math.max(text.lastIndexOf('. '), text.lastIndexOf('! '), text.lastIndexOf('? '));
+    if (completeEnd < 40) return text;
+    const trailing = text.slice(completeEnd + 2).trim();
+    // Preserve ordinary punctuation-free bullets. Only remove a trailing
+    // extraction fragment when a complete sentence precedes it and the
+    // fragment visibly ends mid-clause or on an unfinished participle.
+    if (!trailing || !/(?:\b(?:and|or|to|with|including|such as)|[a-z]{5,}ing)$/i.test(trailing)) return text;
+    return text.slice(0, completeEnd + 1).trim();
   }
 
   // Header contact lines verbatim from the original CV (location, phone,
