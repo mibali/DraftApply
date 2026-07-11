@@ -154,11 +154,11 @@ describe('pipeline fixture — matchMap', () => {
     expect(matchMap.length).toBeGreaterThanOrEqual(5);
   });
 
-  it('marks AWS / cloud as supported (direct evidence in CV)', () => {
+  it('does not authorize a compound cloud requirement when only AWS is evidenced', () => {
     const { matchMap } = buildFixturePipeline();
     const awsEntry = matchMap.find(m => /aws|cloud/i.test(m.requirement));
     expect(awsEntry).toBeTruthy();
-    expect(awsEntry.allowedToMention).toBe(true);
+    expect(awsEntry.allowedToMention).toBe(false);
   });
 
   it('marks Salesforce as supported (CV and JD both mention it)', () => {
@@ -168,12 +168,12 @@ describe('pipeline fixture — matchMap', () => {
     expect(sfEntry.allowedToMention).toBe(true);
   });
 
-  it('marks pre-sales / presales requirement as supported via semantic match', () => {
+  it('does not combine separate sources or semantic aliases to authorize a compound requirement', () => {
     const { matchMap } = buildFixturePipeline();
     // JD mentions "pre-sales or solutions engineering"; CV has "pre-sales cycles"
     const presalesEntry = matchMap.find(m => /pre.?sales|solution/i.test(m.requirement));
     expect(presalesEntry).toBeTruthy();
-    expect(presalesEntry.allowedToMention).toBe(true);
+    expect(presalesEntry.allowedToMention).toBe(false);
   });
 
   it('calcMatchStrength returns strong or moderate for a well-matched CV', () => {
@@ -256,10 +256,9 @@ describe('pipeline fixture — recipe buildPrompts', () => {
     expect(result.systemPrompt).toMatch(/MATCH LEVEL:/i);
   });
 
-  it('includes the requirements bridge (supported JD requirements) in the user prompt', () => {
+  it('does not inject a requirements bridge when no whole requirement is directly supported', () => {
     const result = buildAnswerPrompts('Tell me about a time you managed a complex technical implementation for an enterprise customer.');
-    // Requirements bridge starts with "JD REQUIREMENTS YOUR BACKGROUND COVERS"
-    expect(result.userPrompt).toMatch(/JD REQUIREMENTS YOUR BACKGROUND COVERS/i);
+    expect(result.userPrompt).not.toMatch(/JD REQUIREMENTS YOUR BACKGROUND COVERS/i);
   });
 
   it('includes CV-specific evidence in the user prompt (not just generic placeholder)', () => {

@@ -198,11 +198,10 @@ layer (the one that produced the "BSc as dates" rendering).
 
 ## 8. Fallback & rollout
 
-- Env kill-switch `STRUCTURED_CV_GENERATION` (default **on**); per-request
-  automatic fallback to the legacy path on unparseable output or when
-  `cvData.experience` is empty (no skeleton to lock).
-- The legacy path (current prompts + all `finalizeTailoredCV` repairs +
-  text-parsing exporter) is kept intact as the safety net — including the two
+- Env switch `STRUCTURED_CV_GENERATION` defaults **on**. Disabling it disables
+  hosted CV generation. Unparseable provider output and CVs without parseable
+  experience fail closed; they never fall back to model-authored free text.
+- Legacy parsing remains only for importing older local exports, including the two
   quick fixes that ship with this work regardless of mode:
   1. slash-tolerant ALL-CAPS header detection ("EDUCATION / CERTIFICATIONS")
      in both `_isLikelySectionHeader` and `cv-export.js isSectionHeader`;

@@ -12,7 +12,7 @@ and why `mixedbread-ai/mxbai-embed-large-v1` is the current default.
 `npm run eval:evidence-retrieval` runs a hand-labeled fixture
 (`shared/evidence-retrieval-eval-fixtures.js`: one CV's worth of evidence sentences against a set of JD
 requirements, several deliberately worded as paraphrases with zero literal word overlap with the evidence)
-through the actual production reranking code (`rerankMatchMapWithEmbeddings`), and computes precision/recall/F1
+through the production ranking code (`rerankMatchMapWithEmbeddings`), and computes precision/recall/F1
 against a deterministic keyword-matching baseline.
 
 ## Findings, in order
@@ -39,14 +39,15 @@ against a deterministic keyword-matching baseline.
 
 ## Decision
 
-**`mixedbread-ai/mxbai-embed-large-v1`**, with `LOCAL_EMBEDDING_PROMOTE_THRESHOLD=0.60` /
-`LOCAL_EMBEDDING_ENRICH_THRESHOLD=0.50`.
+**`mixedbread-ai/mxbai-embed-large-v1`**, with the existing
+`LOCAL_EMBEDDING_PROMOTE_THRESHOLD=0.60` / `LOCAL_EMBEDDING_ENRICH_THRESHOLD=0.50` configuration names. The
+"promote" name is retained only for environment compatibility; it is a ranking cutoff and does not promote
+match status.
 
-Precision was weighted over recall and over raw model size: DraftApply has a dedicated Truthfulness Guard Agent
-specifically to prevent fabricated claims, so a false positive here (promoting a requirement the CV doesn't
-actually support) is a worse failure mode than a false negative (missing a real match the candidate can still
-mention themselves). `mxbai-embed-large-v1` is ~10x larger than `bge-small-en-v1.5`, but its stronger score
-separation is why it's the recommended default despite the size/latency cost.
+The thresholds select and rank candidate passages; they do not decide whether a requirement is supported.
+Embedding retrieval never changes match status or `allowedToMention`. Those authorization decisions remain with
+the deterministic/grounded matching stages. `mxbai-embed-large-v1` is ~10x larger than
+`bge-small-en-v1.5`, but its stronger ranking separation is why it is recommended despite the size/latency cost.
 
 ### Embeddings are additive to keyword matching, not a replacement
 
@@ -55,13 +56,12 @@ When the fixture was expanded from 8 to 13 labeled cases, the picture got more h
 distributions of true vs. false matches genuinely overlap (irrelevant requirements can score 0.53-0.58, right in
 the range of some true paraphrase matches) - no single threshold cleanly separates them.
 
-But keyword matching and embeddings catch *different* true positives: keyword overlap catches literal matches
+But keyword matching and embeddings surface *different* candidate evidence: keyword overlap catches literal matches
 (`SQL`, `Technical writing`), embeddings catch pure paraphrases with zero shared words (`User research`,
-`Vendor negotiation`). Production runs embeddings *after* deterministic matching and promotes on top of it, so
-the shipped behaviour is the **union** of both - which lands above either method alone while keeping perfect
-precision at the 0.60 threshold. The eval's `>> Combined` row measures this union, and the pass/fail gate is on
-that combined result, since that is what actually ships. The earlier 8-case run's headline "F1=0.89 with perfect
-precision" was partly small-sample luck; the combined-union framing is the durable finding.
+`Vendor negotiation`). Production runs embeddings after deterministic matching solely to rank evidence
+candidates. Similarity is metadata for downstream inspection, never authorization to claim a skill or promote a
+requirement. Historical promotion-oriented precision/recall figures below should therefore be treated as ranking
+calibration data, not as the shipped authorization policy.
 
 ## Caveats / what would change this
 

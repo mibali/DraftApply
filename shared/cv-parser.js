@@ -25,19 +25,86 @@ export class CVParser {
     const normalizedText = this._insertMissingSpaceBeforeMonths(text);
     this.rawText = normalizedText;
     const experience = this.extractExperience(normalizedText);
+    const summary = this.extractSummary(normalizedText);
+    const education = this.extractEducation(normalizedText);
+    const skills = this.extractSkills(normalizedText);
+    const achievements = this.extractAchievements(normalizedText, experience);
+    const certifications = this.extractCertifications(normalizedText);
+    const { sourceIndex, evidenceIndex } = this._indexSources({
+      experience, summary, education, skills, achievements, certifications,
+    });
 
     this.structured = {
       contactInfo: this.extractContactInfo(normalizedText),
-      summary: this.extractSummary(normalizedText),
+      summary,
       experience,
-      education: this.extractEducation(normalizedText),
-      skills: this.extractSkills(normalizedText),
-      achievements: this.extractAchievements(normalizedText, experience),
-      certifications: this.extractCertifications(normalizedText),
+      education,
+      skills,
+      achievements,
+      certifications,
+      sourceIndex,
+      evidenceIndex,
       rawText: normalizedText
     };
 
     return this.structured;
+  }
+
+  /**
+   * Add stable provenance alongside the legacy experience string fields.
+   * Positional IDs are deterministic for the same parsed CV and deliberately
+   * avoid using mutable/display text as identity.
+   */
+  _indexSources({ experience = [], summary = '', education = [], skills = [], achievements = [], certifications = [] } = {}) {
+    const sourceIndex = {};
+    const evidenceIndex = [];
+
+    experience.forEach((role, roleIndex) => {
+      const roleSourceId = `experience:${roleIndex}`;
+      role.sourceId = roleSourceId;
+      role.responsibilityEvidence = (role.responsibilities || []).map((text, responsibilityIndex) => {
+        const sourceId = `${roleSourceId}:responsibility:${responsibilityIndex}`;
+        const record = {
+          sourceId,
+          roleSourceId,
+          type: 'experience_responsibility',
+          roleIndex,
+          responsibilityIndex,
+          text,
+          company: role.company || '',
+          title: role.title || '',
+          dates: role.dates || '',
+        };
+        sourceIndex[sourceId] = record;
+        evidenceIndex.push(record);
+        return record;
+      });
+      sourceIndex[roleSourceId] = {
+        sourceId: roleSourceId,
+        type: 'experience_role',
+        roleIndex,
+        title: role.title,
+        company: role.company,
+        dates: role.dates,
+      };
+    });
+
+    const add = (type, text, index = 0) => {
+      if (text && typeof text === 'object') {
+        text = Object.values(text).filter(value => typeof value === 'string' && value.trim()).join(' | ');
+      }
+      if (!String(text || '').trim()) return;
+      const sourceId = `${type}:${index}`;
+      const record = { sourceId, type, text: String(text).trim() };
+      sourceIndex[sourceId] = record;
+      evidenceIndex.push(record);
+    };
+    add('summary', summary);
+    for (const [type, values] of Object.entries({ education, skill: skills, achievement: achievements, certification: certifications })) {
+      (values || []).forEach((value, index) => add(type, value, index));
+    }
+
+    return { sourceIndex, evidenceIndex };
   }
 
   // PDF/DOCX text extraction sometimes squishes a location directly against

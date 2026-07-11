@@ -298,8 +298,16 @@ describe('validateStructuredContent', () => {
     const content = tailor.validateStructuredContent({
       summary: 'Engineer.',
       competencies: [
-        { label: 'Infrastructure as Code', items: ['Terraform', 'IaC using Terraform', 'deep experience building systems'] },
-        { label: 'Cloud', items: ['AWS', 'Kubernetes', 'QuantumFabricator 9000'] },
+        { label: 'Infrastructure as Code', items: [
+          { text: 'Terraform', sourceIds: ['skill:0'] },
+          { text: 'IaC using Terraform', sourceIds: ['skill:0'] },
+          { text: 'deep experience building systems', sourceIds: ['skill:0'] },
+        ] },
+        { label: 'Cloud', items: [
+          { text: 'AWS', sourceIds: ['skill:3'] },
+          { text: 'Kubernetes', sourceIds: ['skill:1'] },
+          { text: 'QuantumFabricator 9000', sourceIds: ['skill:1'] },
+        ] },
       ],
       roles: [{ id: 'role_0', focus: null, bullets: ['Did the original work described in the CV.'] }],
     }, skeleton, opts);
@@ -321,13 +329,13 @@ describe('validateStructuredContent', () => {
     expect(allItems).toContain('Neptune.ai');
   });
 
-  it('strips a redundant "Focus:" prefix and clamps focus length', () => {
+  it('drops an unsupported focus line rather than leaking model positioning', () => {
     const content = tailor.validateStructuredContent({
       summary: 'Engineer.',
       competencies: [],
       roles: [{ id: 'role_0', focus: 'Focus: Improving platform reliability', bullets: ['Kept the platform reliable throughout.'] }],
     }, skeleton, opts);
-    expect(content.roles[0].focus).toBe('Improving platform reliability');
+    expect(content.roles[0].focus).toBeNull();
   });
 
   it('dedupes near-identical and truncated-duplicate bullets within a role', () => {
@@ -479,10 +487,17 @@ describe('structured pipeline end-to-end with a mocked model response (adversari
     const mockModelResponse = [
       '```json',
       JSON.stringify({
-        summary: 'Cloud, platform, and MLOps engineer with hands-on Kubernetes and Terraform experience.',
+        summary: { text: 'Cloud, platform, and MLOps engineer with production support background.', sourceIds: ['summary:0'] },
         competencies: [
-          { label: 'Infrastructure as Code', items: ['Terraform', 'IaC using Terraform'] },
-          { label: 'Cloud Platforms', items: ['AWS', 'Kubernetes', 'HyperCloud Ultra'] },
+          { label: 'Infrastructure as Code', items: [
+            { text: 'Terraform', sourceIds: ['skill:0'] },
+            { text: 'IaC using Terraform', sourceIds: ['skill:0'] },
+          ] },
+          { label: 'Cloud Platforms', items: [
+            { text: 'AWS', sourceIds: ['skill:3'] },
+            { text: 'Kubernetes', sourceIds: ['skill:1'] },
+            { text: 'HyperCloud Ultra', sourceIds: ['skill:1'] },
+          ] },
         ],
         roles: [
           { id: 'role_2', focus: null, bullets: ['Developed reusable, testable Python code for production systems.'] },
@@ -511,8 +526,8 @@ describe('structured pipeline end-to-end with a mocked model response (adversari
     expect(text).toContain('Terraform');
     expect(text).not.toContain('IaC using Terraform');
     expect(text).not.toContain('HyperCloud Ultra');
-    // Focus rendered in its fixed slot under the title.
-    expect(text).toContain('MLOps / DevOps Engineer\nFocus: ML platform engineering');
+    // Unsupported focus positioning is dropped rather than leaked.
+    expect(text).not.toContain('Focus: ML platform engineering');
     // Education verbatim at the end.
     expect(text).toContain('EDUCATION, CERTIFICATIONS & RECOGNITION\n• BSc Information Technology');
   });

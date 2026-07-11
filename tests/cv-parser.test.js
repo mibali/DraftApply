@@ -26,6 +26,36 @@ Platform Engineer`);
 });
 
 describe('CVParser experience extraction', () => {
+  it('adds deterministic unique role and responsibility source IDs without replacing strings', () => {
+    const text = `Alex Morgan
+
+EXPERIENCE
+Senior Product Manager | Acme Corp | Jan 2022 - Present
+- Owned roadmap prioritisation for a B2B analytics product
+- Led customer discovery with enterprise accounts
+
+Product Analyst | Beta Ltd | Mar 2020 - Dec 2021
+- Built dashboards for product and commercial teams
+
+EDUCATION
+BSc Economics`;
+    const first = new CVParser().parse(text);
+    const second = new CVParser().parse(text);
+    const ids = [
+      ...first.experience.map(role => role.sourceId),
+      ...first.evidenceIndex.map(record => record.sourceId),
+    ];
+
+    expect(first.experience.map(role => role.sourceId)).toEqual(second.experience.map(role => role.sourceId));
+    expect(first.evidenceIndex.map(record => record.sourceId)).toEqual(second.evidenceIndex.map(record => record.sourceId));
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(first.experience[0].responsibilities).toEqual([
+      'Owned roadmap prioritisation for a B2B analytics product',
+      'Led customer discovery with enterprise accounts',
+    ]);
+    expect(first.sourceIndex[first.evidenceIndex[0].sourceId]).toBe(first.evidenceIndex[0]);
+  });
+
   it('parses title, company, and dates when they share one header line', () => {
     const cv = new CVParser().parse(`Alex Morgan
 alex@example.com

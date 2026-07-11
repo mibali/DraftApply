@@ -277,7 +277,7 @@ describe('buildMatchMap', () => {
     expect(() => tailor.buildMatchMap(CV, JD, null)).not.toThrow();
   });
 
-  it('treats controlled synonyms as partial evidence in the production match map', () => {
+  it('keeps controlled synonyms as retrieval evidence without authorizing claims', () => {
     const cv = {
       rawText: 'Delivered client-facing presentations and stakeholder workshops for enterprise SaaS accounts.',
       summary: '',
@@ -301,16 +301,16 @@ describe('buildMatchMap', () => {
 
     const map = tailor.buildMatchMap(cv, jd);
     expect(map.find(m => m.requirement === 'Technical Demos')).toMatchObject({
-      status: 'partial_match',
-      allowedToMention: true,
+      status: 'missing',
+      allowedToMention: false,
     });
     expect(map.find(m => m.requirement === 'Technical Discovery')).toMatchObject({
-      status: 'partial_match',
-      allowedToMention: true,
+      status: 'missing',
+      allowedToMention: false,
     });
   });
 
-  it('normalises common tool aliases such as Postgres and PostgreSQL', () => {
+  it('does not let a tool alias authorize an exact named skill', () => {
     const cv = {
       rawText: 'Optimised Postgres schemas and reporting queries for customer dashboards.',
       summary: '',
@@ -327,8 +327,8 @@ describe('buildMatchMap', () => {
     };
 
     const postgres = tailor.buildMatchMap(cv, jd).find(m => m.requirement === 'PostgreSQL');
-    expect(postgres.status).toBe('partial_match');
-    expect(postgres.allowedToMention).toBe(true);
+    expect(postgres.status).toBe('missing');
+    expect(postgres.allowedToMention).toBe(false);
   });
 });
 

@@ -1,5 +1,6 @@
 import { createRequire } from 'module';
 import { RoleProfileService } from './role-profile-service.js';
+import { buildGroundingContext, isTextSupported } from './grounding-harness.js';
 
 const _require = createRequire(import.meta.url);
 const _semanticConceptGroups = _require('./data-sources/semantic-concepts.json');
@@ -80,12 +81,15 @@ export class CVTailor {
         ))
       );
       const semanticSupported = semanticEvidence.length > 0;
-      const fullySupported = semanticSupported || coreTokens.length === 0 || supportedCoreTokens.length === coreTokens.length;
+      // Semantic aliases are useful transferable evidence, but they do not
+      // authorize claiming an exact named skill. Authorization requires direct
+      // CV evidence or explicit user confirmation.
+      const directlySupported = directEvidence.length > 0;
       const isAtomicRequirement = coreTokens.length <= 1;
       let status;
       if (confirmedByUser) {
         status = 'user_confirmed';
-      } else if (!fullySupported) {
+      } else if (!directlySupported) {
         status = 'missing';
       } else if (evidence.length >= 2) {
         status = 'strong_match';
@@ -2207,7 +2211,15 @@ Do not add anything new. Return the complete corrected CV.`;
   buildCvSkeleton(cvData = {}, jdData = {}) {
     const contactInfo = cvData?.contactInfo || {};
     const roles = this._sanitiseSkeletonRoles(cvData?.experience || [])
-      .map((role, i) => ({ ...role, id: `role_${i}` }));
+      .map((role, i) => ({
+        ...role,
+        id: `role_${i}`,
+        sourceId: role.sourceId || `experience:${i}`,
+        originalBulletEvidence: role.originalBullets.map((text, bulletIndex) => ({
+          text,
+          sourceId: role.originalBulletEvidence?.[bulletIndex]?.sourceId || `${role.sourceId || `experience:${i}`}:responsibility:${bulletIndex}`,
+        })),
+      }));
 
     return {
       name: String(contactInfo.name || '').trim(),
@@ -2258,13 +2270,19 @@ Do not add anything new. Return the complete corrected CV.`;
       // Location parsed as the job title ("Birmingham, UK").
       if (isLocationLike(title)) title = '';
 
+      const bulletPairs = this._joinWrappedBulletEvidence(
+        (exp?.responsibilities || []).map((text, index) => ({
+          text: String(text || '').trim(),
+          evidence: exp?.responsibilityEvidence?.[index] || null,
+        })).filter(item => item.text)
+      );
       cleaned.push({
         company,
         dates,
         title,
-        originalBullets: this._joinWrappedBulletFragments(
-          (exp?.responsibilities || []).map(b => String(b || '').trim()).filter(Boolean)
-        ),
+        sourceId: exp?.sourceId,
+        originalBulletEvidence: bulletPairs.map(item => item.evidence),
+        originalBullets: bulletPairs.map(item => item.text),
       });
     }
 
@@ -2282,16 +2300,26 @@ Do not add anything new. Return the complete corrected CV.`;
         continue;
       }
       const existing = merged[indexByKey.get(key)];
+      if (existing.title && role.title && this._normaliseText(existing.title) !== this._normaliseText(role.title)) {
+        merged.push(role);
+        continue;
+      }
       const primary = existing.title ? existing : (role.title ? role : existing);
       const secondary = primary === existing ? role : existing;
+      const originalBullets = this._dedupeSimilarBullets([
+        ...primary.originalBullets,
+        ...secondary.originalBullets,
+      ]);
+      const evidenceByText = [...(primary.originalBulletEvidence || []), ...(secondary.originalBulletEvidence || [])];
       merged[indexByKey.get(key)] = {
         company: primary.company.length >= secondary.company.length ? primary.company : secondary.company,
         dates: primary.dates || secondary.dates,
         title: primary.title || secondary.title,
-        originalBullets: this._dedupeSimilarBullets([
-          ...primary.originalBullets,
-          ...secondary.originalBullets,
-        ]),
+        sourceId: primary.sourceId,
+        originalBulletEvidence: originalBullets.map(text => evidenceByText.find(record =>
+          this._normaliseBulletForSimilarity(record?.text) === this._normaliseBulletForSimilarity(text)
+        ) || null),
+        originalBullets,
       };
     }
 
@@ -2315,6 +2343,21 @@ Do not add anything new. Return the complete corrected CV.`;
         continue;
       }
       output.push(bullet);
+    }
+    return output;
+  }
+
+  _joinWrappedBulletEvidence(items = []) {
+    const output = [];
+    for (const item of items) {
+      const previous = output.at(-1);
+      if (previous && /[a-z0-9,\-]$/i.test(previous.text) && !/[.!?:;]$/.test(previous.text) && /^[a-z]/.test(item.text)) {
+        previous.text = `${previous.text} ${item.text}`;
+        // The joined claim may cite both original parser records.
+        previous.evidence = previous.evidence || item.evidence;
+      } else {
+        output.push({ ...item });
+      }
     }
     return output;
   }
@@ -2443,14 +2486,14 @@ The candidate's CV structure (name, contact details, companies, employment dates
 
 OUTPUT SCHEMA — return exactly this shape:
 {
-  "summary": "3-4 sentence professional summary targeting the role",
-  "competencies": [ { "label": "Category name", "items": ["Skill", "Tool"] } ],
-  "roles": [ { "id": "role_0", "focus": "one-line role positioning or null", "bullets": ["..."] } ]
+  "summary": {"text":"3-4 sentence professional summary targeting the role","sourceIds":["..."]},
+  "competencies": [ { "label": "Category name", "items": [{"text":"Skill or Tool","sourceIds":["..."]}] } ],
+  "roles": [ { "id": "role_0", "focus": {"text":"one-line positioning","sourceIds":["..."]} or null, "bullets": [{"text":"...","sourceIds":["..."]}] } ]
 }
 
 STRICT RULES:
 1. "roles" must contain exactly one entry per role id listed under ROLES, in the same order.
-2. Bullets must be grounded in that role's ORIGINAL BULLETS — rephrase with JD vocabulary, reorder for relevance, tighten — but never invent achievements, metrics, employers, tools, or credentials.
+2. Summary, bullets, and focus must cite supporting SOURCE IDs. Bullets must be grounded in that role's ORIGINAL BULLETS — rephrase with JD vocabulary, reorder for relevance, tighten — but never invent achievements, metrics, employers, tools, or credentials. Uncited strings are rejected.
 3. Never claim any UNSUPPORTED requirement.
 4. Include every USER-CONFIRMED skill somewhere in competencies.
 5. Competency items are short skill or tool names of 1-4 words ("Terraform", "Model registry"). NEVER requirement sentences or phrases like "IaC using Terraform", "deep experience building systems", or "X years of experience". Never list the same tool twice in different phrasings.
@@ -2462,7 +2505,7 @@ STRICT RULES:
 
     const rolesBlock = skeleton.roles.map(role => {
       const bullets = role.originalBullets.length
-        ? role.originalBullets.map(b => `    - ${b}`).join('\n')
+        ? role.originalBullets.map((b, i) => `    - [${role.originalBulletEvidence[i]?.sourceId}] ${b}`).join('\n')
         : '    (no bullets in original)';
       return `${role.id}: ${role.title || '(untitled)'} @ ${role.company || '(no company)'} (${role.dates || 'no dates'})\n  ORIGINAL BULLETS:\n${bullets}`;
     }).join('\n\n');
@@ -2553,8 +2596,18 @@ Return the corrected JSON object now.`;
     if (!content || typeof content !== 'object' || Array.isArray(content)) return null;
     if (!skeleton || !Array.isArray(skeleton.roles) || skeleton.roles.length === 0) return null;
 
-    const summary = this._clampInline(content.summary, 600);
-    const competencies = this._normaliseStructuredCompetencies(content.competencies, { matchMap, confirmedSkills, cvData });
+    const groundingContext = buildGroundingContext(cvData, { confirmedFacts: confirmedSkills });
+    const summaryClaim = typeof content.summary === 'object' && !Array.isArray(content.summary) ? content.summary : null;
+    const summarySourceIds = Array.isArray(summaryClaim?.sourceIds) ? summaryClaim.sourceIds.filter(id => typeof id === 'string') : [];
+    const summary = String(summaryClaim?.text || '').split(/(?<=[.!?])\s+/)
+      .map(sentence => this._clampInline(sentence, 600))
+      .filter(sentence => sentence && isTextSupported(sentence, groundingContext, {
+        sourceIds: summarySourceIds,
+        requireSourceIds: true,
+      }).supported)
+      .join(' ');
+    const summaryEvidence = summary ? summarySourceIds.filter(id => groundingContext.sourceIndex[id]) : [];
+    const competencies = this._normaliseStructuredCompetencies(content.competencies, { matchMap, confirmedSkills, cvData, groundingContext });
 
     const suppliedById = new Map();
     for (const role of (Array.isArray(content.roles) ? content.roles : [])) {
@@ -2565,14 +2618,28 @@ Return the corrected JSON object now.`;
 
     const roles = skeleton.roles.map(skel => {
       const supplied = suppliedById.get(skel.id);
-      let bullets = (Array.isArray(supplied?.bullets) ? supplied.bullets : [])
-        .map(b => this._cleanStructuredBullet(b))
+      const acceptedBullets = (Array.isArray(supplied?.bullets) ? supplied.bullets : [])
+        .map(b => ({
+          text: this._cleanStructuredBullet(typeof b === 'string' ? b : b?.text),
+          sourceIds: Array.isArray(b?.sourceIds) ? b.sourceIds.filter(id => typeof id === 'string') : [],
+        }))
+        .filter(item => item.text && isTextSupported(item.text, groundingContext, {
+          roleSourceId: skel.sourceId,
+          sourceIds: item.sourceIds,
+          requireSourceIds: true,
+        }).supported)
         .filter(Boolean);
+      let bullets = acceptedBullets.map(item => item.text);
+      let bulletEvidence = acceptedBullets.map(item => ({ text: item.text, sourceIds: item.sourceIds }));
       bullets = this._dedupeSimilarBullets(bullets);
       // A role can never disappear: backfill from the original bullets when
       // the model dropped or shortchanged it.
       if (bullets.length === 0) {
         bullets = skel.originalBullets.slice(0, 6);
+        bulletEvidence = bullets.map((text, index) => ({
+          text,
+          sourceIds: [skel.originalBulletEvidence?.[index]?.sourceId].filter(Boolean),
+        }));
       } else if (skel.originalBullets.length >= 2 && bullets.length < 2) {
         for (const original of skel.originalBullets) {
           if (bullets.length >= 2) break;
@@ -2587,17 +2654,40 @@ Return the corrected JSON object now.`;
           });
           if (!covered) bullets.push(original);
         }
+        bulletEvidence = bullets.map(text => bulletEvidence.find(item => item.text === text) || {
+          text,
+          sourceIds: [skel.originalBulletEvidence?.[skel.originalBullets.indexOf(text)]?.sourceId].filter(Boolean),
+        });
       }
       bullets = bullets.slice(0, 6);
+      bulletEvidence = bulletEvidence.slice(0, 6);
 
-      let focus = this._clampInline(supplied?.focus, 140);
+      const focusClaim = typeof supplied?.focus === 'string' ? { text: supplied.focus, sourceIds: [] } : supplied?.focus;
+      let focus = this._clampInline(focusClaim?.text, 140);
       focus = focus ? focus.replace(/^focus\s*:\s*/i, '').trim() : '';
+      if (focus && !isTextSupported(focus, groundingContext, {
+        roleSourceId: skel.sourceId,
+        sourceIds: Array.isArray(focusClaim?.sourceIds) ? focusClaim.sourceIds : [],
+        requireSourceIds: true,
+      }).supported) focus = '';
 
-      return { id: skel.id, focus: focus || null, bullets };
+      const focusEvidence = focus ? (Array.isArray(focusClaim?.sourceIds) ? focusClaim.sourceIds : []) : [];
+      return { id: skel.id, focus: focus || null, focusEvidence, bullets, bulletEvidence };
     });
 
     if (!summary && roles.every(r => r.bullets.length === 0)) return null;
-    return { summary, competencies, roles };
+    const competencyEvidence = competencies.map(category => ({
+      label: category.label,
+      items: category.items.map(item => ({
+        text: item,
+        sourceIds: (groundingContext.records || [])
+          .filter(record => !/\b(?:no|not|never|without|lack(?:s|ed|ing)?|\w+n['’]?t)\b/i.test(record.text)
+            && this._normaliseText(record.text).includes(this._normaliseText(item)))
+          .map(record => record.sourceId)
+          .slice(0, 5),
+      })),
+    }));
+    return { summary, summaryEvidence, competencies, competencyEvidence, roles };
   }
 
   _clampInline(value, maxLen) {
@@ -2636,21 +2726,10 @@ Return the corrected JSON object now.`;
     return result;
   }
 
-  _normaliseStructuredCompetencies(raw, { matchMap = [], confirmedSkills = [], cvData = {} } = {}) {
+  _normaliseStructuredCompetencies(raw, { confirmedSkills = [], groundingContext } = {}) {
     const PROSE_RE = /\b(using|with|within|experience|experienced|deep|strong|proficien\w*|expertise|knowledge|ability|abilities|years?|including|such as|hands.on)\b/i;
     const confirmed = this._uniqueDisplaySkills(confirmedSkills || []);
     const confirmedKeys = new Set(confirmed.map(s => this._normaliseText(s)));
-
-    // Truthfulness gate sources: the original CV text plus everything the
-    // match report allows plus user confirmations. An item must appear in at
-    // least one of them (token-boundary containment) to survive.
-    const sourceText = ` ${[
-      this._normaliseText(cvData?.rawText || ''),
-      ...(matchMap || []).filter(m => m.allowedToMention).map(m => this._normaliseText(m.requirement)),
-      ...(cvData?.skills || []).map(s => this._normaliseText(s)),
-      ...confirmed.map(s => this._normaliseText(s)),
-    ].filter(Boolean).join(' ')} `;
-    const appearsInSource = (key) => key && sourceText.includes(` ${key} `);
 
     const categories = [];
     const globalKeys = new Set();
@@ -2659,13 +2738,18 @@ Return the corrected JSON object now.`;
       if (!label) continue;
       const items = [];
       for (const rawItem of (Array.isArray(cat?.items) ? cat.items : [])) {
-        const item = this._clampInline(rawItem, 48);
+        const claim = rawItem && typeof rawItem === 'object' ? rawItem : null;
+        const item = this._clampInline(claim?.text, 48);
         if (!item) continue;
         if (PROSE_RE.test(item)) continue;
         if (item.split(/\s+/).length > 4) continue;
         const key = this._normaliseText(item);
         if (!key || globalKeys.has(key)) continue;
-        if (!confirmedKeys.has(key) && !appearsInSource(key)) continue;
+        const sourceIds = Array.isArray(claim?.sourceIds) ? claim.sourceIds.filter(id => typeof id === 'string') : [];
+        if (!confirmedKeys.has(key) && !isTextSupported(item, groundingContext, {
+          sourceIds,
+          requireSourceIds: true,
+        }).supported) continue;
         globalKeys.add(key);
         items.push(item);
       }
@@ -3721,6 +3805,7 @@ Return the corrected JSON object now.`;
     for (const source of cvSources) {
       if (!source) continue;
       const lower = this._normaliseText(source);
+      if (/\b(?:no|not|never|without|lack(?:s|ed|ing)?|do(?:es)?n t)\b/i.test(lower)) continue;
 
       // Full phrase match (strongest signal)
       if (lower.includes(needle)) {

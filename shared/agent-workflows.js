@@ -3,28 +3,32 @@ import { JDParser } from './jd-parser.js';
 import { CVTailor } from './cv-tailor.js';
 import { classifyDomainRisk } from './domain-packs/domain-classifier.js';
 
-export const APPLICATION_ANSWER_AGENTS = [
-  'Question Classifier Agent',
-  'CV Grounding Agent',
+export const APPLICATION_ANSWER_STAGES = [
+  'Question Classification',
+  'CV Grounding',
   'Job Context Matcher',
   'Domain Risk Classifier',
-  'Answer Drafting Agent',
-  'Tone & Length Agent',
-  'Truthfulness Guard Agent',
+  'Answer Drafting',
+  'Tone & Length Control',
+  'Grounding Validation',
   'Final Answer Formatter',
 ];
 
-export const TAILORED_CV_AGENTS = [
-  'JD Analysis Agent',
-  'CV Parsing Agent',
-  'Match Scoring Agent',
-  'Gap Analysis Agent',
+export const TAILORED_CV_STAGES = [
+  'JD Analysis',
+  'CV Parsing',
+  'Match Scoring',
+  'Gap Analysis',
   'Domain Risk Classifier',
-  'Keyword Optimisation Agent',
-  'CV Rewrite Agent',
-  'ATS Formatting Agent',
-  'Truthfulness Guard Agent',
+  'Keyword Optimisation',
+  'Structured CV Generation',
+  'ATS Formatting',
+  'Grounding Validation',
 ];
+
+// Compatibility aliases for integrations using the pre-2.5 response names.
+export const APPLICATION_ANSWER_AGENTS = APPLICATION_ANSWER_STAGES;
+export const TAILORED_CV_AGENTS = TAILORED_CV_STAGES;
 
 const STOP_WORDS = new Set([
   'the', 'and', 'for', 'with', 'that', 'this', 'from', 'your', 'you', 'are',
@@ -83,8 +87,14 @@ export function candidateEvidenceMapAgent(cvData = {}) {
 
   for (const exp of cvData.experience || []) {
     const role = [exp.title, exp.company].filter(Boolean).join(' at ') || 'Experience';
-    for (const bullet of exp.responsibilities || []) {
-      evidenceItems.push({ type: 'experience', label: role, text: bullet });
+    for (const [index, bullet] of (exp.responsibilities || []).entries()) {
+      evidenceItems.push({
+        type: 'experience',
+        label: role,
+        text: bullet,
+        sourceId: exp.responsibilityEvidence?.[index]?.sourceId,
+        roleSourceId: exp.sourceId,
+      });
     }
   }
 
@@ -365,7 +375,8 @@ export function runApplicationAnswerAgents({
 
   return {
     workflow: 'applicationAnswer',
-    agentChain: APPLICATION_ANSWER_AGENTS,
+    pipelineStages: APPLICATION_ANSWER_STAGES,
+    agentChain: APPLICATION_ANSWER_STAGES,
     questionType: cvGrounding.queryType,
     cvData: parsedCv,
     jdData: parsedJd,
@@ -397,7 +408,8 @@ export function runTailoredCvAgents({
 
   return rebuildTailoredCvAgentContext({
     workflow: 'tailoredCv',
-    agentChain: TAILORED_CV_AGENTS,
+    pipelineStages: TAILORED_CV_STAGES,
+    agentChain: TAILORED_CV_STAGES,
     cvText,
     jobDescription,
     cvData: parsedCv,
@@ -406,3 +418,6 @@ export function runTailoredCvAgents({
     roleRequirementMap: roleRequirementMapAgent(parsedJd),
   }, matchMap, tailor);
 }
+
+export const runApplicationAnswerPipeline = runApplicationAnswerAgents;
+export const runTailoredCvPipeline = runTailoredCvAgents;

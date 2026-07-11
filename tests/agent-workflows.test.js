@@ -48,8 +48,9 @@ describe('deterministic agent workflows', () => {
     });
 
     expect(result.workflow).toBe('applicationAnswer');
-    expect(result.agentChain).toContain('CV Grounding Agent');
-    expect(result.agentChain).toContain('Truthfulness Guard Agent');
+    expect(result.pipelineStages).toContain('CV Grounding');
+    expect(result.agentChain).toBe(result.pipelineStages);
+    expect(result.pipelineStages).toContain('Grounding Validation');
     expect(result.candidateEvidenceMap.evidenceItems.length).toBeGreaterThan(0);
     expect(result.roleRequirementMap.requirements.length).toBeGreaterThan(0);
     expect(result.relevantEvidence.some(item => /cross-functional|activation/i.test(item.text))).toBe(true);
@@ -64,8 +65,9 @@ describe('deterministic agent workflows', () => {
     });
 
     expect(result.workflow).toBe('tailoredCv');
-    expect(result.agentChain).toContain('JD Analysis Agent');
-    expect(result.agentChain).toContain('ATS Formatting Agent');
+    expect(result.pipelineStages).toContain('JD Analysis');
+    expect(result.agentChain).toBe(result.pipelineStages);
+    expect(result.pipelineStages).toContain('ATS Formatting');
     expect(result.matchMap.length).toBeGreaterThan(0);
     expect(result.matchReport).toHaveProperty('missingSkills');
     expect(result.gapAnalysis.confirmationRequired.some(item => /Testing/i.test(item.skill))).toBe(true);

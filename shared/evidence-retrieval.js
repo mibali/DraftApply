@@ -9,8 +9,9 @@ function compact(value, max = 220) {
 }
 
 function normaliseVector(vector) {
-  if (!Array.isArray(vector)) return [];
-  const numeric = vector.map(value => Number(value)).filter(Number.isFinite);
+  if (!Array.isArray(vector) || vector.length === 0) return [];
+  const numeric = vector.map(value => Number(value));
+  if (numeric.some(value => !Number.isFinite(value))) return [];
   const magnitude = Math.sqrt(numeric.reduce((sum, value) => sum + value * value, 0));
   if (!magnitude) return [];
   return numeric.map(value => value / magnitude);
@@ -19,8 +20,8 @@ function normaliseVector(vector) {
 export function cosineSimilarity(a, b) {
   const left = normaliseVector(a);
   const right = normaliseVector(b);
-  const len = Math.min(left.length, right.length);
-  if (!len) return 0;
+  if (!left.length || left.length !== right.length) return 0;
+  const len = left.length;
   let dot = 0;
   for (let i = 0; i < len; i += 1) dot += left[i] * right[i];
   return dot;
@@ -32,7 +33,9 @@ export function buildEvidenceRetrievalInputs(candidateEvidenceMap = {}, roleRequ
 } = {}) {
   const evidenceItems = (candidateEvidenceMap.evidenceItems || [])
     .map((item, index) => ({
-      id: `cv_${index}`,
+      id: item.sourceId || item.id || `cv_${index}`,
+      sourceId: item.sourceId || item.id || `cv_${index}`,
+      roleSourceId: item.roleSourceId,
       type: item.type || 'evidence',
       label: cleanText(item.label || item.type || 'CV evidence'),
       text: compact(item.text || item.label || '', 360),
@@ -88,15 +91,30 @@ export function rerankMatchMapWithEmbeddings(matchMap = [], retrievalInputs = {}
     };
   }
 
+  const allVectors = [...evidenceVectors, ...requirementVectors];
+  const dimensions = allVectors[0]?.length;
+  const vectorsAreValid = Number.isInteger(dimensions) && dimensions > 0 && allVectors.every(vector => (
+    Array.isArray(vector)
+    && vector.length === dimensions
+    && vector.every(value => Number.isFinite(Number(value)))
+  ));
+  if (!vectorsAreValid) {
+    return {
+      matchMap,
+      retrieval: { provider, model, status: 'skipped', reason: 'Embedding vectors were malformed or had inconsistent dimensions.' },
+    };
+  }
+
   const requirementScores = new Map();
   requirements.forEach((req, reqIndex) => {
     const scoredEvidence = evidenceItems
       .map((evidence, evidenceIndex) => ({
         ...evidence,
+        retrievalIndex: evidenceIndex,
         score: cosineSimilarity(requirementVectors[reqIndex], evidenceVectors[evidenceIndex]),
       }))
       .filter(item => Number.isFinite(item.score))
-      .sort((a, b) => b.score - a.score)
+      .sort((a, b) => (b.score - a.score) || a.retrievalIndex - b.retrievalIndex)
       .slice(0, maxEvidencePerRequirement);
 
     requirementScores.set(req.requirement.toLowerCase(), {
@@ -106,45 +124,33 @@ export function rerankMatchMapWithEmbeddings(matchMap = [], retrievalInputs = {}
     });
   });
 
-  let promotedCount = 0;
   let enrichedCount = 0;
 
   const enhanced = matchMap.map(item => {
-    if (item.confirmedByUser) return item;
     const scored = requirementScores.get(String(item.requirement || '').toLowerCase());
     if (!scored || scored.topScore < enrichThreshold) return item;
 
     const retrievalEvidence = scored.evidence
       .filter(evidence => evidence.score >= enrichThreshold)
-      .map(evidence => evidence.text)
-      .filter(Boolean);
+      .map(evidence => ({
+        id: evidence.id,
+        sourceId: evidence.sourceId || evidence.id,
+        roleSourceId: evidence.roleSourceId,
+        text: evidence.text,
+        similarity: Number(evidence.score.toFixed(4)),
+      }));
 
     if (retrievalEvidence.length === 0) return item;
 
-    const mergedEvidence = [...new Set([
-      ...(Array.isArray(item.evidence) ? item.evidence : []),
-      ...retrievalEvidence,
-    ])].slice(0, 5);
-
     const base = {
       ...item,
-      evidence: mergedEvidence,
       retrievalScore: Number(scored.topScore.toFixed(4)),
       retrievalProvider: provider,
       retrievalModel: model,
+      retrievalEvidence,
     };
 
-    if (item.status === 'missing' && scored.topScore >= promoteThreshold) {
-      promotedCount += 1;
-      return {
-        ...base,
-        status: 'partial_match',
-        allowedToMention: true,
-        retrievalPromoted: true,
-      };
-    }
-
-    if (item.allowedToMention) enrichedCount += 1;
+    enrichedCount += 1;
     return base;
   });
 
@@ -156,10 +162,11 @@ export function rerankMatchMapWithEmbeddings(matchMap = [], retrievalInputs = {}
       status: 'active',
       evidenceCount: evidenceItems.length,
       requirementCount: requirements.length,
-      promotedCount,
+      promotedCount: 0,
       enrichedCount,
       promoteThreshold,
       enrichThreshold,
+      authorizationMode: 'ranking-only',
     },
   };
 }
