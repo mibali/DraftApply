@@ -17,9 +17,7 @@ export class CVTailor {
   buildMatchMap(cvData, jdData, confirmedSkills = []) {
     const cvText = cvData.rawText || '';
     const cvLower = cvText.toLowerCase();
-    const confirmedEntries = (Array.isArray(confirmedSkills) ? confirmedSkills : [])
-      .map(skill => String(skill || '').trim())
-      .filter(Boolean);
+    const confirmedEntries = this._normaliseConfirmedSkills(confirmedSkills);
     const confirmedByKey = new Map();
     for (const skill of confirmedEntries) {
       const key = this._normaliseText(skill);
@@ -115,8 +113,7 @@ export class CVTailor {
    * not just lexical overlap. Falls back to buildMatchMap() on any failure.
    */
   buildSemanticMatchPrompt(cvData, jdData, confirmedSkills = []) {
-    const confirmed = (Array.isArray(confirmedSkills) ? confirmedSkills : [])
-      .map(s => String(s || '').trim()).filter(Boolean);
+    const confirmed = this._normaliseConfirmedSkills(confirmedSkills);
 
     const reqs = [
       ...(jdData.requiredSkills  || []).slice(0, 20).map(r => ({ req: r, type: 'required' })),
@@ -180,9 +177,15 @@ Also append one item per user-confirmed skill: status "user_confirmed", allowedT
   mergeSemanticMatchResult(llmJson, jdData, confirmedSkills = []) {
     if (!Array.isArray(llmJson) || llmJson.length === 0) return null;
 
-    const confirmed = (Array.isArray(confirmedSkills) ? confirmedSkills : [])
-      .map(s => String(s || '').trim()).filter(Boolean);
+    const confirmed = this._normaliseConfirmedSkills(confirmedSkills);
     const confirmedKeys = new Set(confirmed.map(s => this._normaliseText(s)));
+    const canonicalKeys = new Set([
+      ...(jdData?.requiredSkills || []),
+      ...(jdData?.preferredSkills || []),
+      ...(jdData?.tools || []),
+      ...(jdData?.softSkills || []),
+      ...confirmed,
+    ].map(value => this._normaliseText(value)).filter(Boolean));
     const VALID_STATUSES = new Set(['strong_match', 'partial_match', 'missing', 'user_confirmed']);
 
     const result = [];
@@ -191,12 +194,16 @@ Also append one item per user-confirmed skill: status "user_confirmed", allowedT
     for (const item of llmJson) {
       if (!item || typeof item.requirement !== 'string' || !item.requirement.trim()) continue;
       const key = this._normaliseText(item.requirement);
-      if (seenReqs.has(key)) continue;
+      if (!canonicalKeys.has(key) || seenReqs.has(key)) continue;
       seenReqs.add(key);
 
-      const confirmedByUser = Boolean(item.confirmedByUser) || confirmedKeys.has(key);
+      // The model reports evidence; it cannot grant itself user-confirmed
+      // authority or create a requirement absent from the canonical JD.
+      const confirmedByUser = confirmedKeys.has(key);
       const rawStatus = VALID_STATUSES.has(item.status) ? item.status : 'missing';
-      const status = confirmedByUser ? 'user_confirmed' : rawStatus;
+      const status = confirmedByUser
+        ? 'user_confirmed'
+        : rawStatus === 'user_confirmed' ? 'missing' : rawStatus;
       const allowedToMention = status !== 'missing';
       const evidence = confirmedByUser
         ? ['Confirmed by user during missing skills review']
@@ -449,8 +456,11 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
   }
 
   buildTailoredCvAuditPrompt(cvData, jdData, matchMap = [], tailoredText = '', confirmedSkills = []) {
+    const safeConfirmedSkills = this._normaliseConfirmedSkills(confirmedSkills);
+    const confirmedKeys = new Set(safeConfirmedSkills.map(skill => this._normaliseText(skill)));
     const supported = (matchMap || [])
       .filter(m => m.allowedToMention)
+      .filter(m => !m.confirmedByUser || confirmedKeys.has(this._normaliseText(m.requirement)))
       .map(m => ({
         requirement: m.requirement,
         evidence: Array.isArray(m.evidence) ? m.evidence.slice(0, 3) : [],
@@ -502,7 +512,7 @@ SUPPORTED REQUIREMENTS / CLAIMS ALLOWED IN THE CV
 ${supportedLines.length ? supportedLines.join('\n') : '  (none)'}
 
 USER-CONFIRMED ADDITIONS
-${this._uniqueDisplaySkills(confirmedSkills).length ? this._uniqueDisplaySkills(confirmedSkills).map(s => `  + ${s}`).join('\n') : '  (none)'}
+${safeConfirmedSkills.length ? safeConfirmedSkills.map(s => `  + ${s}`).join('\n') : '  (none)'}
 
 UNSUPPORTED JD REQUIREMENTS / CLAIMS TO REMOVE IF PRESENT
 ${unsupported.length ? unsupported.map(s => `  ✗ ${s}`).join('\n') : '  (none)'}
@@ -662,12 +672,13 @@ Do not add anything new. Return the complete corrected CV.`;
   }
 
   finalizeTailoredCV(rawText, { cvData, jdData, matchMap = [], confirmedSkills = [] } = {}) {
+    const safeConfirmedSkills = this._normaliseConfirmedSkills(confirmedSkills);
     // Repair hard-wrapped lines first: LLMs copy the original CV's PDF-extracted
     // line wrapping ("cloud-\nnative"), which every downstream step would
     // otherwise treat as separate lines. Then rejoin split date ranges so every
     // later pass sees date lines as single units.
     const unwrapped = this._joinSplitDateRanges(this.repairHardWrappedLines(rawText));
-    const withCoreCompetencies = this._ensureCoreCompetencies(unwrapped, matchMap, confirmedSkills, jdData);
+    const withCoreCompetencies = this._ensureCoreCompetencies(unwrapped, matchMap, safeConfirmedSkills, jdData);
     const cleaned = this.cleanSkillsSection(
       this.ensureRoleFocusLines(
         this.ensureConfirmedSkillsIncluded(
@@ -675,14 +686,14 @@ Do not add anything new. Return the complete corrected CV.`;
             this.enforceTargetHeadline(withCoreCompetencies, jdData?.jobTitle),
             jdData?.company
           ),
-          confirmedSkills
+          safeConfirmedSkills
         ),
         cvData,
         jdData,
         matchMap
       ),
       matchMap,
-      confirmedSkills,
+      safeConfirmedSkills,
       jdData
     );
     const normalised = this.normaliseRoleFocusPlacement(
@@ -1173,7 +1184,7 @@ Do not add anything new. Return the complete corrected CV.`;
   ensureConfirmedSkillsIncluded(tailoredText, confirmedSkills = []) {
     if (!tailoredText) return tailoredText;
 
-    const skills = this._uniqueDisplaySkills(confirmedSkills);
+    const skills = this._normaliseConfirmedSkills(confirmedSkills);
     if (skills.length === 0) return tailoredText;
 
     const existingText = this._normaliseText(tailoredText);
@@ -2531,7 +2542,7 @@ Do not add anything new. Return the complete corrected CV.`;
     const skeleton = this.buildCvSkeleton(cvData, jdData);
     const supported = matchMap.filter(m => m.allowedToMention).map(m => m.requirement);
     const unsupported = matchMap.filter(m => !m.allowedToMention).map(m => m.requirement);
-    const confirmed = this._uniqueDisplaySkills(confirmedSkills || []);
+    const confirmed = this._normaliseConfirmedSkills(confirmedSkills);
     const topKeywords = (jdData?.atsKeywords || []).slice(0, 15);
     const tailoringPlan = this.buildTailoringPlan(cvData, jdData, matchMap);
     const roleCredibilityGuidance = this._buildRoleCredibilityGuidance(jdData);
@@ -2660,7 +2671,8 @@ Return the corrected JSON object now.`;
     if (!content || typeof content !== 'object' || Array.isArray(content)) return null;
     if (!skeleton || !Array.isArray(skeleton.roles) || skeleton.roles.length === 0) return null;
 
-    const groundingContext = buildGroundingContext(cvData, { confirmedFacts: confirmedSkills });
+    const safeConfirmedSkills = this._normaliseConfirmedSkills(confirmedSkills);
+    const groundingContext = buildGroundingContext(cvData, { confirmedFacts: safeConfirmedSkills });
     const summaryClaim = typeof content.summary === 'object' && !Array.isArray(content.summary) ? content.summary : null;
     const summarySourceIds = Array.isArray(summaryClaim?.sourceIds) ? summaryClaim.sourceIds.filter(id => typeof id === 'string') : [];
     const acceptedSummary = String(summaryClaim?.text || '').split(/(?<=[.!?])\s+/)
@@ -2681,7 +2693,12 @@ Return the corrected JSON object now.`;
         ? ['summary:0'].filter(id => groundingContext.sourceIndex[id])
         : summarySourceIds.filter(id => groundingContext.sourceIndex[id])
       : [];
-    const competencies = this._normaliseStructuredCompetencies(content.competencies, { matchMap, confirmedSkills, cvData, groundingContext });
+    const competencies = this._normaliseStructuredCompetencies(content.competencies, {
+      matchMap,
+      confirmedSkills: safeConfirmedSkills,
+      cvData,
+      groundingContext,
+    });
 
     const suppliedById = new Map();
     for (const role of (Array.isArray(content.roles) ? content.roles : [])) {
@@ -2712,17 +2729,20 @@ Return the corrected JSON object now.`;
       let bullets = acceptedBullets.map(item => item.text);
       let bulletEvidence = acceptedBullets.map(item => ({ text: item.text, sourceIds: item.sourceIds }));
       bullets = this._dedupeSimilarBullets(bullets);
-      // A role can never disappear: backfill from the original bullets when
-      // the model dropped or shortchanged it.
-      if (bullets.length === 0) {
-        bullets = skel.originalBullets.slice(0, 6);
-        bulletEvidence = bullets.map((text, index) => ({
-          text,
-          sourceIds: skel.originalBulletEvidence?.[index]?.sourceIds || [],
-        }));
-      } else if (skel.originalBullets.length >= 2 && bullets.length < 2) {
+      bulletEvidence = bullets.map(text => bulletEvidence.find(item => item.text === text));
+      // A role and its substantive evidence can never disappear. Models tend
+      // to over-compress older or less relevant roles, so retain a
+      // deterministic minimum based on the amount of source evidence while
+      // still allowing the tailored bullets to lead.
+      const minimumBulletCount = Math.min(6,
+        skel.originalBullets.length >= 8 ? 5
+          : skel.originalBullets.length >= 5 ? 4
+            : skel.originalBullets.length >= 3 ? 3
+              : skel.originalBullets.length
+      );
+      if (bullets.length < minimumBulletCount) {
         for (const original of skel.originalBullets) {
-          if (bullets.length >= 2) break;
+          if (bullets.length >= minimumBulletCount) break;
           // Skip originals the model already covers - including rephrased
           // variants where one normalised form is a prefix of the other.
           const key = this._normaliseBulletForSimilarity(original);
@@ -2819,7 +2839,7 @@ Return the corrected JSON object now.`;
       'Observability & Monitoring', 'Security', 'Customer Support', 'Customer Success', 'Stakeholder Engagement',
       'Pre-Sales Execution', 'Solution Architecture', 'Project Delivery', 'Leadership', 'Communication',
     ].map(label => [this._normaliseText(label), label]));
-    const confirmed = this._uniqueDisplaySkills(confirmedSkills || []);
+    const confirmed = this._normaliseConfirmedSkills(confirmedSkills);
     const confirmedKeys = new Set(confirmed.map(s => this._normaliseText(s)));
 
     const categories = [];
@@ -2860,9 +2880,9 @@ Return the corrected JSON object now.`;
     // Every user-confirmed skill must be present somewhere.
     const missingConfirmed = confirmed.filter(s => !globalKeys.has(this._normaliseText(s)));
     if (missingConfirmed.length > 0) {
-      const target = categories.find(c => /additional|other|confirmed/i.test(c.label));
+      const target = categories.find(c => c.label === 'Confirmed Skills');
       if (target) target.items.push(...missingConfirmed);
-      else categories.push({ label: 'Additional Skills', items: missingConfirmed });
+      else categories.push({ label: 'Confirmed Skills', items: missingConfirmed.slice(0, 8) });
     }
 
     return categories;
@@ -2980,6 +3000,20 @@ Return the corrected JSON object now.`;
       result.push(clean);
     }
     return result;
+  }
+
+  // User confirmation authorises a concise candidate skill, never an entire
+  // JD requirement. This boundary is intentionally stricter than ordinary
+  // display cleanup because confirmed values become grounding evidence.
+  _normaliseConfirmedSkills(skills = []) {
+    return this._uniqueDisplaySkills(skills).filter(skill => {
+      if (skill.length > 64 || /[,;\n]|\s(?:\/|\||&)\s|\s\b(?:and|or)\b\s/i.test(skill)) return false;
+      if (skill.split(/\s+/).length > 4) return false;
+      if (this._isJdRequirementProse(skill) || this._isRequirementFragment(skill)) return false;
+      if (/\b(?:years?\s+of\s+experience|experience\s+(?:with|in)|ability\s+to|production\s+experience|required|preferred)\b/i.test(skill)) return false;
+      if (/^(?:must|should|build|develop|manage|deliver|own|responsible|proven)\b/i.test(skill)) return false;
+      return /[A-Za-z]/.test(skill);
+    }).slice(0, 30);
   }
 
   _rankSupportedKeywords(matchMap = [], jdData = {}) {
@@ -3611,7 +3645,7 @@ Return the corrected JSON object now.`;
 
     const allowedSeed = [
       ...((matchMap || []).filter(m => m.allowedToMention).map(m => m.requirement)),
-      ...(confirmedSkills || []),
+      ...this._normaliseConfirmedSkills(confirmedSkills),
     ];
     const allowedPhrases = this._uniqueDisplaySkills(
       allowedSeed.flatMap(item => this._splitSkillLine(String(item || '')))

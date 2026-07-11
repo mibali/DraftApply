@@ -314,6 +314,40 @@ describe('validateStructuredContent', () => {
     expect(content.roles).toHaveLength(3);
   });
 
+  it('retains meaningful source evidence when the model over-compresses a role', () => {
+    const source = {
+      ...cvData,
+      experience: [{
+        company: 'Mono',
+        title: 'Team Lead, Technical Support & Integrations',
+        dates: 'Feb 2021 - Present',
+        responsibilities: Array.from({ length: 10 }, (_, index) =>
+          `Delivered distinct supported production outcome number ${index + 1} for customers and engineering teams.`),
+      }],
+    };
+    const sourceSkeleton = tailor.buildCvSkeleton(source, jdData);
+    const content = tailor.validateStructuredContent({
+      summary: { text: source.summary, sourceIds: ['summary:0'] },
+      competencies: [],
+      roles: [{
+        id: 'role_0',
+        focus: null,
+        bullets: [{
+          text: source.experience[0].responsibilities[0],
+          sourceIds: ['experience:0:responsibility:0'],
+        }],
+      }],
+    }, sourceSkeleton, { matchMap: [], confirmedSkills: [], cvData: source });
+
+    expect(content.roles).toHaveLength(1);
+    expect(content.roles[0].bullets).toHaveLength(5);
+    expect(content.roles[0].bullets[0]).toContain('outcome number 1');
+    expect(content.roles[0].bulletEvidence.map(item => item.text)).toEqual(content.roles[0].bullets);
+    expect(content.roles[0].bulletEvidence.every(item =>
+      item.sourceIds.every(id => sourceSkeleton.roles[0].allowedSourceIds.includes(id))
+    )).toBe(true);
+  });
+
   it('ignores role ids that do not exist in the skeleton', () => {
     const content = tailor.validateStructuredContent({
       summary: 'Engineer.',
@@ -361,6 +395,26 @@ describe('validateStructuredContent', () => {
     expect(content.competencies).toEqual([{ label: 'Relevant Skills', items: ['Terraform'] }]);
     expect(JSON.stringify(content)).not.toContain('Fabricated Employer');
     expect(JSON.stringify(content)).not.toContain('Secret Clearance');
+  });
+
+  it('never treats full JD requirements as user-confirmed competency skills', () => {
+    const confirmedSkills = [
+      '3–5 years of experience in Machine Learning, Backend Software Engineering, Data Engineering, or MLOps roles',
+      'production experience with ML lifecycle management platforms',
+      'ability to collaborate with Data Scientists, Engineers, and Product',
+      'AWS / GCP / Azure',
+      'Build production ML platforms',
+      'TensorFlow',
+    ];
+    const content = tailor.validateStructuredContent({
+      summary: { text: cvData.summary, sourceIds: ['summary:0'] },
+      competencies: [],
+      roles: [],
+    }, skeleton, { matchMap: [], confirmedSkills, cvData });
+
+    expect(content.competencies).toEqual([{ label: 'Confirmed Skills', items: ['TensorFlow'] }]);
+    expect(JSON.stringify(content)).not.toMatch(/years of experience|production experience|ability to collaborate|AWS \/ GCP|Build production/i);
+    expect(JSON.stringify(content)).not.toContain('Additional Skills');
   });
 
   it('always includes user-confirmed skills even when the model omitted them', () => {

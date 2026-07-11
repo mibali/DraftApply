@@ -1190,7 +1190,15 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     return source
       .map(item => typeof item === 'string' ? item : item?.skill || item?.requirement || item?.name)
-      .filter(Boolean);
+      .map(item => String(item || '').trim())
+      // The checkbox is an attestation by the candidate. Only offer concise,
+      // atomic skills for confirmation; never ask a user to attest to a whole
+      // JD sentence or a bundled list of requirements.
+      .filter(item => item && item.length <= 64)
+      .filter(item => item.split(/\s+/).length <= 4)
+      .filter(item => !/[,;\n]|\s(?:\/|\||&)\s|\s\b(?:and|or)\b\s/i.test(item))
+      .filter(item => !/\b(?:years?\s+of\s+experience|experience\s+(?:with|in)|ability\s+to|production\s+experience|required|preferred)\b/i.test(item))
+      .filter(item => !/^(?:must|should|build|develop|manage|deliver|own|responsible|proven)\b/i.test(item));
   }
 
   function providerLabel(provider = '') {

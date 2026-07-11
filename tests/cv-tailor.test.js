@@ -277,6 +277,44 @@ describe('buildMatchMap', () => {
     expect(() => tailor.buildMatchMap(CV, JD, null)).not.toThrow();
   });
 
+  it('does not authorize bundled or sentence-shaped user confirmations', () => {
+    const map = tailor.buildMatchMap(CV, JD, [
+      'AWS / GCP / Azure',
+      'Build production ML platforms',
+      '3–5 years of experience in Machine Learning, Backend Engineering, or MLOps roles',
+      'Grafana',
+    ]);
+    expect(map.some(item => item.requirement === 'Grafana' && item.confirmedByUser)).toBe(true);
+    expect(map.some(item => /AWS \/ GCP|Build production|years of experience/i.test(item.requirement))).toBe(false);
+  });
+
+  it('does not let semantic-match model output self-authorize a requirement', () => {
+    const result = tailor.mergeSemanticMatchResult([
+      {
+        requirement: 'GraphQL',
+        type: 'preferred',
+        status: 'user_confirmed',
+        evidence: [],
+        allowedToMention: true,
+        confirmedByUser: true,
+      },
+      {
+        requirement: 'Fabricated Quantum Platform',
+        type: 'tool',
+        status: 'strong_match',
+        evidence: ['Invented evidence'],
+        allowedToMention: true,
+        confirmedByUser: false,
+      },
+    ], JD, []);
+    expect(result.find(item => item.requirement === 'GraphQL')).toMatchObject({
+      status: 'missing',
+      allowedToMention: false,
+      confirmedByUser: false,
+    });
+    expect(result.some(item => item.requirement === 'Fabricated Quantum Platform')).toBe(false);
+  });
+
   it('keeps controlled synonyms as retrieval evidence without authorizing claims', () => {
     const cv = {
       rawText: 'Delivered client-facing presentations and stakeholder workshops for enterprise SaaS accounts.',
@@ -1117,6 +1155,16 @@ React, Grafana`;
     const result = tailor.ensureConfirmedSkillsIncluded('John Doe\n\nEXPERIENCE\nTechCorp', ['Prometheus']);
     expect(result).toContain('Technical Skills\nPrometheus');
   });
+
+  it('does not insert bundled JD requirements into the legacy CV path', () => {
+    const result = tailor.ensureConfirmedSkillsIncluded('John Doe\n\nSKILLS\nReact', [
+      'AWS / GCP / Azure',
+      'production experience with ML platforms',
+      'Grafana',
+    ]);
+    expect(result).toContain('React, Grafana');
+    expect(result).not.toMatch(/AWS \/ GCP|production experience/i);
+  });
 });
 
 // ── ensureRoleFocusLines ─────────────────────────────────────────────────────
@@ -1613,6 +1661,19 @@ React, Track record of leading POCs and world-class demos`;
     expect(userPrompt).toContain('+ Grafana');
     expect(userPrompt).toContain('AUDIT INSTRUCTION');
     expect(temperature).toBe(0.2);
+  });
+
+  it('does not expose malformed confirmations as allowed audit evidence', () => {
+    const malformed = 'AWS / GCP / Azure';
+    const { userPrompt } = tailor.buildTailoredCvAuditPrompt(
+      CV,
+      JD,
+      [{ requirement: malformed, allowedToMention: true, confirmedByUser: true, evidence: [] }],
+      CV.rawText,
+      [malformed, 'Grafana']
+    );
+    expect(userPrompt).toContain('+ Grafana');
+    expect(userPrompt).not.toContain(malformed);
   });
 
   it('tailoring prompt instructs the model to keep role evidence concise and credible', () => {
