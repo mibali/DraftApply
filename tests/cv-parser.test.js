@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { CVParser } from '../shared/cv-parser.js';
+import { MULTICOLUMN_CV_TEXT } from './fixtures/multicolumn-cv.js';
 
 describe('CVParser contact extraction', () => {
   it('does not treat an email domain as a personal website', () => {
@@ -11,6 +12,7 @@ http://linkedin.com/in/michael-temitope-bali-830640171
 Infra & MLOps Engineer`);
 
     expect(cv.contactInfo.email).toBe('mtbdesigns01@gmail.com');
+    expect(cv.contactInfo.phone).toBe('07401731548');
     expect(cv.contactInfo.website).toBe('');
   });
 
@@ -22,6 +24,134 @@ www.janedoe.dev
 Platform Engineer`);
 
     expect(cv.contactInfo.website).toBe('www.janedoe.dev');
+  });
+});
+
+describe('CVParser multi-column PDF recovery', () => {
+  const cv = new CVParser().parse(MULTICOLUMN_CV_TEXT);
+
+  it('recovers identity and headingless summary without compacting the display headline', () => {
+    expect(cv.contactInfo.name).toBe('Alex Morgan');
+    expect(cv.summary).toContain('deep experience diagnosing API integrations');
+    expect(cv.summary).not.toContain('alex@example.test');
+    expect(cv.rawText).toContain('S E N I O R   D E V E L O P E R');
+    expect(cv.rawText).toContain('PROFESSIONAL EXPERIENCE');
+  });
+
+  it('recovers trailing-date roles in reverse chronological order without crossing evidence', () => {
+    expect(cv.experience.map(role => [role.company, role.title, role.dates])).toEqual([
+      ['Northstar Payments', 'Team Lead, Developer Support', 'Feb 2021 - Present'],
+      ['Harbor Systems', 'Senior Software Engineer', 'Aug 2020 - Jan 2021'],
+      ['Freelance/Contract', 'Software Engineer', 'May 2019 - Aug 2020'],
+    ]);
+    expect(cv.experience[0].responsibilities[0]).toContain('request tracing, and SQL');
+    expect(cv.experience[0].responsibilities[1]).toContain('25% through structured debugging');
+    expect(cv.experience[0].responsibilities.join(' ')).not.toContain('Sentry monitoring');
+    expect(cv.experience[1].responsibilities.join(' ')).toContain('Sentry monitoring');
+    expect(JSON.stringify(cv.experience)).not.toContain('Skills:');
+  });
+
+  it('extracts deduplicated role and global skills without swallowing project prose', () => {
+    expect(cv.skills).toEqual(expect.arrayContaining(['REST APIs', 'PostgreSQL', 'Django', 'TypeScript', 'Redis']));
+    expect(cv.skills.filter(skill => skill.toLowerCase() === 'postgresql')).toHaveLength(1);
+    expect(cv.skills).not.toContain('Projects');
+    expect(cv.skills.join(' ')).not.toContain('Issue-tracking platform');
+  });
+
+  it('preserves locked projects in extracted order with deterministic provenance', () => {
+    expect(cv.projects.map(project => [project.name, project.url])).toEqual([
+      ['SprintBoard', 'https://sprintboard.example.test'],
+      ['PayCycle', 'https://paycycle.example.test'],
+    ]);
+    expect(cv.projects[0].bullets[1]).toContain('Django Channels');
+    expect(cv.projects[0].skills).toContain('WebSockets');
+    expect(cv.projects[1].bullets).toHaveLength(2);
+    const projectEvidence = cv.evidenceIndex.filter(record => record.projectSourceId);
+    expect(projectEvidence.length).toBeGreaterThan(0);
+    expect(new Set(projectEvidence.map(record => record.sourceId)).size).toBe(projectEvidence.length);
+    for (const record of projectEvidence) expect(cv.sourceIndex[record.sourceId]).toBe(record);
+    const again = new CVParser().parse(MULTICOLUMN_CV_TEXT);
+    expect(again.evidenceIndex.filter(record => record.projectSourceId).map(record => record.sourceId))
+      .toEqual(projectEvidence.map(record => record.sourceId));
+  });
+
+  it('fails closed on ambiguous names, action prose, and numbered non-project lists', () => {
+    const ambiguous = new CVParser().parse(`S U P P O R T   E N G I N E E R\nSupport developers through difficult integrations.\n\nPROFESSIONAL EXPERIENCE\nSupport customers during incidents.\n2022 - Present\n\nPROJECTS\n1.) Improved alerts\n2.) Updated docs`);
+    expect(ambiguous.contactInfo.name).toBe('');
+    expect(ambiguous.experience).toEqual([]);
+    expect(ambiguous.projects).toEqual([]);
+    expect(ambiguous.rawText).toContain('S U P P O R T   E N G I N E E R');
+  });
+
+  it('stops every parsed section at canonical compound headings', () => {
+    const parsed = new CVParser().parse(`Jamie Rivera
+jamie@example.test
+
+PROFESSIONAL SUMMARY
+Support engineer focused on reliable API integrations.
+
+CORE COMPETENCIES
+APIs: REST, Webhooks
+
+PROFESSIONAL EXPERIENCE
+Example Corp
+Jan 2022 - Present
+Senior Support Engineer
+- Resolved complex production incidents.
+
+PROJECTS
+1.) SignalBoard (https://signal.example.test)
+- Built an incident dashboard.
+
+EDUCATION / CERTIFICATIONS
+Example University
+Certified Example Practitioner`);
+    expect(parsed.summary).toBe('Support engineer focused on reliable API integrations.');
+    expect(parsed.experience[0].responsibilities).toEqual(['Resolved complex production incidents.']);
+    expect(parsed.projects[0].bullets).toEqual(['Built an incident dashboard.']);
+    expect(JSON.stringify(parsed.projects)).not.toContain('Example University');
+  });
+
+  it('parses trailing-date roles with one action each and fails closed when a later block is malformed', () => {
+    const valid = new CVParser().parse(`Alex Morgan
+alex@example.test
+
+PROFESSIONAL EXPERIENCE
+Alpha Corp
+Senior Engineer
+Built reliable API integrations for enterprise customers.
+Led a migration from Jan 2020 to Dec 2021 while maintaining service reliability.
+Jan 2022 - Present
+Beta Corp
+Software Engineer
+Developed internal support tooling for incident response.
+Jan 2020 - Dec 2021
+
+SKILLS
+Node.js, SQL`);
+    expect(valid.experience.map(role => role.responsibilities)).toEqual([
+      [
+        'Built reliable API integrations for enterprise customers.',
+        'Led a migration from Jan 2020 to Dec 2021 while maintaining service reliability.',
+      ],
+      ['Developed internal support tooling for incident response.'],
+    ]);
+
+    const malformed = new CVParser().parse(`Alex Morgan
+alex@example.test
+
+PROFESSIONAL EXPERIENCE
+Alpha Corp
+Senior Engineer
+Built reliable API integrations for enterprise customers.
+Jan 2022 - Present
+This later block has no credible title
+Developed internal support tooling for incident response.
+Jan 2020 - Dec 2021
+
+SKILLS
+Node.js, SQL`);
+    expect(malformed.experience).toEqual([]);
   });
 });
 

@@ -2233,8 +2233,43 @@ Do not add anything new. Return the complete corrected CV.`;
       headline: String(jdData?.jobTitle || '').trim(),
       contacts: this._extractHeaderContactLines(cvData),
       roles,
+      projects: this._sanitiseSkeletonProjects(cvData?.projects || []),
       educationLines: this._extractEducationLines(cvData),
     };
+  }
+
+  _sanitiseSkeletonProjects(projects = []) {
+    const seen = new Set();
+    return projects.flatMap((project, index) => {
+      const name = String(project?.name || '').trim();
+      const url = String(project?.url || '').trim();
+      if (!name || name.length > 120 || url.length > 500 || !/^https?:\/\/[^\s]+$/i.test(url)) return [];
+      const key = `${name.toLowerCase()}|${url}`;
+      if (seen.has(key)) return [];
+      seen.add(key);
+      const bulletItems = (project.bullets || []).map((value, i) => ({
+        text: String(value || '').trim(),
+        sourceIds: [project.bulletEvidence?.[i]?.sourceId || `project:${index}:bullet:${i}`],
+      })).filter(item => item.text.length >= 8 && item.text.length <= 320);
+      const skillItems = (project.skills || []).map((value, i) => ({
+        text: String(value || '').trim(),
+        sourceIds: [project.skillEvidence?.[i]?.sourceId || `project:${index}:skill:${i}`],
+      })).filter(item => item.text && item.text.length <= 64);
+      const originalBullets = bulletItems.map(item => item.text);
+      const originalBulletEvidence = bulletItems.map(item => ({ text: item.text, sourceIds: item.sourceIds }));
+      const skills = skillItems.map(item => item.text);
+      const skillEvidence = skillItems.map(item => ({ text: item.text, sourceIds: item.sourceIds }));
+      return [{
+        id: `project_${index}`,
+        sourceId: project.sourceId || `project:${index}`,
+        name,
+        url,
+        originalBullets,
+        originalBulletEvidence,
+        skills,
+        skillEvidence,
+      }];
+    });
   }
 
   // The locked skeleton is only as trustworthy as the CV parse, and real
@@ -2379,30 +2414,38 @@ Do not add anything new. Return the complete corrected CV.`;
     const collected = [];
     if (raw) {
       const lines = raw.split('\n');
+      let passedHeading = false;
       for (let i = 1; i < Math.min(lines.length, 12); i++) {
         const trimmed = String(lines[i] || '').trim();
         if (!trimmed) continue;
-        if (this._isLikelySectionHeader(trimmed)) break;
+        if (this._isLikelySectionHeader(trimmed)) { passedHeading = true; continue; }
         const contactish =
           /[\w.+-]+@[\w-]+\.\w+/.test(trimmed) ||
           /https?:\/\//i.test(trimmed) ||
           /(?:linkedin|github)\.com/i.test(trimmed) ||
-          /(?:\+?\d[\d\s\-.()]{6,})/.test(trimmed) ||
-          (trimmed.length <= 60 && /,/.test(trimmed) && !/\b(engineer|developer|manager|architect|analyst|designer|consultant)\b/i.test(trimmed));
+          (/(?:\+?\d[\d\s\-.()]{6,})/.test(trimmed) && !/\b(?:19|20)\d{2}\b/.test(trimmed)) ||
+          (!passedHeading && trimmed.length <= 60 && /,/.test(trimmed)
+            && /\b(?:UK|USA|United Kingdom|United States|Canada|Nigeria|Ghana|Ireland|Remote)\b/i.test(trimmed)
+            && !/\b(engineer|developer|manager|architect|analyst|designer|consultant)\b/i.test(trimmed));
         if (contactish) collected.push(trimmed);
       }
     }
-    if (collected.length > 0) return collected.slice(0, 6);
-
     const contactInfo = cvData?.contactInfo || {};
-    return [
+    const merged = [...collected, ...[
       contactInfo.email,
       contactInfo.phone,
       contactInfo.linkedin,
       contactInfo.github,
       contactInfo.website,
       contactInfo.portfolio,
-    ].map(v => String(v || '').trim()).filter(Boolean);
+      contactInfo.twitter,
+    ].map(v => String(v || '').trim()).filter(Boolean)];
+    const seen = new Set();
+    return merged.filter(value => {
+      if (value.length > 500 || /[.!?]\s/.test(value)) return false;
+      const key = value.toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '');
+      if (seen.has(key)) return false; seen.add(key); return true;
+    }).slice(0, 8);
   }
 
   // Education/certifications section verbatim from the original CV text.
@@ -2607,14 +2650,24 @@ Return the corrected JSON object now.`;
     const groundingContext = buildGroundingContext(cvData, { confirmedFacts: confirmedSkills });
     const summaryClaim = typeof content.summary === 'object' && !Array.isArray(content.summary) ? content.summary : null;
     const summarySourceIds = Array.isArray(summaryClaim?.sourceIds) ? summaryClaim.sourceIds.filter(id => typeof id === 'string') : [];
-    const summary = String(summaryClaim?.text || '').split(/(?<=[.!?])\s+/)
+    const acceptedSummary = String(summaryClaim?.text || '').split(/(?<=[.!?])\s+/)
       .map(sentence => this._clampInline(sentence, 600))
       .filter(sentence => sentence && isTextSupported(sentence, groundingContext, {
         sourceIds: summarySourceIds,
         requireSourceIds: true,
       }).supported)
       .join(' ');
-    const summaryEvidence = summary ? summarySourceIds.filter(id => groundingContext.sourceIndex[id]) : [];
+    const originalSummarySentences = String(cvData?.summary || '').split(/(?<=[.!?])\s+/).map(sentence => this._clampInline(sentence, 600)).filter(Boolean).slice(0, 4);
+    const acceptedSummarySentences = acceptedSummary.split(/(?<=[.!?])\s+/).filter(Boolean);
+    const summaryFellBelowSourceShape = originalSummarySentences.length > 1 && acceptedSummarySentences.length < 2;
+    const summary = summaryFellBelowSourceShape
+      ? this._clampInline(originalSummarySentences.join(' '), 1200)
+      : acceptedSummary;
+    const summaryEvidence = summary
+      ? summaryFellBelowSourceShape
+        ? ['summary:0'].filter(id => groundingContext.sourceIndex[id])
+        : summarySourceIds.filter(id => groundingContext.sourceIndex[id])
+      : [];
     const competencies = this._normaliseStructuredCompetencies(content.competencies, { matchMap, confirmedSkills, cvData, groundingContext });
 
     const suppliedById = new Map();
@@ -2848,6 +2901,17 @@ Return the corrected JSON object now.`;
         if (skel.title) lines.push(skel.title);
         if (role?.focus) lines.push(`Focus: ${role.focus}`);
         for (const bullet of (role?.bullets || [])) lines.push(`• ${bullet}`);
+        lines.push('');
+      }
+    }
+
+    if (Array.isArray(skeleton.projects) && skeleton.projects.length > 0) {
+      lines.push('PROJECTS');
+      for (const project of skeleton.projects) {
+        lines.push(project.name);
+        lines.push(project.url);
+        for (const bullet of (project.originalBullets || project.bullets || [])) lines.push(`• ${bullet}`);
+        if ((project.skills || []).length) lines.push(`Technologies: ${project.skills.join(', ')}`);
         lines.push('');
       }
     }

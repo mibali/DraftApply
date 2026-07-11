@@ -92,6 +92,28 @@ describe('deterministic grounding harness', () => {
     }).supported).toBe(false);
   });
 
+  it('indexes project evidence without allowing it to authorize a role bullet', () => {
+    const projectContext = buildGroundingContext({
+      projects: [{
+        name: 'PayCycle',
+        url: 'https://paycycle.example.test',
+        bullets: ['Built reliable recurring-payment APIs using Node.js and PostgreSQL.'],
+        skills: ['Node.js', 'PostgreSQL'],
+      }],
+    });
+    expect(projectContext.sourceIndex['project:0:bullet:0']).toMatchObject({ projectSourceId: 'project:0' });
+    expect(isTextSupported('Built reliable recurring-payment APIs using Node.js and PostgreSQL.', projectContext, {
+      sourceIds: ['project:0:bullet:0'],
+      allowedSourceIds: ['project:0:bullet:0'],
+      requireSourceIds: true,
+    }).supported).toBe(true);
+    expect(isTextSupported('Built reliable recurring-payment APIs using Node.js and PostgreSQL.', projectContext, {
+      sourceIds: ['project:0:bullet:0'],
+      allowedSourceIds: ['experience:0:responsibility:0'],
+      requireSourceIds: true,
+    }).supported).toBe(false);
+  });
+
   it('drops injection/audit content and backfills originals when every generated bullet is invalid', () => {
     const tailor = new CVTailor();
     const skeleton = tailor.buildCvSkeleton(groundingCv, {});

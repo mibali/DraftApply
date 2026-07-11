@@ -49,6 +49,12 @@ export function buildGroundingContext(cvData = {}, { confirmedFacts = [], target
       company: role.company || '', title: role.title || '', dates: role.dates || '',
     }));
   });
+  (cvData.projects || []).forEach((project, projectIndex) => {
+    const projectSourceId = project.sourceId || `project:${projectIndex}`;
+    add({ sourceId: projectSourceId, projectSourceId, projectIndex, type: 'project', text: `${project.name || ''} ${project.url || ''}`.trim(), name: project.name || '', url: project.url || '' });
+    (project.bullets || []).forEach((text, index) => add({ sourceId: project.bulletEvidence?.[index]?.sourceId || `${projectSourceId}:bullet:${index}`, projectSourceId, projectIndex, type: 'project_bullet', text }));
+    (project.skills || []).forEach((text, index) => add({ sourceId: project.skillEvidence?.[index]?.sourceId || `${projectSourceId}:skill:${index}`, projectSourceId, projectIndex, type: 'project_skill', text }));
+  });
   if (cvData.summary) add({ sourceId: 'summary:0', type: 'summary', text: cvData.summary });
   for (const [type, values] of [['skill', cvData.skills], ['achievement', cvData.achievements], ['certification', cvData.certifications]]) {
     (values || []).forEach((text, index) => add({ sourceId: `${type}:${index}`, type, text }));

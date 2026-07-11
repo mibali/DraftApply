@@ -556,12 +556,20 @@ DevOps Engineer
         roles: [
           { id: 'role_0', company: 'Semgrep | USA', dates: 'Feb 2024 - Jun 2025', title: 'Senior Customer Success Engineer', originalBullets: [] },
         ],
+        projects: [{
+          id: 'project_0',
+          name: 'PayCycle <Platform>',
+          url: 'https://paycycle.example.test',
+          originalBullets: ['Built reliable recurring-payment APIs.'],
+          skills: ['Node.js', 'PostgreSQL'],
+        }],
         educationLines: ['BSc Information Technology, University of Cape Coast, 2018'],
       },
       content: {
         summary: 'Cloud and MLOps engineer.',
         competencies: [{ label: 'Cloud', items: ['AWS', 'Kubernetes'] }],
         roles: [{ id: 'role_0', focus: 'Security platform reliability', bullets: ['Resolved complex Tier 3/4 security platform issues.'] }],
+        projects: [{ id: 'project_0', name: 'Fabricated Project', bullets: ['Invented 900% growth.'] }],
       },
     });
 
@@ -573,6 +581,14 @@ DevOps Engineer
     expect(html).toContain('<p class="cv-role-focus">Focus: Security platform reliability</p>');
     expect(html).toContain('<li>Resolved complex Tier 3/4 security platform issues.</li>');
     expect(html).toContain('<strong>Cloud:</strong> AWS, Kubernetes');
+    expect(html).toContain('<h2 class="cv-section-header">Projects</h2>');
+    expect(html).toContain('PayCycle &lt;Platform&gt;');
+    expect(html).toContain('<a href="https://paycycle.example.test"');
+    expect(html).toContain('<li>Built reliable recurring-payment APIs.</li>');
+    expect(html).toContain('<strong>Technologies:</strong> Node.js, PostgreSQL');
+    expect(html.indexOf('Projects</h2>')).toBeLessThan(html.indexOf('Education, Certifications'));
+    expect(html).not.toContain('Fabricated Project');
+    expect(html).not.toContain('900%');
     expect(html).toContain('Education, Certifications &amp; Recognition');
   });
 

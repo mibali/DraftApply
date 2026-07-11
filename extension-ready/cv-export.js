@@ -107,6 +107,23 @@ function formatStructuredCvToHtml(structuredCv, linkAnnotations = []) {
     }
   }
 
+  if (Array.isArray(skeleton.projects) && skeleton.projects.length > 0) {
+    html += '<h2 class="cv-section-header">Projects</h2>';
+    for (const project of skeleton.projects) {
+      html += '<div class="cv-entry">';
+      if (project.name) html += `<p class="cv-job-title">${esc(String(project.name))}</p>`;
+      if (project.url) html += `<p class="cv-body">${renderInline(String(project.url), linkAnnotations)}</p>`;
+      const bullets = Array.isArray(project.originalBullets) ? project.originalBullets : project.bullets;
+      if (Array.isArray(bullets) && bullets.length) {
+        html += '<ul class="cv-bullets">';
+        for (const bullet of bullets) html += `<li>${renderInline(String(bullet), linkAnnotations)}</li>`;
+        html += '</ul>';
+      }
+      if (Array.isArray(project.skills) && project.skills.length) html += `<p class="cv-skill-row"><strong>Technologies:</strong> ${project.skills.map(value => esc(String(value))).join(', ')}</p>`;
+      html += '</div>';
+    }
+  }
+
   if (Array.isArray(skeleton.educationLines) && skeleton.educationLines.length > 0) {
     html += '<h2 class="cv-section-header">Education, Certifications &amp; Recognition</h2>';
     html += '<ul class="cv-bullets">';

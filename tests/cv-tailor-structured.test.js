@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CVTailor } from '../shared/cv-tailor.js';
+import { CVParser } from '../shared/cv-parser.js';
+import { MULTICOLUMN_CV_TEXT } from './fixtures/multicolumn-cv.js';
 
 const tailor = new CVTailor();
 
@@ -459,6 +461,7 @@ describe('renderTailoredCV', () => {
       'mtb@example.com',
       '07401731548',
       'Birmingham, UK',
+      'linkedin.com/in/michael-bali',
       '',
       'PROFESSIONAL SUMMARY',
       'Cloud, platform, and MLOps engineer targeting ML platform work.',
@@ -501,6 +504,57 @@ describe('renderTailoredCV', () => {
     expect(text).not.toContain('CORE COMPETENCIES');
     expect(text).not.toContain('EDUCATION');
     expect(text).toContain('PROFESSIONAL EXPERIENCE');
+  });
+});
+
+describe('locked projects in the structured CV harness', () => {
+  const parsed = new CVParser().parse(MULTICOLUMN_CV_TEXT);
+  const target = { jobTitle: 'Senior Developer Support Engineer', company: 'Example Cloud' };
+  const skeleton = tailor.buildCvSkeleton(parsed, target);
+
+  it('preserves parsed projects and globally recovered contacts outside model control', () => {
+    expect(skeleton.contacts).toEqual(expect.arrayContaining([
+      'alex@example.test',
+      'https://www.linkedin.com/in/alex-morgan/',
+      'https://alex.example.test',
+    ]));
+    expect(skeleton.contacts.join(' ')).not.toContain('deep experience');
+    expect(skeleton.projects.map(project => project.name)).toEqual(['SprintBoard', 'PayCycle']);
+    expect(skeleton.projects[0]).toMatchObject({
+      url: 'https://sprintboard.example.test',
+      skills: expect.arrayContaining(['Django', 'WebSockets']),
+    });
+    expect(skeleton.projects[0].originalBullets[1]).toContain('Django Channels');
+    expect(skeleton.projects[0].originalBulletEvidence[0].sourceIds[0]).toMatch(/^project:0:bullet:/);
+    for (const project of skeleton.projects) {
+      for (const item of project.skillEvidence) {
+        expect(parsed.sourceIndex[item.sourceIds[0]]?.text).toBe(item.text);
+      }
+    }
+    expect(skeleton.roles.flatMap(role => role.allowedSourceIds).some(id => id.startsWith('project:'))).toBe(false);
+  });
+
+  it('ignores model-supplied projects and always renders locked project evidence', () => {
+    const content = tailor.validateStructuredContent({
+      summary: { text: parsed.summary, sourceIds: ['summary:0'] },
+      competencies: [],
+      roles: skeleton.roles.map(role => ({ id: role.id, focus: null, bullets: [] })),
+      projects: [{ id: 'project_0', name: 'Fabricated Project', bullets: ['Invented revenue by 900%.'] }],
+    }, skeleton, { cvData: parsed });
+    expect(content).not.toHaveProperty('projects');
+    const rendered = tailor.renderTailoredCV(skeleton, content);
+    expect(rendered).toContain('Support engineer with deep experience diagnosing API integrations');
+    expect(rendered).toContain('Works closely with Engineering and Product');
+    expect(rendered).toContain('PROJECTS\nSprintBoard\nhttps://sprintboard.example.test');
+    expect(rendered).toContain('Technologies: Django, WebSockets, Django Channels, PostgreSQL');
+    expect(rendered).toContain('PayCycle');
+    expect(rendered).not.toContain('Fabricated Project');
+    expect(rendered).not.toContain('900%');
+
+    const reparsed = new CVParser().parse(rendered);
+    expect(reparsed.experience.map(role => role.company)).toEqual(parsed.experience.map(role => role.company));
+    expect(reparsed.projects.map(project => project.name)).toEqual(['SprintBoard', 'PayCycle']);
+    expect(reparsed.projects[0].bullets).toContain('Developed Django REST APIs and real-time updates using WebSockets and Django Channels.');
   });
 });
 
