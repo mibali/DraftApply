@@ -19,6 +19,7 @@
     "test:coverage": "vitest run --coverage",
     "verify:architecture": "node scripts/verify-stage-architecture.js",
     "eval:evidence-retrieval": "node scripts/eval-evidence-retrieval.js",
+    "eval:cv-quality": "node scripts/eval-cv-quality.js",
     "build:extension": "node scripts/build-extension.js",
     "release:validate": "node scripts/validate-release.js",
     "release:chrome": "node scripts/chrome-release.js",

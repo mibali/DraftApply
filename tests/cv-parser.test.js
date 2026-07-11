@@ -367,3 +367,12 @@ BSc Computer Science`);
     expect(exp.title).not.toMatch(/and communicating/);
   });
 });
+
+describe('CVParser nonstandard bullet markers', () => {
+  it('accepts double-angle extraction bullets without stripping comparison operators', () => {
+    const parser = new CVParser();
+    expect(parser._cleanBullet('>> Automated Kubernetes deployments.')).toBe('Automated Kubernetes deployments.');
+    expect(parser._cleanBullet('>= 99.9% availability target')).toBe('');
+    expect(parser._cleanBullet('>5 years operating distributed systems')).toBe('');
+  });
+});

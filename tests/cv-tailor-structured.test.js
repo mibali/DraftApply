@@ -331,6 +331,20 @@ describe('validateStructuredContent', () => {
     expect(allItems).not.toContain('QuantumFabricator 9000');
   });
 
+  it('maps model-authored competency labels to application-owned display labels', () => {
+    const content = tailor.validateStructuredContent({
+      summary: 'Engineer.',
+      competencies: [{
+        label: 'Fabricated Employer with Secret Clearance',
+        items: [{ text: 'Terraform', sourceIds: ['skill:0'] }],
+      }],
+      roles: [],
+    }, skeleton, opts);
+    expect(content.competencies).toEqual([{ label: 'Relevant Skills', items: ['Terraform'] }]);
+    expect(JSON.stringify(content)).not.toContain('Fabricated Employer');
+    expect(JSON.stringify(content)).not.toContain('Secret Clearance');
+  });
+
   it('always includes user-confirmed skills even when the model omitted them', () => {
     const content = tailor.validateStructuredContent({
       summary: 'Engineer.',

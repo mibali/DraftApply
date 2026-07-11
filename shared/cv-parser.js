@@ -333,9 +333,11 @@ export class CVParser {
     // Lookahead: stop at next section header OR end-of-string.
     // The $ is placed outside the \n\s* group so that end-of-string is matched
     // without requiring a trailing newline (common in uploaded CV files).
+    const exactSkillHeadings = ['CORE COMPETENCY', 'CORE COMPETENCIES', 'TECHNICAL SKILLS', 'SKILLS', 'TECHNOLOGIES', 'EXPERTISE'];
+    const wantedSkillHeadings = new Set(exactSkillHeadings);
     const hasExactSkillsSection = String(text || '').split('\n')
-      .some(line => /^(?:TECHNICAL SKILLS|SKILLS)\s*:?$/i.test(line.trim()));
-    const exactSkillsSection = hasExactSkillsSection ? this._extractExactSection(text, ['TECHNICAL SKILLS', 'SKILLS']) : '';
+      .some(line => wantedSkillHeadings.has(line.trim().replace(/:$/, '').trim().toUpperCase()));
+    const exactSkillsSection = hasExactSkillsSection ? this._extractExactSection(text, exactSkillHeadings) : '';
     const skillsSection = hasExactSkillsSection
       ? [null, exactSkillsSection]
       : text.match(/(?:skills|technologies|competencies|expertise)[:\s]*\n([\s\S]*?)(?=\n\s*(?:experience|education|certifications|projects)|$)/i);
@@ -407,7 +409,7 @@ export class CVParser {
     };
     for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
       const line = lines[lineIndex];
-      const header = line.match(/^\d{1,2}\s*(?:\.\)|[.)])\s+(.+?)\s*\(((?:https?:\/\/)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[^\s)]*)?)\)\s*$/i);
+      const header = line.match(/^(?:\d{1,2}\s*(?:\.\)|[.)])\s+)?(.+?)\s*\(((?:https?:\/\/)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[^\s)]*)?)\)\s*$/i);
       const canonicalUrl = String(lines[lineIndex + 1] || '').match(/^https?:\/\/\S+$/i)?.[0];
       if (header) {
         flush();
@@ -706,7 +708,7 @@ export class CVParser {
   }
 
   _cleanBullet(line) {
-    const match = String(line || '').match(/^\s*(?:[•●▪*]|\-\s+|\d+[.)])\s*(.+)$/);
+    const match = String(line || '').match(/^\s*(?:[•●▪*]|>>\s+|\-\s+|\d+[.)])\s*(.+)$/);
     return match ? match[1].trim() : '';
   }
 

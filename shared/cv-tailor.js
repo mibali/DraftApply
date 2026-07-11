@@ -2798,14 +2798,26 @@ Return the corrected JSON object now.`;
 
   _normaliseStructuredCompetencies(raw, { confirmedSkills = [], groundingContext } = {}) {
     const PROSE_RE = /\b(using|with|within|experience|experienced|deep|strong|proficien\w*|expertise|knowledge|ability|abilities|years?|including|such as|hands.on)\b/i;
+    const safeLabels = new Map([
+      'Relevant Skills', 'Technical Skills', 'Professional Skills', 'Core Skills', 'Confirmed Skills',
+      'Cloud', 'Cloud Platforms', 'Cloud & Infrastructure', 'Infrastructure as Code', 'DevOps & Delivery',
+      'Programming', 'Programming & Automation', 'Software Engineering', 'Backend & APIs', 'Integration & APIs',
+      'Data & Analytics', 'Databases & Data', 'Data Quality & Validation', 'AI & Machine Learning', 'Research & Methods',
+      'Observability & Monitoring', 'Security', 'Customer Support', 'Customer Success', 'Stakeholder Engagement',
+      'Pre-Sales Execution', 'Solution Architecture', 'Project Delivery', 'Leadership', 'Communication',
+    ].map(label => [this._normaliseText(label), label]));
     const confirmed = this._uniqueDisplaySkills(confirmedSkills || []);
     const confirmedKeys = new Set(confirmed.map(s => this._normaliseText(s)));
 
     const categories = [];
     const globalKeys = new Set();
     for (const cat of (Array.isArray(raw) ? raw : [])) {
-      const label = this._clampInline(cat?.label, 48);
-      if (!label) continue;
+      const proposedLabel = this._clampInline(cat?.label, 48);
+      if (!proposedLabel) continue;
+      // Category labels are model-authored display text. Keep them within an
+      // application-owned vocabulary so a model cannot smuggle an employer,
+      // credential, instruction, or other unsupported claim into a heading.
+      const label = safeLabels.get(this._normaliseText(proposedLabel)) || 'Relevant Skills';
       const items = [];
       for (const rawItem of (Array.isArray(cat?.items) ? cat.items : [])) {
         const claim = rawItem && typeof rawItem === 'object' ? rawItem : null;
@@ -2824,7 +2836,11 @@ Return the corrected JSON object now.`;
         items.push(item);
       }
       const deduped = this._dedupeContainedSkillItems(items);
-      if (deduped.length >= 1) categories.push({ label, items: deduped.slice(0, 8) });
+      if (deduped.length >= 1) {
+        const existing = categories.find(category => category.label === label);
+        if (existing) existing.items = this._dedupeContainedSkillItems([...existing.items, ...deduped]).slice(0, 8);
+        else categories.push({ label, items: deduped.slice(0, 8) });
+      }
       if (categories.length >= 6) break;
     }
 
