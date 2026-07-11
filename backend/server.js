@@ -4,7 +4,7 @@
  * Supports multiple FREE LLM providers:
  * 
  * CLOUD (free tiers):
- * - Groq (default — fast & generous)
+ * - Groq
  * - Google Gemini
  * - Mistral
  * - Together AI
@@ -45,9 +45,10 @@ const __dirname = dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const HOST = process.env.HOST || '127.0.0.1';
 
-// Get current provider configuration — default is Groq
-const PROVIDER_NAME = process.env.LLM_PROVIDER || 'groq';
+// Offline-first default. Select a cloud provider explicitly with LLM_PROVIDER.
+const PROVIDER_NAME = process.env.LLM_PROVIDER || 'ollama';
 const PROVIDER_CONFIG = getProviderConfig(PROVIDER_NAME, process.env);
 
 // Build fallback chain for reliability
@@ -689,8 +690,11 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: err.message || 'Internal server error' });
 });
 
-app.listen(PORT, () => {
-  console.log(`\nDraftApply server running on http://localhost:${PORT}`);
+app.listen(PORT, HOST, () => {
+  console.log(`\nDraftApply local web app running on http://${HOST}:${PORT}`);
+  if (HOST !== '127.0.0.1' && HOST !== 'localhost' && HOST !== '::1') {
+    console.warn('WARNING: This development server is not hardened for the public Internet.');
+  }
   console.log(`\nUsing: ${PROVIDER_CONFIG.name} (${PROVIDER_CONFIG.model})`);
   console.log(`Type: ${PROVIDERS[PROVIDER_NAME].type === 'local' ? 'Local (no API key)' : 'Cloud'}`);
   console.log(`\nAPI endpoints:`);

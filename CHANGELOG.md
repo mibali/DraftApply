@@ -8,6 +8,9 @@ must match the release tag.
 
 ## [Unreleased]
 
+- Clarified privacy responsibilities across official, self-hosted, local, Groq, and OpenRouter routes.
+- Made the local web app default to Ollama and trusted-loopback binding (`127.0.0.1`).
+
 ## [2.4.0] - 2026-05-21
 
 - Added a role-profile career-positioning engine so CV tailoring and answer generation reason about role credibility, not only keyword overlap.

@@ -14,16 +14,19 @@
     "test": "npm run test:static && npm run test:unit",
     "test:static": "npm run verify:architecture && npm run validate:domain-packs && npm run release:validate",
     "test:unit": "vitest run",
+    "test:browser": "playwright test",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "verify:architecture": "node scripts/verify-stage-architecture.js",
     "eval:evidence-retrieval": "node scripts/eval-evidence-retrieval.js",
+    "build:extension": "node scripts/build-extension.js",
     "release:validate": "node scripts/validate-release.js",
     "release:chrome": "node scripts/chrome-release.js",
     "release:chrome:upload": "node scripts/chrome-release.js --upload",
     "release:chrome:publish": "node scripts/chrome-release.js --publish"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "vitest": "^2.1.0"
   },
   "keywords": [

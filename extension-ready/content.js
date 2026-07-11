@@ -31,6 +31,10 @@ class DraftApplyExtension {
     this._contextRefreshTimer = null;
     this._pageContextKey = null;
     this._lastChunkTime = 0; // epoch ms; updated on each STREAM_CHUNK for watchdog
+    this.answerValidation = null;
+    this.answerValidationRequestId = null;
+    this.answerUserEdited = false;
+    this.reviewAcknowledged = false;
 
     this.init();
   }
@@ -325,7 +329,7 @@ class DraftApplyExtension {
           <div class="da-modal-actions-row">
             <button class="da-btn da-btn-regenerate" id="da-btn-regenerate">Regenerate</button>
             <button class="da-btn da-btn-copy" id="da-btn-copy">Copy</button>
-            <button class="da-btn da-btn-insert" id="da-btn-insert">Insert Answer</button>
+            <button class="da-btn da-btn-insert" id="da-btn-insert" disabled>Insert Answer</button>
           </div>
         </div>
         <div class="da-loading" id="da-loading" hidden role="status" aria-label="Generating answer">
@@ -380,6 +384,17 @@ class DraftApplyExtension {
 
     // Live character counter — only active when field has a maxLength
     modal.querySelector('#da-answer-output').addEventListener('input', () => {
+      if (this.answerValidation) {
+        this.answerUserEdited = true;
+        this.answerValidation = null;
+        this.reviewAcknowledged = false;
+        this.lastAnswer = null;
+        const insertButton = this.modal?.querySelector?.('#da-btn-insert');
+        if (insertButton) {
+          insertButton.disabled = true;
+          insertButton.textContent = 'Regenerate to Validate';
+        }
+      }
       this._updateCharCounter();
     });
     
@@ -571,26 +586,22 @@ class DraftApplyExtension {
       }
 
       if (message.type === 'STREAM_CHUNK') {
-        if (this.currentRequestId === message.requestId) {
-          this._lastChunkTime = Date.now(); // keep watchdog alive
-          const output = this.modal?.querySelector?.('#da-answer-output');
-          if (output) {
-            // Hide loading overlay on first chunk so text is visible as it streams
-            const loading = this.modal?.querySelector?.('#da-loading');
-            if (loading && !loading.hidden) loading.hidden = true;
-            output.value += message.chunk;
-            output.scrollTop = output.scrollHeight;
-          }
-        }
+        // Capability-v2 providers never expose unvalidated answer deltas.
         return;
       }
 
       if (message.type === 'STREAM_META') {
         if (this.currentRequestId === message.requestId) {
+          this._lastChunkTime = Date.now();
           this.renderModelBadge(message);
           this._showFallbackNotice(message);
           this.renderAgentInsights(message.agentInsights || message);
         }
+        return;
+      }
+
+      if (message.type === 'STREAM_PROGRESS') {
+        if (this.currentRequestId === message.requestId) this._lastChunkTime = Date.now();
         return;
       }
 
@@ -600,6 +611,18 @@ class DraftApplyExtension {
           resolver.resolve();
           this._streamResolvers.delete(message.requestId);
         }
+        return;
+      }
+
+      if (message.type === 'STREAM_FINAL') {
+        if (this.currentRequestId !== message.requestId) return;
+        this._lastChunkTime = Date.now();
+        const output = this.modal?.querySelector?.('#da-answer-output');
+        if (output && typeof message.answer === 'string') output.value = message.answer;
+        this._setAnswerValidation(message.validation, message.requestId);
+        this.renderModelBadge(message);
+        this.renderAgentInsights(message.pipelineInsights || message.agentInsights || message);
+        this._updateCharCounter();
         return;
       }
 
@@ -690,14 +713,14 @@ class DraftApplyExtension {
           // fallback for React re-renders that replaced the DOM element.
           const cacheKey = this.answerCacheKey(question);
           const cached = this._prefetchCache.get(field);
-          const cachedAnswer = (cached?.status === 'ready' && cached.question === question && cached.cacheKey === cacheKey)
-            ? cached.answer
+          const cachedResult = (cached?.status === 'ready' && cached.question === question && cached.cacheKey === cacheKey)
+            ? cached.result
             : this._prefetchByQuestion.get(cacheKey);
-          if (cachedAnswer) {
+          if (cachedResult?.answer) {
             this.showModal(question);
             const output = this.modal.querySelector('#da-answer-output');
-            output.value = cachedAnswer;
-            this.lastAnswer = cachedAnswer;
+            output.value = cachedResult.answer;
+            this._setAnswerValidation(cachedResult.validation, null);
             this.lastQuestion = question;
             // Remove ready indicator from button
             btn.classList.remove('da-btn-ready');
@@ -1092,7 +1115,7 @@ class DraftApplyExtension {
       maxChars:       fieldMaxLen || undefined,
     };
 
-    const cacheEntry = { status: 'loading', question, cacheKey, answer: null };
+    const cacheEntry = { status: 'loading', question, cacheKey, result: null };
     this._prefetchCache.set(field, cacheEntry);
     if (btn?.isConnected) btn.classList.add('da-btn-prefetching');
 
@@ -1103,12 +1126,13 @@ class DraftApplyExtension {
         if (btn?.isConnected) btn.classList.remove('da-btn-prefetching', 'da-btn-ready');
         return;
       }
-      cacheEntry.answer = result?.answer || result?.text || result?.content || null;
-      cacheEntry.status = cacheEntry.answer ? 'ready' : 'error';
+      const answer = result?.answer || result?.text || result?.content || null;
+      cacheEntry.result = answer ? { ...result, answer } : null;
+      cacheEntry.status = answer && ['pass', 'review'].includes(result?.validation?.status) ? 'ready' : 'error';
       // Also store by question string so re-rendered React fields can still hit the cache.
       // Cap at 20 entries (LRU-evict oldest) to prevent unbounded memory growth.
-      if (cacheEntry.answer) {
-        this._prefetchByQuestion.set(cacheKey, cacheEntry.answer);
+      if (cacheEntry.status === 'ready') {
+        this._prefetchByQuestion.set(cacheKey, cacheEntry.result);
         if (this._prefetchByQuestion.size > 20) {
           this._prefetchByQuestion.delete(this._prefetchByQuestion.keys().next().value);
         }
@@ -1214,6 +1238,7 @@ class DraftApplyExtension {
     loading.hidden = false;
     stopBtn.disabled = false;
     output.value = '';
+    this._setAnswerValidation(null, null);
     this.renderAgentInsights(null);
     this.renderModelBadge(null);
     if (statusEl) statusEl.textContent = 'Generating answer...';
@@ -1294,8 +1319,8 @@ class DraftApplyExtension {
         });
         if (this.currentRequestId !== requestId) return;
         if (fallback?.answer) {
-          output.value = this._applyCharLimit(fallback.answer);
-          this.lastAnswer = output.value;
+          output.value = fallback.answer;
+          this._setAnswerValidation(fallback.validation, requestId);
           this._updateCharCounter();
           this._showFallbackNotice(fallback);
           this.renderModelBadge(fallback);
@@ -1336,9 +1361,7 @@ class DraftApplyExtension {
       if (this.currentRequestId !== requestId) return; // Stale — newer request took over
 
       const answer = output.value.trim();
-      if (answer) {
-        output.value = this._applyCharLimit(answer);
-        this.lastAnswer = output.value;
+      if (answer && this.answerValidation) {
         this._updateCharCounter();
       } else {
         // No chunks received — proxy may not support SSE or buffered the response.
@@ -1352,8 +1375,8 @@ class DraftApplyExtension {
         if (this.currentRequestId !== requestId) return; // cancelled while falling back
 
         if (fallback?.answer) {
-          output.value = this._applyCharLimit(fallback.answer);
-          this.lastAnswer = output.value;
+          output.value = fallback.answer;
+          this._setAnswerValidation(fallback.validation, requestId);
           this._updateCharCounter();
           this._showFallbackNotice(fallback);
           this.renderModelBadge(fallback);
@@ -1448,9 +1471,10 @@ class DraftApplyExtension {
     if (!box) return;
 
     const workflow = insights?.workflow;
-    const chain = Array.isArray(insights?.agentChain)
-      ? insights.agentChain
-      : String(insights?.agentChain || '').split('>').map(item => item.trim()).filter(Boolean);
+    const stagesValue = insights?.pipelineStages || insights?.agentChain;
+    const chain = Array.isArray(stagesValue)
+      ? stagesValue
+      : String(stagesValue || '').split('>').map(item => item.trim()).filter(Boolean);
     const evidence = Array.isArray(insights?.evidence) ? insights.evidence : [];
     const matched = Array.isArray(insights?.matchedRequirements) ? insights.matchedRequirements : [];
     const truth = insights?.truthfulness;
@@ -1466,7 +1490,7 @@ class DraftApplyExtension {
     const title = workflow === 'applicationAnswer' ? 'Answer workflow' : 'DraftApply workflow';
     const meta = [
       insights?.questionType ? this.escapeHtml(insights.questionType.replace(/_/g, ' ')) : null,
-      chain.length ? `${chain.length} agents` : null,
+      chain.length ? `${chain.length} stages` : null,
     ].filter(Boolean).join(' · ');
 
     parts.push(`<div class="da-agent-title"><span>${title}</span>${meta ? `<small>${meta}</small>` : ''}</div>`);
@@ -1525,7 +1549,7 @@ class DraftApplyExtension {
     if (truth) {
       parts.push(`
         <div class="da-agent-trust">
-          Truthfulness guard: ${Number(truth.allowedCount || 0)} supported claim${Number(truth.allowedCount || 0) === 1 ? '' : 's'}, ${Number(truth.unsupportedCount || 0)} unsupported requirement${Number(truth.unsupportedCount || 0) === 1 ? '' : 's'} held back.
+          Input grounding: ${Number(truth.allowedCount || 0)} supported claim${Number(truth.allowedCount || 0) === 1 ? '' : 's'}, ${Number(truth.unsupportedCount || 0)} unsupported requirement${Number(truth.unsupportedCount || 0) === 1 ? '' : 's'} excluded from prompt evidence.
         </div>`);
     }
 
@@ -1760,6 +1784,16 @@ class DraftApplyExtension {
     const answerToInsert = current || this.lastAnswer;
     const insertBtn = this.modal?.querySelector?.('#da-btn-insert');
 
+    if (!this.answerValidation || this.answerUserEdited || answerToInsert !== this.validatedAnswer || this.answerValidation.status === 'block') {
+      this.showNotification('This answer is not grounded and cannot be inserted. You can edit, copy, or regenerate it.', 'error');
+      return;
+    }
+    if (this.answerValidation.status === 'review' && !this.reviewAcknowledged) {
+      const acknowledged = window.confirm('This answer contains facts DraftApply could not verify. Review it carefully. Insert anyway?');
+      if (!acknowledged) return;
+      this.reviewAcknowledged = true;
+    }
+
     if (!answerToInsert) {
       this.showNotification('No answer to insert yet.', 'error');
       return;
@@ -1819,6 +1853,26 @@ class DraftApplyExtension {
     } finally {
       if (insertBtn) insertBtn.disabled = false;
     }
+  }
+
+  _setAnswerValidation(validation, requestId) {
+    if (requestId && this.currentRequestId && requestId !== this.currentRequestId) return;
+    this.answerValidation = validation || null;
+    this.validatedAnswer = validation
+      ? String(this.modal?.querySelector?.('#da-answer-output')?.value || '').trim()
+      : null;
+    this.answerValidationRequestId = requestId;
+    this.answerUserEdited = false;
+    this.reviewAcknowledged = false;
+    const button = this.modal?.querySelector?.('#da-btn-insert');
+    if (!button) return;
+    const status = validation?.status;
+    const hasAnswer = Boolean(this.modal?.querySelector?.('#da-answer-output')?.value?.trim());
+    button.disabled = !hasAnswer || !['pass', 'review'].includes(status);
+    button.textContent = status === 'review' ? 'Review & Insert' : status === 'block' ? 'Insertion Blocked' : 'Insert Answer';
+    this.lastAnswer = status === 'pass' || status === 'review'
+      ? String(this.modal?.querySelector?.('#da-answer-output')?.value || '')
+      : null;
   }
 
   async copyToClipboard() {

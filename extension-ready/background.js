@@ -12,6 +12,8 @@
  * - CV stored locally in chrome.storage
  */
 
+import { PROXY_URL } from './build-config.js';
+
 const pendingRequests = new Map(); // requestId -> AbortController
 
 function rateLimitError(response) {
@@ -74,7 +76,6 @@ async function responseErrorMessage(response, fallback = `Error ${response?.stat
   return fallback;
 }
 
-const DEFAULT_PROXY_URL = 'https://draftapply.onrender.com';
 const TAILOR_JOB_KEY = 'tailorCvJob';
 const TRANSIENT_TAILOR_STORAGE_KEYS = [
   'tailorCvDraft',
@@ -98,7 +99,7 @@ async function setTailorJobIfCurrent(jobId, nextState) {
 }
 
 async function getProxyUrl() {
-  return DEFAULT_PROXY_URL;
+  return PROXY_URL;
 }
 
 async function getInstallToken() {
@@ -339,7 +340,7 @@ const KEEPALIVE_PERIOD_MINUTES = 14;
 
 async function pingProxyHealth() {
   try {
-    await fetch(`${DEFAULT_PROXY_URL}/api/health`, { method: 'GET' });
+    await fetch(`${PROXY_URL}/api/health`, { method: 'GET' });
   } catch (_) {
     // Network error during ping is expected when offline — ignore silently.
   }
@@ -493,8 +494,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // Returns the cached/refreshed install token via the shared ensureInstallToken path.
     // Popup uses this for CV upload so we don't mint a fresh token on every file.
     getProxyUrl()
-      .then(proxyUrl => ensureInstallToken(proxyUrl))
-      .then(token => sendResponse({ token, proxyUrl: DEFAULT_PROXY_URL }))
+      .then(async proxyUrl => ({ token: await ensureInstallToken(proxyUrl), proxyUrl }))
+      .then(sendResponse)
       .catch(err => sendResponse({ error: err.message }));
     return true;
   }
@@ -969,9 +970,35 @@ async function handleStreamingAPICall(payload, requestId, tabId, frameId) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-
-    const sendChunk = (chunk) => {
-      chrome.tabs.sendMessage(tabId, { type: 'STREAM_CHUNK', requestId: effectiveRequestId, chunk }, { frameId }).catch(() => {});
+    let receivedFinal = false;
+    let receivedError = false;
+    const consumeEvent = (event) => {
+      const data = event.split(/\r?\n/)
+        .filter(line => line.startsWith('data:'))
+        .map(line => line.slice(5).trimStart()).join('\n').trim();
+      if (!data || data === '[DONE]') return;
+      try {
+        const json = JSON.parse(data);
+        if (json.draftapplyMeta) {
+          chrome.tabs.sendMessage(tabId, { type: 'STREAM_META', requestId: effectiveRequestId, ...json.draftapplyMeta }, { frameId }).catch(() => {});
+          return;
+        }
+        if (json.draftapplyFinal) {
+          receivedFinal = true;
+          chrome.tabs.sendMessage(tabId, { type: 'STREAM_FINAL', requestId: effectiveRequestId, ...json.draftapplyFinal }, { frameId }).catch(() => {});
+          return;
+        }
+        if (json.draftapplyError) {
+          receivedError = true;
+          chrome.tabs.sendMessage(tabId, {
+            type: 'STREAM_ERROR', requestId: effectiveRequestId,
+            error: json.draftapplyError.error || 'Answer generation failed.',
+            code: json.draftapplyError.code,
+          }, { frameId }).catch(() => {});
+        }
+        // Provider deltas are deliberately ignored: only the validated final
+        // event is usable application-answer output.
+      } catch (_) { /* malformed or incomplete provider event */ }
     };
 
     while (true) {
@@ -979,39 +1006,21 @@ async function handleStreamingAPICall(payload, requestId, tabId, frameId) {
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop(); // keep last incomplete line
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const data = line.slice(6).trim();
-        if (data === '[DONE]') continue;
-        try {
-          const json = JSON.parse(data);
-          if (json.draftapplyMeta) {
-            chrome.tabs.sendMessage(tabId, {
-              type: 'STREAM_META',
-              requestId: effectiveRequestId,
-              ...json.draftapplyMeta
-            }, { frameId }).catch(() => {});
-            continue;
-          }
-          if (json.model || json.openrouter_metadata) {
-            chrome.tabs.sendMessage(tabId, {
-              type: 'STREAM_META',
-              requestId: effectiveRequestId,
-              model: json.model || undefined,
-              openRouterMetadata: json.openrouter_metadata || undefined
-            }, { frameId }).catch(() => {});
-          }
-          // OpenAI-compatible format
-          const chunk = json.choices?.[0]?.delta?.content;
-          if (chunk) sendChunk(chunk);
-        } catch (e) {
-          // Non-JSON line — skip
-        }
-      }
+      chrome.tabs.sendMessage(tabId, {
+        type: 'STREAM_PROGRESS', requestId: effectiveRequestId,
+      }, { frameId }).catch(() => {});
+      const events = buffer.split(/\r?\n\r?\n/);
+      buffer = events.pop() || '';
+      events.forEach(consumeEvent);
     }
+    buffer += decoder.decode(); // flush a split UTF-8 sequence
+    if (buffer.trim()) consumeEvent(buffer); // final unterminated event
+
+    if (!receivedFinal && !receivedError) chrome.tabs.sendMessage(tabId, {
+      type: 'STREAM_FINAL', requestId: effectiveRequestId,
+      validation: { status: 'review', violations: [{ code: 'missing_final_event', severity: 'review' }] },
+      legacyUnvalidated: true,
+    }, { frameId }).catch(() => {});
 
     chrome.tabs.sendMessage(tabId, { type: 'STREAM_DONE', requestId: effectiveRequestId }, { frameId }).catch(() => {});
 

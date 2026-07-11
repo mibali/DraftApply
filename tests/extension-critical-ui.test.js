@@ -69,7 +69,7 @@ describe('extension critical modal behavior', () => {
     expect(contentJs).toContain('answerCacheKey(question');
     expect(contentJs).toContain('cached.question === question && cached.cacheKey === cacheKey');
     expect(contentJs).toContain('this._prefetchByQuestion.get(cacheKey)');
-    expect(contentJs).toContain('this._prefetchByQuestion.set(cacheKey, cacheEntry.answer)');
+    expect(contentJs).toContain('this._prefetchByQuestion.set(cacheKey, cacheEntry.result)');
     expect(contentJs).toContain("cacheEntry.status = 'stale'");
   });
 
@@ -133,9 +133,22 @@ describe('extension critical modal behavior', () => {
   it('buffers SSE stream fragments across network chunk boundaries', () => {
     expect(backgroundJs).toContain("let buffer = ''");
     expect(backgroundJs).toContain("buffer += decoder.decode(value, { stream: true })");
-    expect(backgroundJs).toContain("const lines = buffer.split('\\n')");
-    expect(backgroundJs).toContain('buffer = lines.pop()');
-    expect(backgroundJs).toContain('json.choices?.[0]?.delta?.content');
+    expect(backgroundJs).toContain('buffer.split(/\\r?\\n\\r?\\n/)');
+    expect(backgroundJs).toContain('buffer += decoder.decode()');
+    expect(backgroundJs).toContain('if (buffer.trim()) consumeEvent(buffer)');
+    expect(backgroundJs).toContain("type: 'STREAM_FINAL'");
+    expect(backgroundJs).toContain("type: 'STREAM_PROGRESS'");
+    expect(backgroundJs).not.toContain("type: 'STREAM_CHUNK', requestId: effectiveRequestId");
+  });
+
+  it('keeps insertion disabled until a request-scoped final validation arrives', () => {
+    expect(contentJs).toContain('id="da-btn-insert" disabled');
+    expect(contentJs).toContain("if (message.type === 'STREAM_FINAL')");
+    expect(contentJs).toContain('if (this.currentRequestId !== message.requestId) return');
+    expect(contentJs).toContain("button.disabled = !hasAnswer || !['pass', 'review'].includes(status)");
+    expect(contentJs).toContain("this.answerValidation.status === 'block'");
+    expect(contentJs).toContain("this.answerValidation.status === 'review' && !this.reviewAcknowledged");
+    expect(contentJs).toContain('window.confirm(');
   });
 
   it('shows the exact OpenRouter model when answer generation falls back from Groq', () => {

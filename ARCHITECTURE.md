@@ -7,7 +7,7 @@ Chrome Extension
   -> Page Context Extractor
   -> Local CV Store
   -> Render Proxy
-     -> deterministic workflow agents
+     -> deterministic pipeline stages
      -> recipe prompt builder
      -> model router
      -> Groq primary / local model / OpenRouter fallback
@@ -15,15 +15,17 @@ Chrome Extension
 
 ## Runtime Boundaries
 
-- `extension-ready/` stores CV text in `chrome.storage.local`, extracts page context, displays generated output, and inserts text into form fields.
-- `render-proxy/` authenticates install tokens, applies rate limiting, parses CV/JD inputs, builds prompts, routes models, and returns generation metadata.
+- `extension-ready/` is the official extension source. Its checked-in `build-config.js` selects the official hosted proxy; it stores CV text in `chrome.storage.local`, extracts page context, displays generated output, and inserts text into form fields.
+- `render-proxy/` authenticates install tokens, applies rate limiting, parses CV/JD inputs, builds prompts, routes models, and returns generation metadata. Self-hosters deploy this service and use `scripts/build-extension.js --proxy-url=...` to generate a matching extension and host permission under `dist/` without modifying source or using a bundler.
 - `shared/` contains deterministic parsers, Tailor CV logic, workflow-agent helpers, and evidence-retrieval helpers.
 - `shared/domain-packs/` contains compact, versioned domain knowledge snapshots for regulated, credential-heavy, sparse, academic, trade, aviation, healthcare, legal, and portfolio-heavy roles.
-- `backend/` and `frontend/` are local development/offline app surfaces.
+- `backend/` and `frontend/` form a separate local development/offline web app. They are not a self-hosted extension backend and are not selected by extension build configuration.
 
-## Workflow Agents
+Thus there are three distinct distributions: the official Chrome extension plus official Render proxy, a generated self-hosted extension plus a compatible self-hosted `render-proxy`, and the independent local web app.
 
-The multi-agent design is implemented as deterministic workflow stages plus one-pass LLM orchestration. This keeps cost and latency controlled while still making evidence, gaps, and truthfulness visible.
+## Deterministic Generation Pipeline
+
+The named stages are ordinary deterministic modules, not autonomous agents. A model performs generation after input preparation; output is then validated.
 
 Application answers:
 
@@ -31,9 +33,10 @@ Application answers:
 Question Classifier
   -> CV Grounding
   -> Job Context Matcher
+  -> Input Grounding Report
   -> Answer Drafting Prompt
   -> Tone/Length Controls
-  -> Truthfulness Metadata
+  -> Final Answer Validation
   -> Final Answer
 ```
 
@@ -46,7 +49,8 @@ CV Parser + JD Parser
   -> Gap and Keyword Analysis
   -> CV Rewrite Prompt
   -> ATS Formatting Hints
-  -> Truthfulness Metadata
+  -> Input Grounding Report
+  -> Final Output Validation
   -> Tailored CV
 ```
 
@@ -67,8 +71,10 @@ Generated responses expose:
 
 - `qualityMode`: route reliability, such as `hosted_primary`, `local_private`, `configured_openrouter`, `openrouter_fallback`, or `best_effort_free_fallback`.
 - `qualityModeReason`: human-readable explanation.
-- `truthfulnessReport`: supported, transferable, user-confirmed, and blocked claims.
+- `inputGroundingReport`: pre-generation supported, transferable, user-confirmed, and blocked claims (`truthfulnessReport` is a deprecated compatibility alias).
+- final validation metadata: checks the generated text rather than presenting input analysis as output proof.
 - `agentInsights`: compact UI-safe evidence and workflow summaries.
+- `providerTrace` and final-provider metadata: route attempts without prompt/CV bodies or credentials.
 
 The UI should show this metadata instead of hiding provider uncertainty or unsupported-claim risk.
 
@@ -87,7 +93,7 @@ Source metadata lives in `shared/domain-packs/sources.json`. A scheduled GitHub 
 
 ## Domain Risk Layer
 
-The domain pack snapshot is consumed by `shared/domain-packs/domain-classifier.js` and wired into the deterministic workflow agents. The classifier emits advisory metadata first:
+The domain pack snapshot is consumed by `shared/domain-packs/domain-classifier.js` and wired into deterministic pipeline stages. The classifier emits advisory metadata first:
 
 - `domainRisk.primaryProfile`
 - `domainRisk.credentialWarnings`

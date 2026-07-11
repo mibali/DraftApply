@@ -6,13 +6,18 @@
 - [ ] Ensure **no secrets** are bundled in the extension
 - [ ] Confirm `host_permissions` are minimal and required
 - [ ] Confirm `web_accessible_resources` are minimal and required
-- [ ] Verify the proxy URL is correct (`extension-ready/background.js`)
+- [ ] Verify the generated build's proxy origin and `host_permissions` match the intended official origin (do not point it at `backend/`)
 - [ ] Confirm proxy is deployed and healthy: `GET https://draftapply.onrender.com/api/health`
+- [ ] Record every possible model route, including OpenRouter and its downstream providers, in disclosures
+- [ ] Verify Groq account Data Controls/ZDR in the provider console; do not infer this from source or environment flags
+- [ ] Verify OpenRouter ZDR/data-collection routing and downstream-provider eligibility, if fallback is enabled
+- [ ] Provision Redis durable quotas for production and confirm startup fails closed without it
+- [ ] Test `inputGroundingReport`, final-answer validation, `providerTrace`, and final-provider disclosure on primary and fallback routes
 
 ## Required docs
 
 - [ ] Privacy policy (see `PRIVACY_POLICY.md`)
-- [ ] Support contact email
+- [ ] Add and monitor a real support contact in the privacy policy and store listing (release blocker; none is present in repository metadata)
 - [ ] Screenshots + short demo video/GIF
 
 ## Testing

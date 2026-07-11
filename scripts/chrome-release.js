@@ -3,10 +3,12 @@
 import { spawnSync } from 'node:child_process';
 import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
+import { buildExtension, OFFICIAL_PROXY_URL, validateProxyUrl } from './build-extension.js';
 
 const ROOT = resolve(new URL('..', import.meta.url).pathname);
 const EXT_DIR = join(ROOT, 'extension-ready');
 const DIST_DIR = join(ROOT, 'dist');
+const STAGE_DIR = join(DIST_DIR, 'chrome-release');
 const MANIFEST_PATH = join(EXT_DIR, 'manifest.json');
 
 const args = new Set(process.argv.slice(2));
@@ -14,6 +16,9 @@ const shouldUpload = args.has('--upload') || args.has('--publish');
 const shouldPublish = args.has('--publish');
 const skipTests = args.has('--skip-tests');
 const allowDirty = args.has('--allow-dirty');
+const allowCustomProxyUpload = args.has('--allow-custom-proxy-upload');
+const proxyUrl = [...args].find(arg => arg.startsWith('--proxy-url='))?.slice('--proxy-url='.length)
+  || OFFICIAL_PROXY_URL;
 
 function run(command, commandArgs, options = {}) {
   const result = spawnSync(command, commandArgs, {
@@ -67,7 +72,7 @@ function ensureCleanGit() {
   }
 }
 
-function zipExtension(version) {
+function zipExtension(version, extensionDir) {
   mkdirSync(DIST_DIR, { recursive: true });
   const zipName = `draftapply-chrome-${version}.zip`;
   const zipPath = join(DIST_DIR, zipName);
@@ -82,7 +87,7 @@ function zipExtension(version) {
     '__MACOSX/*',
     '*.pem',
     '*.crx',
-  ], { cwd: EXT_DIR });
+  ], { cwd: extensionDir });
 
   const size = statSync(zipPath).size;
   if (size <= 0) throw new Error('Created ZIP is empty');
@@ -162,15 +167,18 @@ async function main() {
     ensureCleanGit();
   }
 
-  if (!skipTests) run('npm', ['test']);
-  run('node', ['--check', join(EXT_DIR, 'background.js')]);
-  run('node', ['--check', join(EXT_DIR, 'popup.js')]);
-  run('node', ['--check', join(EXT_DIR, 'content.js')]);
-  run('node', ['--check', join(EXT_DIR, 'page-extractor.js')]);
-  run('node', ['--check', join(EXT_DIR, 'cv-export.js')]);
-  run('node', ['--check', join(EXT_DIR, 'stats.js')]);
+  const resolvedProxyUrl = validateProxyUrl(proxyUrl);
+  if (shouldUpload && resolvedProxyUrl !== OFFICIAL_PROXY_URL && !allowCustomProxyUpload) {
+    throw new Error('Refusing to upload or publish a custom-proxy build. Pass --allow-custom-proxy-upload only after verifying the target Web Store listing.');
+  }
 
-  const { zipPath, zipName, size } = zipExtension(manifest.version);
+  if (!skipTests) run('npm', ['test']);
+  buildExtension({ proxyUrl: resolvedProxyUrl, outputDir: STAGE_DIR });
+  for (const file of ['background.js', 'build-config.js', 'popup.js', 'content.js', 'page-extractor.js', 'cv-export.js', 'stats.js']) {
+    run('node', ['--check', join(STAGE_DIR, file)]);
+  }
+
+  const { zipPath, zipName, size } = zipExtension(manifest.version, STAGE_DIR);
   console.log(`\nPackaged ${zipName} (${Math.round(size / 1024)} KB)`);
 
   const allReleases = readdirSync(DIST_DIR)

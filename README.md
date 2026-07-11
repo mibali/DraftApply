@@ -15,15 +15,24 @@ DraftApply classifies each question and generates the right kind of answer — a
 
 | Directory | Purpose |
 |-----------|---------|
-| `extension-ready/` | **Chrome extension** (recommended) — no API keys needed |
-| `render-proxy/` | **Hosted proxy** (Render) — holds the Groq API key server-side |
-| `backend/` + `frontend/` | **Local web app** (optional) — multi-provider LLM support |
+| `extension-ready/` | **Official Chrome extension source** — configured for the official hosted proxy |
+| `render-proxy/` | **Extension proxy** — officially hosted on Render, or deploy it yourself |
+| `backend/` + `frontend/` | **Separate local web app** (optional) — multi-provider/offline development UI; it is not the extension proxy |
 | `shared/domain-packs/` | **Domain knowledge packs** — reviewable snapshots for regulated, credential-heavy, academic, trade, sparse, and portfolio-heavy roles |
 | `store-assets/` | Chrome Web Store listing assets |
 
 ## Chrome extension
 
 The extension calls the hosted proxy at `https://draftapply.onrender.com`. No user API keys required.
+
+That checked-in configuration is the **official extension** and remains suitable for loading unpacked or packaging for the Chrome Web Store. To connect an extension to your own `render-proxy` deployment, generate a separate build (no bundler or dependencies are required):
+
+```bash
+npm run build:extension -- --proxy-url=https://draftapply.example.com
+# Load dist/extension/ as an unpacked extension.
+```
+
+The build validates the URL (HTTPS, except loopback HTTP for development), writes the selected endpoint to `build-config.js`, and changes only the proxy entry in `host_permissions`. Use `--output=path/to/output` to choose another output directory. `build-info.json` records the non-secret endpoint and extension version. Do not point this build at `backend/`: the local web app is a separate application and does not implement the extension proxy contract.
 
 ### Install (unpacked)
 
@@ -51,11 +60,11 @@ DraftApply works on **any web page**:
 
 ### Privacy
 
-See [`PRIVACY_POLICY.md`](PRIVACY_POLICY.md). In short:
+See [`PRIVACY_POLICY.md`](PRIVACY_POLICY.md) and the [`privacy/provider matrix`](docs/privacy-provider-matrix.md). In short:
 
-- **CV is stored locally** in your browser (`chrome.storage.local`) — never sent to DraftApply servers for storage
-- **No generated answers are stored** on any server
-- The LLM provider (Groq) is configured with **Zero Data Retention (ZDR)** — prompts and responses are not retained for training or logging
+- The extension stores the CV in `chrome.storage.local`; generation sends CV/job content through the selected proxy and model route.
+- Proxy application code does not intentionally persist request content or answers, but hosting infrastructure and providers may retain logs or data under their own settings.
+- The official operator must verify Groq account ZDR. OpenRouter fallback adds OpenRouter and its selected downstream provider. Open-source code and grounding validation cannot prove provider-account privacy settings.
 
 ## Hosted proxy (Render)
 
@@ -73,7 +82,7 @@ See [`render-proxy/README.md`](render-proxy/README.md) for the full API contract
 | `OPENROUTER_TAILOR_FALLBACK` | No | Tailor CV generation/audit falls back to OpenRouter by default when `OPENROUTER_API_KEY` is set. Set to `false` only if you want Tailor CV to hard-fail rather than use OpenRouter as backup. |
 | `OPENROUTER_MODEL` | No | Optional configured OpenRouter model. Use this for a paid/reliable OpenRouter fallback instead of relying only on free models. |
 | `OPENROUTER_USE_MODELS_ARRAY` | No | Sends a ranked fallback chain to OpenRouter in one request (default: `true`). |
-| `OPENROUTER_REQUIRE_DATA_PRIVACY` | No | Denies OpenRouter providers marked as collecting data by default (default: `true`). |
+| OpenRouter privacy controls | — | Hosted requests always require ZDR and deny providers marked as collecting data. This cannot be disabled by environment configuration. |
 | `TOKEN_SECRET` | Yes | Secret for signing install tokens |
 | `GROQ_MODEL` | No | Model name (default: `llama-3.3-70b-versatile`) |
 | `RECIPE_PATH` | No | Path to custom recipe module (default: bundled `recipe/index.js`) |
@@ -121,7 +130,7 @@ The recipe classifies each question into one of these types and applies a tailor
 
 ## Local web app (optional)
 
-The local web app is useful for development, testing, or running fully offline.
+The local web app is useful for development, testing, or running offline when paired with a local provider. It defaults to Ollama and binds to `127.0.0.1`. It does not implement extension install tokens or the compatible proxy protocol, and is not safe as a public Internet service without authentication, access controls, restrictive CORS, TLS, rate limits, and operational hardening.
 
 ### Option A: Ollama (local, private)
 
@@ -161,7 +170,7 @@ Open `http://localhost:3001`
 ```
 Chrome Extension
   → Render Proxy
-    → deterministic workflow agents
+    → deterministic pipeline stages
     → model router
     → Groq primary / local model / OpenRouter fallback
 ```
@@ -169,16 +178,16 @@ Chrome Extension
 1. **Extension** extracts job context from the page (title, company, description, requirements)
 2. **Extension** sends structured payload (question + CV + job context) to the proxy
 3. **Proxy** authenticates via 90-day install token, cleans the question label, and builds a CV/JD evidence package
-4. **Workflow agents** classify the question, map CV evidence, score JD requirements, flag gaps, and build truthfulness metadata
+4. **Deterministic stages** classify the question, map CV evidence, score JD requirements, flag gaps, and build input grounding metadata
 5. **Recipe** builds a tailored prompt server-side
 6. **Model router** uses Groq by default, optional local OpenAI-compatible models for lightweight/private steps, and ranked OpenRouter fallback when configured
-7. **Extension** shows model/provider cues, truthfulness/agent insights, and inserts the answer using framework-compatible native events
+7. **Proxy and extension** expose provider trace, `inputGroundingReport`, and final-answer validation metadata where supported; the extension inserts the reviewed answer
 
-The multi-agent design is intentionally cost-conscious: agents are deterministic workflow modules plus one-pass LLM orchestration, not one hosted LLM call per agent.
+These are pipeline stages, not autonomous agents. Optional embeddings rank evidence only; they do not turn a missing requirement into a supported claim. Final-answer grounding does not imply provider privacy.
 
-Generated API responses include `qualityMode` and `truthfulnessReport` so users and contributors can see whether an answer came from the primary hosted path, a local/private model, a configured OpenRouter model, or best-effort free fallback.
+Generated API responses include route metadata, `inputGroundingReport` (with a temporary `truthfulnessReport` compatibility alias), and output `validation` so clients can distinguish provider routing from claim checks.
 
-DraftApply also includes compact domain packs for higher-risk role families. These packs help workflow agents recognize when to require stronger evidence, ask for credentials or jurisdiction, preserve academic/publication detail, or avoid overclaiming in portfolio-first roles. They are refreshed through a scheduled GitHub workflow and reviewed as pull requests; generation never fetches live third-party datasets.
+DraftApply also includes compact domain packs for higher-risk role families. These packs help deterministic checks recognize when to require stronger evidence, ask for credentials or jurisdiction, preserve academic/publication detail, or avoid overclaiming in portfolio-first roles. They are refreshed through a scheduled GitHub workflow and reviewed as pull requests; generation never fetches live third-party datasets.
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) and [`render-proxy/README.md`](render-proxy/README.md) for the full provider and orchestration details.
 
@@ -214,7 +223,7 @@ npm run release:chrome:upload   # upload package to Chrome Web Store
 npm run release:chrome:publish  # upload and submit for review
 ```
 
-Before releasing, bump both `extension-ready/manifest.json` and `package.json` to the same version, update `CHANGELOG.md`, and commit the change. The release script creates `dist/draftapply-chrome-<version>.zip` from the contents of `extension-ready/`.
+Before releasing, bump both `extension-ready/manifest.json` and `package.json` to the same version, update `CHANGELOG.md`, and commit the change. The release script stages a generated official-proxy build and creates `dist/draftapply-chrome-<version>.zip`. Existing release commands and flags remain valid. A custom package can be created with `--proxy-url=...`, but upload/publish refuses custom endpoints unless the maintainer deliberately adds `--allow-custom-proxy-upload` as a safety override.
 
 For automated releases, set these GitHub Actions secrets:
 
