@@ -6,6 +6,23 @@ const _require = createRequire(import.meta.url);
 const _semanticConceptGroups = _require('./data-sources/semantic-concepts.json');
 
 export class CVTailor {
+  // Application-owned vocabulary for competency category labels. Model
+  // output outside this list is coerced to 'Relevant Skills' so a model can
+  // never smuggle an employer, credential, or instruction into a heading.
+  static COMPETENCY_LABELS = [
+    'Relevant Skills', 'Technical Skills', 'Professional Skills', 'Core Skills', 'Additional Tools & Skills',
+    'Cloud', 'Cloud Platforms', 'Cloud & Infrastructure', 'Infrastructure as Code', 'DevOps & Delivery',
+    'Programming', 'Programming & Automation', 'Software Engineering', 'Backend & APIs', 'Integration & APIs',
+    'Data & Analytics', 'Databases & Data', 'Data Quality & Validation', 'AI & Machine Learning', 'Research & Methods',
+    'Observability & Monitoring', 'Security', 'Customer Support', 'Customer Success', 'Stakeholder Engagement',
+    'Pre-Sales Execution', 'Solution Architecture', 'Project Delivery', 'Leadership', 'Communication',
+    'MLOps & ML Lifecycle', 'Model Serving & Infrastructure', 'ML Infrastructure', 'Machine Learning',
+    'CI/CD & Automation', 'Orchestration & GitOps', 'Containers & Kubernetes', 'Platform Engineering',
+    'Data Engineering', 'Reliability & Operations', 'Incident Management', 'Networking',
+    'Testing & Quality', 'Automation & Tooling', 'Monitoring & Observability', 'Tools & Platforms',
+    'AI Enablement', 'GenAI & LLM Tooling', 'Knowledge Management', 'Documentation & Enablement',
+  ];
+
   constructor(roleProfiles = new RoleProfileService()) {
     this.roleProfiles = roleProfiles;
   }
@@ -655,7 +672,7 @@ Do not add anything new. Return the complete corrected CV.`;
     const lines = [];
     if (tools.length > 0)      lines.push(`Technical Tools: ${tools.join(', ')}`);
     if (coreSkills.length > 0) lines.push(`Core Skills: ${coreSkills.join(', ')}`);
-    if (confirmed.length > 0)  lines.push(`Confirmed Skills: ${confirmed.join(', ')}`);
+    if (confirmed.length > 0)  lines.push(`Additional Tools & Skills: ${confirmed.join(', ')}`);
     if (softSkills.length > 0) lines.push(`Professional Skills: ${softSkills.join(', ')}`);
 
     if (lines.length < 2) return text;
@@ -2573,11 +2590,11 @@ OUTPUT SCHEMA — return exactly this shape:
 
 STRICT RULES:
 1. "roles" must contain exactly one entry per role id listed under ROLES, in the same order.
-2. Summary, bullets, and focus must cite supporting SOURCE IDs. Bullets must be grounded in that role's ORIGINAL BULLETS — rephrase with JD vocabulary, reorder for relevance, tighten — but never invent achievements, metrics, employers, tools, or credentials. Uncited strings are rejected.
+2. Summary, competency items, bullets, and focus must cite supporting SOURCE IDs. Competency items cite CANDIDATE SKILLS ids (or an ORIGINAL BULLET id that mentions the tool). Bullets must be grounded in that role's ORIGINAL BULLETS — rephrase with JD vocabulary, reorder for relevance, tighten — but never invent achievements, metrics, employers, tools, or credentials. Uncited strings are rejected.
 3. Never claim any UNSUPPORTED requirement.
 4. Include every USER-CONFIRMED skill somewhere in competencies.
 5. Competency items are short skill or tool names of 1-4 words ("Terraform", "Model registry"). NEVER requirement sentences or phrases like "IaC using Terraform", "deep experience building systems", or "X years of experience". Never list the same tool twice in different phrasings.
-6. Use 3-6 competency categories with 3-8 items each. No item may repeat across categories.
+6. Use 3-6 competency categories with 3-8 items each. No item may repeat across categories. Choose each category label from this list (labels outside it are replaced with "Relevant Skills"): ${CVTailor.COMPETENCY_LABELS.filter(l => !/^(?:Relevant Skills|Additional Tools & Skills)$/.test(l)).join('; ')}.
 7. "focus" is a single line (max 120 characters) positioning that role for the target job, or null for roles with no meaningful connection to it.
 8. Keep each role's bullet count close to its original count (minimum 1, maximum 6). Never leave a role empty.
 9. No section headers, dates, company names, or contact details anywhere in your output.
@@ -2608,8 +2625,11 @@ ${topKeywords.length ? `\nATS KEYWORDS (weave into bullets only where truthful):
 TAILORING BLUEPRINT
   Target positioning: ${tailoringPlan.targetPositioning}
 ${roleCredibilityGuidance ? `\nROLE CREDIBILITY CHECK\n${roleCredibilityGuidance}\n` : ''}${domainRiskGuidance ? `\nDOMAIN REVIEW CHECK\n${domainRiskGuidance}\n` : ''}
-ORIGINAL PROFESSIONAL SUMMARY (grounding for the new summary)
+ORIGINAL PROFESSIONAL SUMMARY (source id: summary:0 — grounding for the new summary)
 ${String(cvData?.summary || '').trim() || '  (none)'}
+
+CANDIDATE SKILLS (grounding for competency items — cite these source ids)
+${(cvData?.skills || []).slice(0, 40).map((s, i) => `  [skill:${i}] ${s}`).join('\n') || '  (none)'}
 
 ROLES (locked context — shown so you can ground bullets; never output these fields)
 ${rolesBlock}
@@ -2789,7 +2809,7 @@ Return the corrected JSON object now.`;
       items: category.items.map(item => ({
         text: item,
         sourceIds: (groundingContext.records || [])
-          .filter(record => !/\b(?:no|not|never|without|lack(?:s|ed|ing)?|\w+n['’]?t)\b/i.test(record.text)
+          .filter(record => !/\b(?:no|not|never|without|lack(?:s|ed|ing)?|cannot|\w+n[’']t|(?:ca|wo|do|does|did|is|was|are|were|has|have|had|could|should|would|ai)nt)\b/i.test(record.text)
             && this._normaliseText(record.text).includes(this._normaliseText(item)))
           .map(record => record.sourceId)
           .slice(0, 5),
@@ -2836,14 +2856,7 @@ Return the corrected JSON object now.`;
 
   _normaliseStructuredCompetencies(raw, { confirmedSkills = [], groundingContext } = {}) {
     const PROSE_RE = /\b(using|with|within|experience|experienced|deep|strong|proficien\w*|expertise|knowledge|ability|abilities|years?|including|such as|hands.on)\b/i;
-    const safeLabels = new Map([
-      'Relevant Skills', 'Technical Skills', 'Professional Skills', 'Core Skills', 'Confirmed Skills',
-      'Cloud', 'Cloud Platforms', 'Cloud & Infrastructure', 'Infrastructure as Code', 'DevOps & Delivery',
-      'Programming', 'Programming & Automation', 'Software Engineering', 'Backend & APIs', 'Integration & APIs',
-      'Data & Analytics', 'Databases & Data', 'Data Quality & Validation', 'AI & Machine Learning', 'Research & Methods',
-      'Observability & Monitoring', 'Security', 'Customer Support', 'Customer Success', 'Stakeholder Engagement',
-      'Pre-Sales Execution', 'Solution Architecture', 'Project Delivery', 'Leadership', 'Communication',
-    ].map(label => [this._normaliseText(label), label]));
+    const safeLabels = new Map(CVTailor.COMPETENCY_LABELS.map(label => [this._normaliseText(label), label]));
     const confirmed = this._normaliseConfirmedSkills(confirmedSkills);
     const confirmedKeys = new Set(confirmed.map(s => this._normaliseText(s)));
 
@@ -2882,12 +2895,14 @@ Return the corrected JSON object now.`;
       if (categories.length >= 6) break;
     }
 
-    // Every user-confirmed skill must be present somewhere.
+    // Every user-confirmed skill must be present somewhere. The category
+    // label is recruiter-facing text - never expose internal app vocabulary
+    // like "Confirmed Skills" on the rendered CV.
     const missingConfirmed = confirmed.filter(s => !globalKeys.has(this._normaliseText(s)));
     if (missingConfirmed.length > 0) {
-      const target = categories.find(c => c.label === 'Confirmed Skills');
+      const target = categories.find(c => c.label === 'Additional Tools & Skills');
       if (target) target.items.push(...missingConfirmed);
-      else categories.push({ label: 'Confirmed Skills', items: missingConfirmed.slice(0, 8) });
+      else categories.push({ label: 'Additional Tools & Skills', items: missingConfirmed.slice(0, 8) });
     }
 
     return categories;

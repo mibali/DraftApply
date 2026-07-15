@@ -144,3 +144,29 @@ describe('deterministic grounding harness', () => {
     expect(metrics.credentialFalsePositiveRate).toBe(0);
   });
 });
+
+describe('negation detection (regression: optional-apostrophe contraction)', () => {
+  // "\\w+n['’]?t" with an optional apostrophe matched every word ending in
+  // "nt" (experiment, deployment, environment, management), so negation
+  // parity rejected grounded claims against almost every real CV bullet.
+  it('does not treat ordinary "nt"-ending words as negation evidence', () => {
+    const context = buildGroundingContext({
+      experience: [{
+        company: 'DualMind', title: 'MLOps Engineer', dates: '2025 - Present',
+        responsibilities: ['Implemented model lifecycle workflows using DVC and MLflow patterns for experiment logging and deployment management.'],
+      }],
+    });
+    expect(isTextSupported('MLflow', context, {
+      sourceIds: ['experience:0:responsibility:0'], requireSourceIds: true,
+    }).supported).toBe(true);
+  });
+
+  it('still enforces parity for real negations, with and without apostrophes', () => {
+    for (const summary of ['I do not manage budgets.', "I don't manage budgets.", 'I dont manage budgets.']) {
+      const context = buildGroundingContext({ summary });
+      expect(isTextSupported('Manage budgets', context, {
+        sourceIds: ['summary:0'], requireSourceIds: true,
+      }).supported).toBe(false);
+    }
+  });
+});

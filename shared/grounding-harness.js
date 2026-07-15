@@ -7,7 +7,12 @@ const PREPARATION = /\b(prepar(?:ing|ation)|studying|pursuing|working towards?|e
 const METRIC = /(?:[$£€]\s*\d[\d,.]*|\b\d+(?:\.\d+)?\s*(?:%|x\b|×|k\b|m\b|million\b|billion\b|users?\b|customers?\b|months?\b|years?\b))/gi;
 const SUBJECTIVE = /\b(?:want|would like|interested|drawn|excited|motivated|value|believe|hope|enjoy|appeal)\b/i;
 const FIRST_PERSON = /\b(?:i|my|we|our)\b/i;
-const NEGATION = /\b(?:no|not|never|without|lack(?:s|ed|ing)?|cannot|\w+n['’]?t)\b/i;
+// The contraction branch must REQUIRE the apostrophe (plus an explicit list
+// of apostrophe-less typed forms): an optional apostrophe made every word
+// ending in "nt" (experiment, deployment, environment, management) count as
+// a negation, which failed negation-parity for almost every CV bullet and
+// silently rejected grounded claims.
+const NEGATION = /\b(?:no|not|never|without|lack(?:s|ed|ing)?|cannot|\w+n[’']t|(?:ca|wo|do|does|did|is|was|are|were|has|have|had|could|should|would|ai)nt)\b/i;
 
 function normalise(value) {
   return String(value || '').toLowerCase().replace(/[’']/g, '').replace(/[^a-z0-9%$£€+#.]+/g, ' ').trim();

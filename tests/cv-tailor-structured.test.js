@@ -442,7 +442,7 @@ describe('validateStructuredContent', () => {
       roles: [],
     }, skeleton, { matchMap: [], confirmedSkills, cvData });
 
-    expect(content.competencies).toEqual([{ label: 'Confirmed Skills', items: ['TensorFlow'] }]);
+    expect(content.competencies).toEqual([{ label: 'Additional Tools & Skills', items: ['TensorFlow'] }]);
     expect(JSON.stringify(content)).not.toMatch(/years of experience|production experience|ability to collaborate|AWS \/ GCP|Build production/i);
     expect(JSON.stringify(content)).not.toContain('Additional Skills');
   });
@@ -728,5 +728,44 @@ describe('structured pipeline end-to-end with a mocked model response (adversari
     expect(text).not.toContain('Focus: ML platform engineering');
     // Education verbatim at the end.
     expect(text).toContain('EDUCATION, CERTIFICATIONS & RECOGNITION\n• BSc Information Technology');
+  });
+});
+
+describe('structured competencies grounding (regression: section always degraded to confirmed skills)', () => {
+  const parsed = new CVParser().parse(DUPLICATED_TEXT_LAYER_CV);
+  const skel = tailor.buildCvSkeleton(parsed, jdData);
+
+  it('advertises skill source ids and the summary id in the structured prompt', () => {
+    const { userPrompt, systemPrompt } = tailor.buildStructuredTailoringPrompt(parsed, jdData, []);
+    expect(userPrompt).toContain('CANDIDATE SKILLS');
+    expect(userPrompt).toContain('[skill:0] MLflow');
+    expect(userPrompt).toContain('source id: summary:0');
+    expect(systemPrompt).toMatch(/competency items.*must cite supporting SOURCE IDs/i);
+  });
+
+  it('keeps model competency items cited from a bullet that mentions the tool, under the model label', () => {
+    const bulletId = skel.roles[0].originalBulletEvidence[0].sourceIds[0];
+    const content = tailor.validateStructuredContent({
+      summary: { text: parsed.summary, sourceIds: ['summary:0'] },
+      competencies: [{ label: 'MLOps & ML Lifecycle', items: [
+        { text: 'Kubernetes', sourceIds: [skel.roles[0].originalBulletEvidence[1].sourceIds[0]] },
+        { text: 'Model training', sourceIds: [bulletId] },
+      ] }],
+      roles: [],
+    }, skel, { matchMap: [], confirmedSkills: [], cvData: parsed });
+    expect(content.competencies).toEqual([
+      { label: 'MLOps & ML Lifecycle', items: ['Kubernetes', 'Model training'] },
+    ]);
+  });
+
+  it('never renders the internal "Confirmed Skills" label on the CV', () => {
+    const content = tailor.validateStructuredContent({
+      summary: { text: parsed.summary, sourceIds: ['summary:0'] },
+      competencies: [],
+      roles: [],
+    }, skel, { matchMap: [], confirmedSkills: ['Neptune.ai', 'Pulumi'], cvData: parsed });
+    const rendered = tailor.renderTailoredCV(skel, content);
+    expect(rendered).not.toMatch(/Confirmed Skills/);
+    expect(rendered).toContain('Additional Tools & Skills: Neptune.ai, Pulumi');
   });
 });
