@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { CVTailor } from '../shared/cv-tailor.js';
 import { CVParser } from '../shared/cv-parser.js';
 import { MULTICOLUMN_CV_TEXT } from './fixtures/multicolumn-cv.js';
+import { DUPLICATED_TEXT_LAYER_CV } from './fixtures/duplicated-text-layer-cv.js';
 
 const tailor = new CVTailor();
 
@@ -92,6 +93,35 @@ describe('buildCvSkeleton', () => {
     expect(skeleton.contacts).toContain('mtb@example.com');
     // The old professional headline is NOT a contact line.
     expect(skeleton.contacts).not.toContain('MLOps Engineer');
+  });
+
+  it('merges duplicated text-layer role copies into one skeleton role each (live regression)', () => {
+    const parsed = new CVParser().parse(DUPLICATED_TEXT_LAYER_CV);
+    const skel = tailor.buildCvSkeleton(parsed, jdData);
+    expect(skel.roles).toHaveLength(6);
+    expect(skel.roles.map(r => r.company.split('|')[0].trim())).toEqual([
+      'DualMind Tech Consulting Ltd', 'Sourcegraph', 'Semgrep',
+      'Opay Financial Services', 'Microsoft (Tek-Experts)', 'Bincom ICT Solutions',
+    ]);
+    expect(skel.name).toBe('MICHAEL T BALI');
+    expect(skel.contacts).toEqual(['Birmingham, UK | mtbdesigns01@gmail.com | 07401731548 | LinkedIn']);
+    // Wrapped bullet continuations are part of the locked evidence.
+    expect(skel.roles[0].originalBullets.some(b =>
+      b.endsWith('lifecycle management for cloud-native ML workloads.'))).toBe(true);
+  });
+
+  it('does not re-append parsed email/phone already inside a combined raw header line', () => {
+    const combined = tailor.buildCvSkeleton({
+      ...cvData,
+      rawText: [
+        'MICHAEL T BALI',
+        'Birmingham, UK | mtb@example.com | 07401731548 | LinkedIn',
+        '',
+        'PROFESSIONAL SUMMARY',
+        'Cloud, platform, and MLOps engineer.',
+      ].join('\n'),
+    }, jdData);
+    expect(combined.contacts).toEqual(['Birmingham, UK | mtb@example.com | 07401731548 | LinkedIn', 'linkedin.com/in/michael-bali']);
   });
 
   it('extracts education lines verbatim from a compound raw section header', () => {

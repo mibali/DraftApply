@@ -2455,6 +2455,10 @@ Do not add anything new. Return the complete corrected CV.`;
       }
     }
     const contactInfo = cvData?.contactInfo || {};
+    // Parsed fields already present inside a collected raw header line
+    // ("Birmingham, UK | email | phone | LinkedIn") must not be appended
+    // again as standalone lines - that renders the email/phone twice.
+    const collectedText = collected.join(' | ').toLowerCase();
     const merged = [...collected, ...[
       contactInfo.email,
       contactInfo.phone,
@@ -2463,7 +2467,8 @@ Do not add anything new. Return the complete corrected CV.`;
       contactInfo.website,
       contactInfo.portfolio,
       contactInfo.twitter,
-    ].map(v => String(v || '').trim()).filter(Boolean)];
+    ].map(v => String(v || '').trim()).filter(Boolean)
+      .filter(value => !collectedText.includes(value.toLowerCase()))];
     const seen = new Set();
     return merged.filter(value => {
       if (value.length > 500 || /[.!?]\s/.test(value)) return false;

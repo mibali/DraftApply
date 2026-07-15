@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CVParser } from '../shared/cv-parser.js';
 import { MULTICOLUMN_CV_TEXT } from './fixtures/multicolumn-cv.js';
+import { DUPLICATED_TEXT_LAYER_CV } from './fixtures/duplicated-text-layer-cv.js';
 
 describe('CVParser contact extraction', () => {
   it('does not treat an email domain as a personal website', () => {
@@ -383,5 +384,103 @@ describe('CVParser nonstandard bullet markers', () => {
     expect(parser._cleanBullet('>> Automated Kubernetes deployments.')).toBe('Automated Kubernetes deployments.');
     expect(parser._cleanBullet('>= 99.9% availability target')).toBe('');
     expect(parser._cleanBullet('>5 years operating distributed systems')).toBe('');
+  });
+});
+
+// Regression fixture mirroring the live CV whose export dropped the owner's
+// name, truncated wrapped bullets, swallowed CORE SKILLS into the summary,
+// and absorbed trailing custom sections into the last experience role.
+const SPACED_FINAL_CV_TEXT = `MICHAEL T BALI
+Birmingham, UK | mtbdesigns01@gmail.com | 07401731548 | LinkedIn
+AI Enablement & Technical Operations Lead
+PROFESSIONAL SUMMARY
+AI enablement, technical operations, and AI solutions professional with 7+ years of experience helping SaaS teams.
+CORE SKILLS
+• AI enablement, AI adoption, prompt engineering, AI workflow design
+• Cloud and DevOps: AWS, Azure, GCP, Docker, Kubernetes, Terraform
+PROFESSIONAL EXPERIENCE
+DualMind Tech Consulting Ltd | MLOps / DevOps Engineer | Sep 2025 - Present
+• Create model and data governance patterns using DVC, MLflow, validation gates, promotion-readiness workflows, and production
+monitoring.
+• Translate complex MLOps concepts into reusable templates, documentation, and implementation playbooks that help teams adopt AI capabilities
+confidently.
+Bincom ICT Solutions | Python Developer | Feb 2019 - May 2020
+• Developed reusable and maintainable Python code for production systems and internal automation.
+• Supported codebase modernisation by improving structure, reliability, and maintainability of existing applications.
+AI STRATEGY, ENABLEMENT & OPERATING MODEL
+• Defined practical AI adoption patterns for engineering, support, DevOps, and SaaS operations workflows.
+SELECTED AI ENABLEMENT, OPERATIONS & INNOVATION ACHIEVEMENTS
+• Built an AI-powered log analysis tool that accelerated issue diagnosis and helped teams move from
+manual log review toward repeatable AI-assisted investigation.
+• Designed a case review automation system using the Plain API, introducing structured monthly peer reviews.
+EDUCATION, CERTIFICATIONS & RECOGNITION
+• BSc Information Technology - University of Cape Coast, 2018
+• Certified Kubernetes Administrator - CKA`;
+
+describe('CVParser regression: spaced-final live CV defects', () => {
+  const cv = new CVParser().parse(SPACED_FINAL_CV_TEXT);
+
+  it('extracts a name containing a single-letter middle initial', () => {
+    expect(cv.contactInfo.name).toBe('MICHAEL T BALI');
+  });
+
+  it('stops the summary at the CORE SKILLS heading', () => {
+    expect(cv.summary).not.toMatch(/CORE SKILLS|AI adoption, prompt engineering/);
+    expect(cv.summary).toMatch(/7\+ years of experience/);
+  });
+
+  it('rejoins hard-wrapped bullet continuations instead of truncating mid-phrase', () => {
+    const bullets = cv.experience[0].responsibilities;
+    expect(bullets).toHaveLength(2);
+    expect(bullets[0]).toMatch(/and production monitoring\.$/);
+    expect(bullets[1]).toMatch(/adopt AI capabilities confidently\.$/);
+  });
+
+  it('does not absorb trailing custom ALL-CAPS sections into the last role', () => {
+    const last = cv.experience.at(-1);
+    expect(last.company).toBe('Bincom ICT Solutions');
+    expect(last.responsibilities).toHaveLength(2);
+    expect(last.responsibilities.join(' ')).not.toMatch(/AI adoption patterns|log analysis tool/);
+  });
+
+  it('extracts achievements from a custom ALL-CAPS achievements heading, joining wrapped lines', () => {
+    expect(cv.achievements).toContain(
+      'Built an AI-powered log analysis tool that accelerated issue diagnosis and helped teams move from manual log review toward repeatable AI-assisted investigation.'
+    );
+    expect(cv.achievements.some(a => a.includes('case review automation system'))).toBe(true);
+  });
+});
+
+describe('CVParser regression: duplicated PDF text layer (live Harvard-style CV)', () => {
+  // The live defect: only DualMind + Sourcegraph UK survived because the
+  // repeated PROFESSIONAL EXPERIENCE heading terminated section extraction.
+  const cv = new CVParser().parse(DUPLICATED_TEXT_LAYER_CV);
+
+  it('keeps every role that appears after the repeated experience heading', () => {
+    const companies = cv.experience.map(e => e.company.split('|')[0].trim());
+    expect(companies).toContain('Semgrep');
+    expect(companies).toContain('Opay Financial Services');
+    expect(companies).toContain('Microsoft (Tek-Experts)');
+    expect(companies).toContain('Bincom ICT Solutions');
+  });
+
+  it('parses the Bincom company line as a company, not a job title', () => {
+    const bincom = cv.experience.find(e => /Bincom/.test(e.company));
+    expect(bincom).toBeDefined();
+    expect(bincom.title).toBe('Python Developer');
+  });
+
+  it('joins a capitalised continuation after a dangling conjunction', () => {
+    const sourcegraph = cv.experience.find(e => e.company === 'Sourcegraph | UK');
+    expect(sourcegraph.responsibilities.some(b =>
+      b.endsWith('collaboration with Engineering and Product teams.'))).toBe(true);
+  });
+
+  it('captures a SELECTED TECHNICAL LEADERSHIP & PROJECTS section as achievements, not last-role bullets', () => {
+    const bincom = cv.experience.find(e => /Bincom/.test(e.company));
+    expect(bincom.responsibilities.join(' ')).not.toMatch(/log analysis tool|Cody API wrapper/);
+    expect(cv.achievements.some(a => a.includes('AI-powered log analysis tool'))).toBe(true);
+    expect(cv.achievements.some(a =>
+      a.includes('Cody API wrapper compatible with OpenAI and LangChain, enabling flexible AI integration for internal tooling and automation workflows.'))).toBe(true);
   });
 });

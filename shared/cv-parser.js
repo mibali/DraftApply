@@ -1,7 +1,7 @@
 const CANONICAL_SECTION_HEADINGS = new Set([
   'PROFESSIONAL EXPERIENCE', 'WORK EXPERIENCE', 'EXPERIENCE', 'EMPLOYMENT', 'EMPLOYMENT HISTORY', 'CAREER HISTORY', 'WORK HISTORY',
   'PROFESSIONAL SUMMARY', 'SUMMARY', 'PROFILE', 'ABOUT', 'OBJECTIVE',
-  'CORE COMPETENCY', 'CORE COMPETENCIES', 'TECHNICAL SKILLS', 'SKILLS', 'TECHNOLOGIES', 'EXPERTISE',
+  'CORE COMPETENCY', 'CORE COMPETENCIES', 'CORE SKILLS', 'TECHNICAL SKILLS', 'SKILLS', 'TECHNOLOGIES', 'EXPERTISE',
   'PROJECT', 'PROJECTS', 'EDUCATION', 'ACADEMIC', 'QUALIFICATIONS', 'CERTIFICATION', 'CERTIFICATIONS',
   'EDUCATION / CERTIFICATIONS', 'EDUCATION, CERTIFICATIONS & RECOGNITION', 'CERTIFICATIONS & AWARDS',
   'ACHIEVEMENTS', 'AWARDS', 'PUBLICATIONS', 'LANGUAGES', 'INTERESTS', 'REFERENCES', 'TECHNICAL LEADERSHIP',
@@ -196,7 +196,7 @@ export class CVParser {
     const contactIndexes = lines.map((line, i) => /@|(?:linkedin|github)\.com|(?:\+?\d[\d ().-]{7,}\d)/i.test(line) ? i : -1).filter(i => i >= 0);
     const center = contactIndexes[0] ?? 0;
     const candidates = lines.map((line, i) => ({ line, i })).filter(({ line, i }) => Math.abs(i - center) <= 5 && i <= 14 &&
-      line.length >= 3 && line.length <= 60 && /^[A-Z][A-Za-z'’.-]+(?:\s+[A-Z][A-Za-z'’.-]+){1,3}$/.test(line) &&
+      line.length >= 3 && line.length <= 60 && /^[A-Z][A-Za-z'’.-]*(?:\s+[A-Z][A-Za-z'’.-]*){1,3}$/.test(line) &&
       !this._isExactSectionHeading(line) && !/https?:|www\.|@|\d|\b(engineer|architect|manager|developer|consultant|analyst|specialist|director|lead)\b/i.test(line));
     return candidates.sort((a, b) => Math.abs(a.i - center) - Math.abs(b.i - center))[0]?.line || '';
   }
@@ -266,6 +266,23 @@ export class CVParser {
 
         if (bullet) {
           if (currentExp) currentExp.responsibilities.push(bullet);
+          headerBuffer = [];
+          continue;
+        }
+
+        // Hard-wrapped PDF extraction leaves a bullet's continuation on its
+        // own unbulleted line ("...and production" / "monitoring."). Rejoin
+        // it here; dropping it truncates the bullet mid-phrase. A capitalised
+        // continuation ("Product teams.") only joins when the previous line
+        // visibly dangles on a conjunction/preposition.
+        const previousBullet = currentExp?.responsibilities.at(-1) || '';
+        if (
+          previousBullet &&
+          /[a-z0-9,\-]$/i.test(previousBullet) && !/[.!?:;]$/.test(previousBullet) &&
+          (/^[a-z]/.test(line) ||
+            (/\b(?:and|or|with|of|to|for|across|including|by|from|the|a|an)$/i.test(previousBullet) && /^[A-Z][a-z]/.test(line)))
+        ) {
+          currentExp.responsibilities[currentExp.responsibilities.length - 1] = `${previousBullet} ${line}`;
           headerBuffer = [];
           continue;
         }
@@ -457,17 +474,70 @@ export class CVParser {
     return tokens.filter(token => /^[A-Z]$/.test(token)).length >= 6;
   }
 
+  // Some PDFs carry a duplicated text layer: the extracted text repeats the
+  // whole document (or a section) with its heading. Treating the repeated
+  // heading as "next section starts here" silently discards everything after
+  // it - observed live as a 7-role CV reduced to 2 roles. Collect EVERY
+  // occurrence of the wanted heading and concatenate the bodies; duplicate
+  // roles/skills are deduplicated downstream.
   _extractExactSection(text, headings) {
-    const lines = String(text || '').split('\n');
     const wanted = new Set(headings.map(v => v.toUpperCase()));
-    const start = lines.findIndex(line => wanted.has(line.trim().replace(/:$/, '').toUpperCase()));
+    const isWanted = line => wanted.has(String(line || '').trim().replace(/:$/, '').toUpperCase());
+    const lines = String(text || '').split('\n');
+    const bodies = [];
+    let current = null;
+    for (const line of lines) {
+      if (isWanted(line)) {
+        if (current) bodies.push(current.join('\n'));
+        current = [];
+        continue;
+      }
+      if (current && (this._isExactSectionHeading(line) || this._isLikelyAuxiliarySectionHeading(line))) {
+        bodies.push(current.join('\n'));
+        current = null;
+        continue;
+      }
+      if (current) current.push(line);
+    }
+    if (current) bodies.push(current.join('\n'));
+    // Identical repeated bodies (full text-layer duplication) collapse to one;
+    // near-duplicates with different line wrapping are deduplicated by the
+    // section-specific consumers (role merge, skill dedupe).
+    const seen = new Set();
+    const unique = bodies.filter(body => {
+      const key = body.replace(/\s+/g, ' ').trim().toLowerCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    return unique.join('\n');
+  }
+
+  _extractSectionWhere(text, startPredicate) {
+    const lines = String(text || '').split('\n');
+    const start = lines.findIndex(line => startPredicate(line));
     if (start < 0) return '';
     const body = [];
     for (let i = start + 1; i < lines.length; i++) {
-      if (this._isExactSectionHeading(lines[i])) break;
+      if (this._isExactSectionHeading(lines[i]) || this._isLikelyAuxiliarySectionHeading(lines[i])) break;
       body.push(lines[i]);
     }
     return body.join('\n');
+  }
+
+  // Custom ALL-CAPS section headings ("AI STRATEGY, ENABLEMENT & OPERATING
+  // MODEL", "SELECTED AI ENABLEMENT, OPERATIONS & INNOVATION ACHIEVEMENTS")
+  // must terminate a section like canonical headings do - otherwise their
+  // bullets get absorbed into whatever section precedes them (observed as a
+  // trailing section's achievements misattributed to the last experience
+  // role). Keyword-gated so ALL-CAPS company header lines are not mistaken
+  // for section boundaries.
+  _isLikelyAuxiliarySectionHeading(line) {
+    const text = String(line || '').trim().replace(/:$/, '').trim();
+    if (text.length < 6 || text.length > 70) return false;
+    if (text !== text.toUpperCase() || /\d/.test(text)) return false;
+    if (!/^[A-Z][A-Z &,/'()\-]*$/.test(text)) return false;
+    return /\b(?:STRATEGY|ENABLEMENT|ACHIEVEMENTS?|ACCOMPLISHMENTS?|AWARDS?|RECOGNITION|PUBLICATIONS?|VOLUNTEER(?:ING)?|LANGUAGES?|INTERESTS?|REFERENCES?|LEADERSHIP|CERTIFICATIONS?|EDUCATION|SKILLS|SUMMARY|PROJECTS?|TRAINING|MEMBERSHIPS?|AFFILIATIONS?)\b/.test(text);
   }
 
   _parseTrailingDateExperience(text) {
@@ -580,6 +650,19 @@ export class CVParser {
       for (const line of achieveSection[1].split('\n')) {
         const cleaned = line.replace(/^[\s•\-\*\d.]+/, '').trim();
         if (cleaned.length > 10 && cleaned.length < 300) achievements.add(cleaned);
+      }
+    }
+
+    // 1b. Custom ALL-CAPS achievements headings ("SELECTED AI ENABLEMENT,
+    // OPERATIONS & INNOVATION ACHIEVEMENTS") the strict pattern above misses.
+    const customAchieveSection = achieveSection ? '' : this._extractSectionWhere(text, line =>
+      /\b(?:ACHIEVEMENTS?|ACCOMPLISHMENTS?|LEADERSHIP)\b/.test(String(line || '')) && this._isLikelyAuxiliarySectionHeading(line));
+    if (customAchieveSection) {
+      const cleanedLines = customAchieveSection.split('\n')
+        .map(line => line.replace(/^[\s•\-\*\d.]+/, '').trim())
+        .filter(Boolean);
+      for (const joined of this._joinExtractedSentences(cleanedLines)) {
+        if (joined.length > 10 && joined.length < 300) achievements.add(joined);
       }
     }
 
@@ -732,8 +815,10 @@ export class CVParser {
   _isLikelyCorporateName(text) {
     const t = String(text || '').trim();
     if (/\b(Ltd\.?|Limited|Inc\.?|Incorporated|Corp\.?|Corporation|LLC|LLP|GmbH|PLC|Pty|Pvt)\b/i.test(t)) return true;
-    if (/\b(Solutions|Technologies|Holdings|Ventures)\s*$/i.test(t)) return true;
-    if (/,\s*(USA|UK|US|UAE|India|Canada|Australia|Nigeria|Ghana|Kenya|South Africa|Singapore)\s*$/i.test(t)) return true;
+    // "Bincom ICT Solutions | Nigeria": the corporate marker sits before a
+    // separator or location suffix, not only at the very end of the line.
+    if (/\b(Solutions|Technologies|Holdings|Ventures)\s*(?:$|\||,)/i.test(t)) return true;
+    if (/[,|]\s*(USA|UK|US|UAE|India|Canada|Australia|Nigeria|Ghana|Kenya|South Africa|Singapore)(?:\s*\/\s*Remote)?\s*$/i.test(t)) return true;
     return false;
   }
 
