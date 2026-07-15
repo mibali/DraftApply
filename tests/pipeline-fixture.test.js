@@ -154,11 +154,25 @@ describe('pipeline fixture — matchMap', () => {
     expect(matchMap.length).toBeGreaterThanOrEqual(5);
   });
 
-  it('does not authorize a compound cloud requirement when only AWS is evidenced', () => {
+  it('authorizes an OR-list cloud requirement via one evidenced alternative (AWS)', () => {
+    // "cloud platforms (AWS, GCP, or Azure)" is an OR-list: AWS in the CV
+    // legitimately satisfies it. Treating the list as a conjunction was the
+    // root cause of absurdly low match scores for well-qualified candidates.
     const { matchMap } = buildFixturePipeline();
     const awsEntry = matchMap.find(m => /aws|cloud/i.test(m.requirement));
     expect(awsEntry).toBeTruthy();
-    expect(awsEntry.allowedToMention).toBe(false);
+    expect(awsEntry.allowedToMention).toBe(true);
+  });
+
+  it('does not authorize an OR-list requirement when no alternative is evidenced', () => {
+    const tailor = new CVTailor();
+    const { cvData } = buildFixturePipeline();
+    const matchMap = tailor.buildMatchMap(cvData, {
+      requiredSkills: ['Production experience with data warehouses such as Snowflake, BigQuery, Redshift or similar'],
+      preferredSkills: [], tools: [], softSkills: [],
+    }, []);
+    expect(matchMap[0].status).toBe('missing');
+    expect(matchMap[0].allowedToMention).toBe(false);
   });
 
   it('marks Salesforce as supported (CV and JD both mention it)', () => {
@@ -256,9 +270,12 @@ describe('pipeline fixture — recipe buildPrompts', () => {
     expect(result.systemPrompt).toMatch(/MATCH LEVEL:/i);
   });
 
-  it('does not inject a requirements bridge when no whole requirement is directly supported', () => {
+  it('injects a requirements bridge now that the OR-list cloud requirement is supported', () => {
+    // Under OR-list semantics the fixture's "cloud platforms (AWS, GCP, or
+    // Azure), REST APIs" requirement is directly supported via AWS, so the
+    // prompt legitimately surfaces it as a proof point.
     const result = buildAnswerPrompts('Tell me about a time you managed a complex technical implementation for an enterprise customer.');
-    expect(result.userPrompt).not.toMatch(/JD REQUIREMENTS YOUR BACKGROUND COVERS/i);
+    expect(result.userPrompt).toMatch(/JD REQUIREMENTS YOUR BACKGROUND COVERS/i);
   });
 
   it('includes CV-specific evidence in the user prompt (not just generic placeholder)', () => {

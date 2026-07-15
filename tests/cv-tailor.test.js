@@ -1692,3 +1692,59 @@ React, Track record of leading POCs and world-class demos`;
     expect(systemPrompt).toMatch(/only remove a bullet if it contains/i);
   });
 });
+
+describe('OR-list requirement matching (regression: 14% score for a strong-fit MLOps CV)', () => {
+  const tailor = new CVTailor();
+  const cvData = {
+    summary: 'MLOps engineer with 7+ years across DevOps, Kubernetes, CI/CD, and ML deployment.',
+    skills: ['MLflow', 'DVC', 'Terraform', 'AWS', 'Azure', 'GCP', 'Kubernetes', 'experiment tracking', 'model registry'],
+    experience: [{
+      company: 'DualMind', title: 'MLOps / DevOps Engineer', dates: 'Sep 2025 - Present',
+      responsibilities: [
+        'Implemented data and model lifecycle workflows using DVC and MLflow patterns for experiment logging and model registration.',
+        'Owned Infrastructure as Code with Terraform across AWS, Azure, and GCP environments.',
+      ],
+    }],
+    certifications: [], achievements: [], rawText: '',
+  };
+  const jdData = {
+    requiredSkills: [
+      'Production experience with ML lifecycle management platforms such as MLFlow, Weights & Biases, Neptune.ai, Comet.ml or similar',
+      'Experience with IaC using Terraform, Pulumi, OpenTofu, Encore, Crossplane or similar',
+      'MLFlow', 'Weights & Biases', 'Neptune', 'Terraform', 'Pulumi', 'Crossplane',
+    ],
+    preferredSkills: [], tools: [], softSkills: [],
+  };
+  const matchMap = tailor.buildMatchMap(cvData, jdData, []);
+  const byReq = req => matchMap.find(m => m.requirement === req);
+
+  it('satisfies "such as A, B or similar" requirements via one evidenced alternative', () => {
+    expect(byReq('Production experience with ML lifecycle management platforms such as MLFlow, Weights & Biases, Neptune.ai, Comet.ml or similar').status).toBe('strong_match');
+    expect(byReq('Experience with IaC using Terraform, Pulumi, OpenTofu, Encore, Crossplane or similar').status).toBe('strong_match');
+  });
+
+  it('marks unmet OR-alternatives as covered, never claimable, and excluded from the score', () => {
+    for (const alt of ['Weights & Biases', 'Neptune', 'Pulumi', 'Crossplane']) {
+      const row = byReq(alt);
+      expect(row.status).toBe('covered_by_alternative');
+      expect(row.allowedToMention).toBe(false);
+    }
+    const summary = tailor.buildMatchSummary(matchMap);
+    expect(summary.unsupportedRequirements).toEqual([]);
+    expect(summary.score).toBeGreaterThanOrEqual(90);
+  });
+
+  it('extracts alternatives from such-as lists, using-lists, and parenthetical lists', () => {
+    expect(tailor._extractRequirementAlternatives(
+      'Production experience with ML lifecycle management platforms such as MLFlow, Weights & Biases, Neptune.ai, Comet.ml or similar'
+    )).toEqual(['MLFlow', 'Weights & Biases', 'Neptune.ai', 'Comet.ml']);
+    expect(tailor._extractRequirementAlternatives(
+      'Experience with IaC using Terraform, Pulumi, OpenTofu, Encore, Crossplane or similar'
+    )).toEqual(['Terraform', 'Pulumi', 'OpenTofu', 'Encore', 'Crossplane']);
+    expect(tailor._extractRequirementAlternatives(
+      'Deep experience with building systems-of-systems in AWS, GCP, or Azure, that span across multiple services'
+    )).toContain('AWS');
+    expect(tailor._extractRequirementAlternatives('cloud platforms (AWS, GCP, or Azure)')).toEqual(['AWS', 'GCP', 'Azure']);
+    expect(tailor._extractRequirementAlternatives('Strong communication and ownership')).toEqual([]);
+  });
+});

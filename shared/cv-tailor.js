@@ -78,9 +78,26 @@ export class CVTailor {
       }
     }
 
-    return deduped.map(({ req, type }) => {
+    const rows = deduped.map(({ req, type }) => {
       const confirmedByUser = confirmedSet.has(this._normaliseText(req));
-      const directEvidence = this._findEvidence(req, cvSources);
+      let directEvidence = this._findEvidence(req, cvSources);
+      // OR-list requirements ("platforms such as MLFlow, W&B, Neptune.ai or
+      // similar", "IaC using Terraform, Pulumi, OpenTofu or similar") are
+      // satisfied by ANY listed alternative. Whole-sentence token matching
+      // treats the list as a conjunction and reports "missing" for candidates
+      // who clearly qualify via one alternative.
+      const alternatives = this._extractRequirementAlternatives(req);
+      const matchedAlternatives = [];
+      if (alternatives.length >= 2) {
+        for (const alt of alternatives) {
+          const altEvidence = this._findEvidence(alt, cvSources);
+          if (altEvidence.length > 0) {
+            matchedAlternatives.push(alt);
+            if (directEvidence.length === 0) directEvidence = altEvidence;
+            else directEvidence = [...new Set([...directEvidence, ...altEvidence])];
+          }
+        }
+      }
       // Always run semantic matching — direct evidence and semantic aliases are
       // complementary. Direct matching catches exact/token overlap; semantic
       // matching catches outcome equivalences (e.g. "cut onboarding time" matches
@@ -101,11 +118,17 @@ export class CVTailor {
       // CV evidence or explicit user confirmation.
       const directlySupported = directEvidence.length > 0;
       const isAtomicRequirement = coreTokens.length <= 1;
+      // Long prose requirements ("Ability to collaborate closely with Data
+      // Scientists, Engineers, and Product...") rarely match as a whole
+      // sentence; when the CV independently evidences at least 70% of the
+      // core tokens, that is honest partial support, not a gap.
+      const tokenCoverageSupported = coreTokens.length >= 5 &&
+        supportedCoreTokens.length >= Math.ceil(coreTokens.length * 0.7);
       let status;
       if (confirmedByUser) {
         status = 'user_confirmed';
       } else if (!directlySupported) {
-        status = 'missing';
+        status = tokenCoverageSupported ? 'partial_match' : 'missing';
       } else if (evidence.length >= 2) {
         status = 'strong_match';
       } else if (evidence.length === 1 || semanticSupported || (isAtomicRequirement && this._hasAdjacentTech(req, cvLower))) {
@@ -120,8 +143,78 @@ export class CVTailor {
         evidence: confirmedByUser ? ['Confirmed by user during missing skills review'] : evidence,
         allowedToMention: status !== 'missing',
         confirmedByUser,
+        alternatives,
+        matchedAlternatives,
       };
     });
+
+    return this._applyAlternativeCoverage(rows);
+  }
+
+  // JD extractors emit each OR-alternative as its own atomic requirement
+  // ("Weights & Biases", "Pulumi") alongside the compound sentence. When a
+  // sibling alternative is supported (the candidate has MLflow), the unmet
+  // alternatives are not gaps: they must not drag the match score, be listed
+  // as missing skills, or be offered for user confirmation.
+  _applyAlternativeCoverage(rows) {
+    const coveredKeys = new Map();
+    for (const row of rows) {
+      if (!row.matchedAlternatives?.length) continue;
+      for (const alt of row.alternatives) {
+        if (row.matchedAlternatives.includes(alt)) continue;
+        coveredKeys.set(this._normaliseText(alt), row.matchedAlternatives[0]);
+      }
+    }
+    return rows.map(({ alternatives, matchedAlternatives, ...row }) => {
+      if (row.status !== 'missing') return row;
+      const key = this._normaliseText(row.requirement);
+      const coveredBy = coveredKeys.get(key)
+        ?? [...coveredKeys.entries()].find(([alt]) =>
+          (alt.length >= 4 && key.length >= 4) && (alt.startsWith(key) || key.startsWith(alt)))?.[1];
+      if (!coveredBy) return row;
+      return {
+        ...row,
+        status: 'covered_by_alternative',
+        evidence: [`Requirement accepts alternatives; candidate has ${coveredBy}`],
+      };
+    });
+  }
+
+  // Extract the alternatives of an OR-enumeration inside a requirement:
+  // "such as MLFlow, Weights & Biases, Neptune.ai, Comet.ml or similar",
+  // "using Terraform, Pulumi, OpenTofu or similar", "in AWS, GCP, or Azure".
+  // Returns [] when the requirement has no OR-list.
+  _extractRequirementAlternatives(requirement) {
+    const text = String(requirement || '');
+    if (!/\bor\b/i.test(text) || !/,/.test(text)) return [];
+    // List-specific introducers first: "experience with X platforms such as
+    // A, B or C" must anchor at "such as", not at the earlier generic "with".
+    // C matches list content: any char except a sentence stop, where a dot
+    // only stops the segment when NOT part of a token (Neptune.ai, Comet.ml).
+    const C = String.raw`(?:[^.;]|\.(?=\w))`;
+    const segment_ = introducer => new RegExp(`${introducer}(${C}*?,${C}*?\\bor\\b${C}*)`, 'i');
+    const segmentMatch =
+      text.match(/\(([^)]*?,[^)]*?\bor\b[^)]*)\)/i) ||
+      text.match(segment_(String.raw`\b(?:such as|including|like)\s+`)) ||
+      text.match(segment_(String.raw`\busing\s+`)) ||
+      text.match(segment_(String.raw`\bin\s+`)) ||
+      text.match(segment_(String.raw`\bwith\s+`)) ||
+      text.match(segment_(''));
+    if (!segmentMatch) return [];
+    const segment = segmentMatch[1].replace(/\bor similar\b[\s\S]*$/i, '');
+    const parts = segment
+      .split(/,|\bor\b/i)
+      .map(part => part.trim()
+        .replace(/^[(\[]+/, '')
+        .replace(/^(?:the|a|an)\s+/i, '')
+        .replace(/\broles?\b[\s\S]*$/i, '')
+        .replace(/[)\]]+$/, '')
+        .trim())
+      .filter(part => part
+        && part.length >= 2 && part.length <= 60
+        && part.split(/\s+/).length <= 4
+        && !/^(?:that|which|who|and|to|for|its?|their|similar|equivalent)\b/i.test(part));
+    return [...new Set(parts)].length >= 2 ? [...new Set(parts)] : [];
   }
 
   /**
@@ -259,16 +352,20 @@ Also append one item per user-confirmed skill: status "user_confirmed", allowedT
 
   /** Returns a summary score and categorised lists. */
   buildMatchSummary(matchMap) {
-    const required = matchMap.filter(m => m.type === 'required');
-    const strong   = matchMap.filter(m => m.status === 'strong_match');
-    const partial  = matchMap.filter(m => m.status === 'partial_match');
-    const confirmed = matchMap.filter(m => m.status === 'user_confirmed');
-    const missing  = matchMap.filter(m => m.status === 'missing');
+    // Unmet OR-alternatives of a satisfied requirement (has MLflow, so W&B /
+    // Neptune / Comet don't count) are neither matches nor gaps: they leave
+    // the score entirely.
+    const scoreable = matchMap.filter(m => m.status !== 'covered_by_alternative');
+    const required = scoreable.filter(m => m.type === 'required');
+    const strong   = scoreable.filter(m => m.status === 'strong_match');
+    const partial  = scoreable.filter(m => m.status === 'partial_match');
+    const confirmed = scoreable.filter(m => m.status === 'user_confirmed');
+    const missing  = scoreable.filter(m => m.status === 'missing');
 
     // Score: weight required matches more heavily
     const reqTotal    = required.length || 1;
     const reqMatched  = required.filter(m => m.status !== 'missing').length;
-    const allTotal    = matchMap.length || 1;
+    const allTotal    = scoreable.length || 1;
     const allMatched  = strong.length + confirmed.length + partial.length * 0.5;
 
     const score = Math.round(
@@ -626,7 +723,7 @@ Do not add anything new. Return the complete corrected CV.`;
     if (!matchMap || matchMap.length === 0) {
       return { level: 'unknown', score: 0, supportedCount: 0, totalCount: 0 };
     }
-    const scoreable = matchMap.filter(m => m.type !== 'user_confirmed');
+    const scoreable = matchMap.filter(m => m.type !== 'user_confirmed' && m.status !== 'covered_by_alternative');
     const total = scoreable.length;
     if (total === 0) return { level: 'unknown', score: 0, supportedCount: 0, totalCount: 0 };
 
