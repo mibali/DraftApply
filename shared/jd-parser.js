@@ -17,6 +17,10 @@ export class JDParser {
       softSkills:          this.extractSoftSkills(text),
       atsKeywords:         this.extractAtsKeywords(text),
       dealBreakers:        this.extractDealBreakers(text),
+      // Kept so downstream matching can recover context that requirement
+      // extraction (especially LLM enrichment) strips - e.g. the "such as
+      // MLFlow, W&B or similar" alternatives of a shortened requirement.
+      rawText:             String(text || ''),
     };
     return this.roleProfiles.enrichJDData(parsed);
   }

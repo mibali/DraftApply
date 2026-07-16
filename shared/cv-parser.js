@@ -39,6 +39,7 @@ export class CVParser {
     const summary = this.extractSummary(normalizedText);
     const education = this.extractEducation(normalizedText);
     const skills = this.extractSkills(normalizedText);
+    const skillCategories = this.extractSkillCategories(normalizedText);
     const achievements = this.extractAchievements(normalizedText, experience);
     const certifications = this.extractCertifications(normalizedText);
     const projects = this.extractProjects(normalizedText);
@@ -52,6 +53,7 @@ export class CVParser {
       experience,
       education,
       skills,
+      skillCategories,
       achievements,
       certifications,
       projects,
@@ -300,7 +302,11 @@ export class CVParser {
           continue;
         }
 
-        if (currentExp && !currentExp.title && this._isLikelyJobTitle(line) && !this._isLikelySentenceFragment(line)) {
+        // A location parsed into the title slot ("UK (Remote)") must not
+        // block the real job title on the following line.
+        if (currentExp && (!currentExp.title || this._isLikelyLocationText(currentExp.title))
+            && this._isLikelyJobTitle(line) && !this._isLikelySentenceFragment(line)) {
+          if (currentExp.title) currentExp.company = [currentExp.company, currentExp.title].filter(Boolean).join(' — ');
           currentExp.title = line;
           continue;
         }
@@ -376,6 +382,51 @@ export class CVParser {
       return this._dedupeSkills([...sectionSkills, ...this._extractInlineSkills(text)]);
     }
     return this._dedupeSkills(this._extractInlineSkills(text));
+  }
+
+  // The user's own skills section often carries labelled categories
+  // ("MLOps & ML Lifecycle: MLflow, DVC, model registry, ..."). Preserve
+  // them as structured {label, items} groups so the tailored CV can keep
+  // the user's categorisation instead of inventing or losing it.
+  extractSkillCategories(text) {
+    const section = this._extractExactSection(text,
+      ['CORE COMPETENCY', 'CORE COMPETENCIES', 'CORE SKILLS', 'TECHNICAL SKILLS', 'SKILLS', 'TECHNOLOGIES', 'EXPERTISE']);
+    if (!section) return [];
+    const LABEL_RE = /^[•\-*]?\s*([A-Za-z][A-Za-z &/+,.'-]{1,44}):\s*(.+)$/;
+
+    // Hard-wrapped PDF extraction splits category lines; rejoin every
+    // non-label line onto the previous line (inside this section, a line is
+    // either a category or the continuation of one).
+    const joined = [];
+    for (const raw of section.split('\n')) {
+      const line = raw.trim();
+      if (!line) continue;
+      if (!LABEL_RE.test(line) && joined.length > 0 && !/[.!?]$/.test(joined.at(-1))) {
+        joined[joined.length - 1] += ` ${line}`;
+        continue;
+      }
+      joined.push(line);
+    }
+
+    const categories = [];
+    const seen = new Set();
+    for (const line of joined) {
+      const match = line.match(LABEL_RE);
+      if (!match) continue;
+      const label = match[1].trim();
+      const key = label.toLowerCase();
+      if (seen.has(key)) continue;
+      const items = match[2].split(/[,;]/)
+        .map(value => value.trim().replace(/[.]+$/, ''))
+        // A colon inside an item means column-flattened extraction glued a
+        // neighbouring category into this one ("gRPC Databases & Data: ...").
+        .filter(value => value && value.length <= 48 && value.split(/\s+/).length <= 5 && !value.includes(':'));
+      if (items.length < 2) continue;
+      seen.add(key);
+      categories.push({ label, items });
+      if (categories.length >= 8) break;
+    }
+    return categories;
   }
 
   _extractInlineSkills(text) {
@@ -739,6 +790,12 @@ export class CVParser {
 
     if (parts.length >= 2) {
       const [first, second] = parts;
+      // "Sourcegraph — UK (Remote) Feb 2026 – Present": the second segment is
+      // a location, not a title. Keep it with the company so the real title
+      // line below the header can claim the title slot.
+      if (this._isLikelyLocationText(second) && !this._isLikelyJobTitle(second)) {
+        return { company: `${first} — ${second}`, title: '', dates };
+      }
       if (this._isLikelyJobTitle(first) && !this._isLikelyJobTitle(second)) {
         return { title: first, company: second, dates };
       }
@@ -820,6 +877,14 @@ export class CVParser {
     if (/\b(Solutions|Technologies|Holdings|Ventures)\s*(?:$|\||,)/i.test(t)) return true;
     if (/[,|]\s*(USA|UK|US|UAE|India|Canada|Australia|Nigeria|Ghana|Kenya|South Africa|Singapore)(?:\s*\/\s*Remote)?\s*$/i.test(t)) return true;
     return false;
+  }
+
+  _isLikelyLocationText(value) {
+    const text = String(value || '').trim();
+    if (!text || text.length > 45) return false;
+    if (/\b(engineer|developer|manager|architect|analyst|designer|consultant|lead|director|specialist|administrator|scientist)\b/i.test(text)) return false;
+    return /,/.test(text) || /^(remote|hybrid|onsite)$/i.test(text)
+      || /\b(uk|usa|united kingdom|united states|nigeria|ghana|kenya|canada|australia|india|remote)\b/i.test(text);
   }
 
   _isLikelySentenceFragment(text) {

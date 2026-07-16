@@ -3,6 +3,7 @@ import { CVTailor } from '../shared/cv-tailor.js';
 import { CVParser } from '../shared/cv-parser.js';
 import { MULTICOLUMN_CV_TEXT } from './fixtures/multicolumn-cv.js';
 import { DUPLICATED_TEXT_LAYER_CV } from './fixtures/duplicated-text-layer-cv.js';
+import { EMDASH_FORMAT_CV } from './fixtures/emdash-format-cv.js';
 
 const tailor = new CVTailor();
 
@@ -753,9 +754,10 @@ describe('structured competencies grounding (regression: section always degraded
       ] }],
       roles: [],
     }, skel, { matchMap: [], confirmedSkills: [], cvData: parsed });
-    expect(content.competencies).toEqual([
-      { label: 'MLOps & ML Lifecycle', items: ['Kubernetes', 'Model training'] },
-    ]);
+    // The model category survives first; CV skill categories may top up after
+    // it so matched skills always transfer into the tailored CV.
+    expect(content.competencies[0].label).toBe('MLOps & ML Lifecycle');
+    expect(content.competencies[0].items.slice(0, 2)).toEqual(['Kubernetes', 'Model training']);
   });
 
   it('never renders the internal "Confirmed Skills" label on the CV', () => {
@@ -767,5 +769,47 @@ describe('structured competencies grounding (regression: section always degraded
     const rendered = tailor.renderTailoredCV(skel, content);
     expect(rendered).not.toMatch(/Confirmed Skills/);
     expect(rendered).toContain('Additional Tools & Skills: Neptune.ai, Pulumi');
+  });
+});
+
+describe('reference-format CV: structure preservation end-to-end', () => {
+  const parsed = new CVParser().parse(EMDASH_FORMAT_CV);
+  const skel = tailor.buildCvSkeleton(parsed, { jobTitle: 'Senior MLOps Engineer' });
+
+  it('locks skill categories and extra sections into the skeleton', () => {
+    expect(skel.skillCategories.map(c => c.label)).toEqual(
+      ['MLOps & ML Lifecycle', 'CI/CD & Automation', 'Cloud, IaC & Platform']);
+    expect(skel.extraSections).toHaveLength(1);
+    expect(skel.extraSections[0].heading).toBe('TECHNICAL LEADERSHIP & PROJECTS');
+    expect(skel.extraSections[0].items).toHaveLength(3);
+  });
+
+  it('never renders a location as a role title', () => {
+    for (const role of skel.roles) {
+      expect(role.title).not.toMatch(/^(?:UK|USA|Nigeria|Birmingham, UK)\b|\(Remote\)$/);
+    }
+  });
+
+  it('transfers CV skill categories into competencies when the model returns nothing usable', () => {
+    const content = tailor.validateStructuredContent(
+      { summary: { text: parsed.summary, sourceIds: ['summary:0'] }, competencies: [], roles: [] },
+      skel, { matchMap: [], confirmedSkills: [], cvData: parsed });
+    const labels = content.competencies.map(c => c.label);
+    expect(labels).toContain('MLOps & ML Lifecycle');
+    expect(labels).toContain('CI/CD & Automation');
+    expect(labels).not.toContain('Additional Tools & Skills');
+    const rendered = tailor.renderTailoredCV(skel, content);
+    expect(rendered).toMatch(/CORE COMPETENCIES/);
+    expect(rendered).toMatch(/MLOps & ML Lifecycle: /);
+    expect(rendered).toMatch(/TECHNICAL LEADERSHIP & PROJECTS/);
+    expect(rendered).toMatch(/• Authored Beyond the Ticket/);
+  });
+
+  it('does not re-list a confirmed skill already covered by a category item (spacing-insensitive)', () => {
+    const content = tailor.validateStructuredContent(
+      { summary: { text: parsed.summary, sourceIds: ['summary:0'] }, competencies: [], roles: [] },
+      skel, { matchMap: [], confirmedSkills: ['GitHub Actions', 'Neptune.ai'], cvData: parsed });
+    const catchAll = content.competencies.find(c => c.label === 'Additional Tools & Skills');
+    expect(catchAll.items).toEqual(['Neptune.ai']);
   });
 });

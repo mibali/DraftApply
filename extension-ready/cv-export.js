@@ -124,6 +124,14 @@ function formatStructuredCvToHtml(structuredCv, linkAnnotations = []) {
     }
   }
 
+  for (const section of (Array.isArray(skeleton.extraSections) ? skeleton.extraSections : [])) {
+    if (!section?.heading || !Array.isArray(section.items) || section.items.length === 0) continue;
+    html += `<h2 class="cv-section-header">${esc(titleCaseHeading(String(section.heading)))}</h2>`;
+    html += '<ul class="cv-bullets">';
+    for (const item of section.items) html += `<li>${renderInline(String(item), linkAnnotations)}</li>`;
+    html += '</ul>';
+  }
+
   if (Array.isArray(skeleton.educationLines) && skeleton.educationLines.length > 0) {
     html += '<h2 class="cv-section-header">Education, Certifications &amp; Recognition</h2>';
     html += '<ul class="cv-bullets">';
@@ -134,6 +142,12 @@ function formatStructuredCvToHtml(structuredCv, linkAnnotations = []) {
   }
 
   return html;
+}
+
+// ALL-CAPS source headings ("TECHNICAL LEADERSHIP & PROJECTS") render in the
+// same title case as the template's own section headers.
+function titleCaseHeading(heading) {
+  return heading.toLowerCase().replace(/(^|[\s/&(-])([a-z])/g, (m, sep, ch) => sep + ch.toUpperCase());
 }
 
 // ── CV text → Harvard-style HTML ──────────────────────────────────────────────

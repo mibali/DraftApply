@@ -85,8 +85,14 @@ export class CVTailor {
       // similar", "IaC using Terraform, Pulumi, OpenTofu or similar") are
       // satisfied by ANY listed alternative. Whole-sentence token matching
       // treats the list as a conjunction and reports "missing" for candidates
-      // who clearly qualify via one alternative.
-      const alternatives = this._extractRequirementAlternatives(req);
+      // who clearly qualify via one alternative. LLM enrichment often strips
+      // the list ("Production experience with ML lifecycle management
+      // platforms"), so fall back to the raw JD sentence that carries it.
+      let alternatives = this._extractRequirementAlternatives(req);
+      if (alternatives.length < 2) {
+        const jdSentence = this._findJdSentenceForRequirement(req, jdData?.rawText);
+        if (jdSentence) alternatives = this._extractRequirementAlternatives(jdSentence);
+      }
       const matchedAlternatives = [];
       if (alternatives.length >= 2) {
         for (const alt of alternatives) {
@@ -178,6 +184,21 @@ export class CVTailor {
         evidence: [`Requirement accepts alternatives; candidate has ${coveredBy}`],
       };
     });
+  }
+
+  // Locate the raw JD sentence a (possibly enrichment-shortened) requirement
+  // came from, so its OR-alternatives can be recovered.
+  _findJdSentenceForRequirement(requirement, jdRawText) {
+    const jdRaw = String(jdRawText || '');
+    if (!jdRaw) return '';
+    const reqTokens = this._normaliseText(requirement).split(/\s+/)
+      .filter(token => token.length >= 3).slice(0, 6);
+    if (reqTokens.length < 3) return '';
+    const sentences = jdRaw.split(/(?<=[.!?])\s+|\n+/).map(s => s.trim()).filter(s => s.length >= 20);
+    return sentences.find(sentence => {
+      const norm = this._normaliseText(sentence);
+      return reqTokens.every(token => norm.includes(token));
+    }) || '';
   }
 
   // Extract the alternatives of an OR-enumeration inside a requirement:
@@ -1722,7 +1743,11 @@ Do not add anything new. Return the complete corrected CV.`;
       }
     }
 
-    for (const exp of (originalCvData?.experience || [])) {
+    // Sanitised roles only: raw parses of corrupted sources (duplicated PDF
+    // text layers) contain ghost entries whose "title" is a location, which
+    // produced warnings like 'Role focus line may be missing under
+    // "Birmingham, UK"'.
+    for (const exp of this._sanitiseSkeletonRoles(originalCvData?.experience || [])) {
       const focus = this._buildRoleFocus(exp, jdData, matchMap);
       if (!focus || !exp.title) continue;
       const titleIdx = this._findTitleLineIndex(String(tailoredText).split('\n'), exp.title, 0);
@@ -2359,8 +2384,78 @@ Do not add anything new. Return the complete corrected CV.`;
       contacts: this._extractHeaderContactLines(cvData),
       roles,
       projects: this._sanitiseSkeletonProjects(cvData?.projects || []),
+      skillCategories: this._sanitiseSkeletonSkillCategories(cvData?.skillCategories || []),
+      extraSections: this._extractExtraSections(cvData),
       educationLines: this._extractEducationLines(cvData),
     };
+  }
+
+  _sanitiseSkeletonSkillCategories(skillCategories = []) {
+    const seen = new Set();
+    return skillCategories.flatMap(category => {
+      const label = this._clampInline(category?.label, 48);
+      const key = this._normaliseText(label);
+      if (!label || !key || seen.has(key)) return [];
+      const items = (Array.isArray(category?.items) ? category.items : [])
+        .map(item => this._clampInline(item, 48))
+        .filter(item => item && item.split(/\s+/).length <= 5);
+      if (items.length < 2) return [];
+      seen.add(key);
+      return [{ label, items: items.slice(0, 10) }];
+    }).slice(0, 8);
+  }
+
+  // Auxiliary ALL-CAPS sections the user wrote ("TECHNICAL LEADERSHIP &
+  // PROJECTS", "SELECTED ... ACHIEVEMENTS", publications, awards) are part of
+  // their CV's structure. Preserve them verbatim in the locked skeleton so
+  // the tailored CV keeps the source document's shape instead of silently
+  // dropping whole sections. Education/skills/experience have their own slots
+  // and are excluded here.
+  _extractExtraSections(cvData = {}) {
+    const raw = String(cvData?.rawText || '');
+    if (!raw) return [];
+    const INCLUDE = /\b(LEADERSHIP|PROJECTS?|ACHIEVEMENTS?|ACCOMPLISHMENTS?|PUBLICATIONS?|AWARDS?|VOLUNTEER(?:ING)?|STRATEGY)\b/;
+    const EXCLUDE = /\b(EDUCATION|CERTIFICATIONS?|SKILLS?|EXPERIENCE|SUMMARY|COMPETENC)\w*\b/;
+    const lines = raw.split('\n');
+    const sections = [];
+    const seenHeadings = new Set();
+    let current = null;
+
+    const isBoundary = line => {
+      const trimmed = String(line || '').trim();
+      return this._isLikelySectionHeader?.(trimmed)
+        || /^[A-Z][A-Z &,/'()\-]{5,69}$/.test(trimmed);
+    };
+
+    for (const rawLine of lines) {
+      const line = String(rawLine || '').trim();
+      const heading = /^[A-Z][A-Z &,/'()\-]{5,69}$/.test(line) && !/\d/.test(line);
+      if (heading && INCLUDE.test(line) && !EXCLUDE.test(line)) {
+        const key = this._normaliseText(line);
+        if (current) sections.push(current);
+        // Duplicated PDF text layers repeat whole sections; keep the first.
+        current = seenHeadings.has(key) ? null : { heading: line, items: [] };
+        seenHeadings.add(key);
+        continue;
+      }
+      if (!current) continue;
+      if (!line) continue;
+      if (heading || isBoundary(line)) { sections.push(current); current = null; continue; }
+      const isBullet = /^[•\-*●▪◦–—]\s+/.test(line);
+      const text = line.replace(/^[•\-*●▪◦–—]\s+/, '').trim();
+      if (!text) continue;
+      const previous = current.items.at(-1);
+      if (!isBullet && previous && !/[.!?:;]$/.test(previous)) {
+        current.items[current.items.length - 1] = `${previous} ${text}`;
+      } else if (text.length >= 8 && text.length <= 320) {
+        current.items.push(text);
+      }
+    }
+    if (current) sections.push(current);
+    return sections
+      .map(section => ({ ...section, items: this._dedupeSimilarBullets(section.items).slice(0, 10) }))
+      .filter(section => section.items.length > 0)
+      .slice(0, 4);
   }
 
   _sanitiseSkeletonProjects(projects = []) {
@@ -2460,7 +2555,7 @@ Do not add anything new. Return the complete corrected CV.`;
     const merged = [];
     const indexByKey = new Map();
     for (const role of cleaned) {
-      const primaryCompany = this._normaliseText(String(role.company).split('|')[0]);
+      const primaryCompany = this._normaliseText(String(role.company).split(/\s*\|\s*|\s+[—–]\s+/)[0]);
       const key = `${primaryCompany}::${this._normaliseText(role.dates)}`;
       if (!primaryCompany || !indexByKey.has(key)) {
         if (primaryCompany) indexByKey.set(key, merged.length);
@@ -2691,7 +2786,7 @@ STRICT RULES:
 3. Never claim any UNSUPPORTED requirement.
 4. Include every USER-CONFIRMED skill somewhere in competencies.
 5. Competency items are short skill or tool names of 1-4 words ("Terraform", "Model registry"). NEVER requirement sentences or phrases like "IaC using Terraform", "deep experience building systems", or "X years of experience". Never list the same tool twice in different phrasings.
-6. Use 3-6 competency categories with 3-8 items each. No item may repeat across categories. Choose each category label from this list (labels outside it are replaced with "Relevant Skills"): ${CVTailor.COMPETENCY_LABELS.filter(l => !/^(?:Relevant Skills|Additional Tools & Skills)$/.test(l)).join('; ')}.
+6. Use 3-6 competency categories with 3-8 items each. No item may repeat across categories. Prefer the candidate's own CV skill categories when present${skeleton.skillCategories?.length ? ` (${skeleton.skillCategories.map(c => c.label).join('; ')})` : ''}; otherwise choose each category label from this list (labels outside it are replaced with "Relevant Skills"): ${CVTailor.COMPETENCY_LABELS.filter(l => !/^(?:Relevant Skills|Additional Tools & Skills)$/.test(l)).join('; ')}.
 7. "focus" is a single line (max 120 characters) positioning that role for the target job, or null for roles with no meaningful connection to it.
 8. Keep each role's bullet count close to its original count (minimum 1, maximum 6). Never leave a role empty.
 9. No section headers, dates, company names, or contact details anywhere in your output.
@@ -2820,6 +2915,7 @@ Return the corrected JSON object now.`;
       confirmedSkills: safeConfirmedSkills,
       cvData,
       groundingContext,
+      skillCategories: skeleton.skillCategories || [],
     });
 
     const suppliedById = new Map();
@@ -2951,20 +3047,53 @@ Return the corrected JSON object now.`;
     return result;
   }
 
-  _normaliseStructuredCompetencies(raw, { confirmedSkills = [], groundingContext } = {}) {
+  // A competency item is grounded when a non-negated CV record contains it
+  // verbatim (normalised) AND that evidence passes the same isTextSupported
+  // bar the quality evaluator applies. This is the deterministic check the
+  // app itself can make - unlike model-cited sourceIds, which small models
+  // routinely omit or garble. Dropping every uncited item was the failure
+  // mode where a CV full of real skills rendered with a single
+  // confirmed-skills catch-all line.
+  _groundCompetencyItem(item, groundingContext) {
+    const key = this._normaliseText(item);
+    if (!key) return { supported: false, sourceIds: [] };
+    const sourceIds = (groundingContext?.records || [])
+      .filter(record => !/\b(?:no|not|never|without|lack(?:s|ed|ing)?|\w+n['’]?t)\b/i.test(record.text)
+        && this._normaliseText(record.text).includes(key))
+      .map(record => record.sourceId)
+      .slice(0, 5);
+    if (sourceIds.length === 0) return { supported: false, sourceIds: [] };
+    const supported = isTextSupported(item, groundingContext, { sourceIds, requireSourceIds: true }).supported;
+    return { supported, sourceIds };
+  }
+
+  _normaliseStructuredCompetencies(raw, { confirmedSkills = [], groundingContext, skillCategories = [] } = {}) {
     const PROSE_RE = /\b(using|with|within|experience|experienced|deep|strong|proficien\w*|expertise|knowledge|ability|abilities|years?|including|such as|hands.on)\b/i;
     const safeLabels = new Map(CVTailor.COMPETENCY_LABELS.map(label => [this._normaliseText(label), label]));
+    // The user's own category labels are trusted display text - the model may
+    // reuse them even though they are outside the app vocabulary.
+    for (const category of skillCategories) {
+      const label = this._clampInline(category?.label, 48);
+      if (label) safeLabels.set(this._normaliseText(label), label);
+    }
     const confirmed = this._normaliseConfirmedSkills(confirmedSkills);
     const confirmedKeys = new Set(confirmed.map(s => this._normaliseText(s)));
 
     const categories = [];
     const globalKeys = new Set();
+    const addCategory = (label, deduped) => {
+      if (deduped.length < 1) return;
+      const existing = categories.find(category => category.label === label);
+      if (existing) existing.items = this._dedupeContainedSkillItems([...existing.items, ...deduped]).slice(0, 8);
+      else categories.push({ label, items: deduped.slice(0, 8) });
+    };
     for (const cat of (Array.isArray(raw) ? raw : [])) {
       const proposedLabel = this._clampInline(cat?.label, 48);
       if (!proposedLabel) continue;
       // Category labels are model-authored display text. Keep them within an
-      // application-owned vocabulary so a model cannot smuggle an employer,
-      // credential, instruction, or other unsupported claim into a heading.
+      // application-owned vocabulary (or the user's own CV category labels)
+      // so a model cannot smuggle an employer, credential, instruction, or
+      // other unsupported claim into a heading.
       const label = safeLabels.get(this._normaliseText(proposedLabel)) || 'Relevant Skills';
       const items = [];
       for (const rawItem of (Array.isArray(cat?.items) ? cat.items : [])) {
@@ -2976,26 +3105,48 @@ Return the corrected JSON object now.`;
         const key = this._normaliseText(item);
         if (!key || globalKeys.has(key)) continue;
         const sourceIds = Array.isArray(claim?.sourceIds) ? claim.sourceIds.filter(id => typeof id === 'string') : [];
-        if (!confirmedKeys.has(key) && !isTextSupported(item, groundingContext, {
-          sourceIds,
-          requireSourceIds: true,
-        }).supported) continue;
+        const supported = confirmedKeys.has(key)
+          || this._groundCompetencyItem(item, groundingContext).supported
+          || isTextSupported(item, groundingContext, { sourceIds, requireSourceIds: true }).supported;
+        if (!supported) continue;
         globalKeys.add(key);
         items.push(item);
       }
-      const deduped = this._dedupeContainedSkillItems(items);
-      if (deduped.length >= 1) {
-        const existing = categories.find(category => category.label === label);
-        if (existing) existing.items = this._dedupeContainedSkillItems([...existing.items, ...deduped]).slice(0, 8);
-        else categories.push({ label, items: deduped.slice(0, 8) });
-      }
+      addCategory(label, this._dedupeContainedSkillItems(items));
       if (categories.length >= 6) break;
+    }
+
+    // Transfer the user's own skill categories: when the model returned fewer
+    // than five usable categories, top up from the CV's skills section
+    // (verbatim user content, grounded by construction) so matched skills are
+    // never lost between the source CV and the tailored CV.
+    for (const category of skillCategories) {
+      if (categories.length >= 5 && categories.reduce((n, c) => n + c.items.length, 0) >= 15) break;
+      const label = this._clampInline(category?.label, 48);
+      if (!label) continue;
+      const items = (category.items || [])
+        .map(item => this._clampInline(item, 48))
+        .filter(item => item && !PROSE_RE.test(item) && item.split(/\s+/).length <= 5)
+        .filter(item => {
+          const key = this._normaliseText(item);
+          if (!key || globalKeys.has(key)) return false;
+          if (!this._groundCompetencyItem(item, groundingContext).supported) return false;
+          globalKeys.add(key);
+          return true;
+        });
+      addCategory(label, this._dedupeContainedSkillItems(items));
     }
 
     // Every user-confirmed skill must be present somewhere. The category
     // label is recruiter-facing text - never expose internal app vocabulary
-    // like "Confirmed Skills" on the rendered CV.
-    const missingConfirmed = confirmed.filter(s => !globalKeys.has(this._normaliseText(s)));
+    // like "Confirmed Skills" on the rendered CV. Skills already covered by a
+    // category item (ignoring spacing: "Argo CD" vs "ArgoCD") are not
+    // re-listed.
+    const compactKeys = new Set([...globalKeys].map(key => key.replace(/\s+/g, '')));
+    const missingConfirmed = confirmed.filter(s => {
+      const key = this._normaliseText(s);
+      return !globalKeys.has(key) && !compactKeys.has(key.replace(/\s+/g, ''));
+    });
     if (missingConfirmed.length > 0) {
       const target = categories.find(c => c.label === 'Additional Tools & Skills');
       if (target) target.items.push(...missingConfirmed);
@@ -3080,6 +3231,12 @@ Return the corrected JSON object now.`;
         if ((project.skills || []).length) lines.push(`Technologies: ${project.skills.join(', ')}`);
         lines.push('');
       }
+    }
+
+    for (const section of (skeleton.extraSections || [])) {
+      lines.push(section.heading);
+      for (const item of section.items) lines.push(`• ${item}`);
+      lines.push('');
     }
 
     if (Array.isArray(skeleton.educationLines) && skeleton.educationLines.length > 0) {

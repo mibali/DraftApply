@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { CVParser } from '../shared/cv-parser.js';
 import { MULTICOLUMN_CV_TEXT } from './fixtures/multicolumn-cv.js';
 import { DUPLICATED_TEXT_LAYER_CV } from './fixtures/duplicated-text-layer-cv.js';
+import { EMDASH_FORMAT_CV } from './fixtures/emdash-format-cv.js';
 
 describe('CVParser contact extraction', () => {
   it('does not treat an email domain as a personal website', () => {
@@ -482,5 +483,31 @@ describe('CVParser regression: duplicated PDF text layer (live Harvard-style CV)
     expect(cv.achievements.some(a => a.includes('AI-powered log analysis tool'))).toBe(true);
     expect(cv.achievements.some(a =>
       a.includes('Cody API wrapper compatible with OpenAI and LangChain, enabling flexible AI integration for internal tooling and automation workflows.'))).toBe(true);
+  });
+});
+
+describe('CVParser: em-dash header format + labelled skill categories (reference CV format)', () => {
+  const cv = new CVParser().parse(EMDASH_FORMAT_CV);
+
+  it('keeps company and location together and claims the real title from the next line', () => {
+    const sg = cv.experience.find(e => /Sourcegraph/.test(e.company));
+    expect(sg.company).toBe('Sourcegraph — UK (Remote)');
+    expect(sg.title).toBe('DevOps & Platform Engineer (IC4) — promoted from Senior Technical Support Engineer');
+    const ms = cv.experience.find(e => /Microsoft/.test(e.company));
+    expect(ms.title).toBe('Cloud Support Engineer | Cloud Service SME');
+  });
+
+  it('extracts labelled skill categories, joining hard-wrapped lines and comma labels', () => {
+    const labels = cv.skillCategories.map(c => c.label);
+    expect(labels).toEqual(['MLOps & ML Lifecycle', 'CI/CD & Automation', 'Cloud, IaC & Platform']);
+    const mlops = cv.skillCategories[0];
+    expect(mlops.items).toContain('batch & real-time inference');
+    expect(cv.skillCategories[1].items).toContain('Python');
+  });
+
+  it('drops glued cross-category items containing a colon', () => {
+    for (const category of cv.skillCategories) {
+      expect(category.items.some(item => item.includes(':'))).toBe(false);
+    }
   });
 });

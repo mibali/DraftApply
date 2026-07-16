@@ -1748,3 +1748,24 @@ describe('OR-list requirement matching (regression: 14% score for a strong-fit M
     expect(tailor._extractRequirementAlternatives('Strong communication and ownership')).toEqual([]);
   });
 });
+
+describe('OR-list recovery from the raw JD (enrichment-stripped requirements)', () => {
+  it('recovers alternatives from the JD sentence when the requirement lost its such-as list', () => {
+    const tailor = new CVTailor();
+    const cvData = {
+      summary: '', certifications: [], achievements: [], rawText: '',
+      skills: ['MLflow', 'experiment tracking', 'model registry'],
+      experience: [{
+        company: 'DualMind', title: 'MLOps Engineer', dates: '2025 - Present',
+        responsibilities: ['Implemented lifecycle management with DVC and MLflow patterns.'],
+      }],
+    };
+    const jdData = {
+      requiredSkills: ['production experience with ML lifecycle management platforms'],
+      preferredSkills: [], tools: [], softSkills: [],
+      rawText: 'What we look for:\nProduction experience with ML lifecycle management platforms such as MLFlow, Weights & Biases, Neptune.ai, Comet.ml or similar\nOther requirements follow.',
+    };
+    const matchMap = tailor.buildMatchMap(cvData, jdData, []);
+    expect(matchMap[0].status).toBe('strong_match');
+  });
+});
