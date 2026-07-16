@@ -3127,6 +3127,7 @@ Return the corrected JSON object now.`;
     // (verbatim user content, grounded by construction) so matched skills are
     // never lost between the source CV and the tailored CV.
     for (const category of skillCategories) {
+      if (categories.length >= 7) break;
       if (categories.length >= 5 && categories.reduce((n, c) => n + c.items.length, 0) >= 15) break;
       const label = this._clampInline(category?.label, 48);
       if (!label) continue;

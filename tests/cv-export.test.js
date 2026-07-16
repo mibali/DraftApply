@@ -633,3 +633,34 @@ Certified Kubernetes Administrator (CKA)`);
     expect(safeDownloadName('Jane / Doe: CV')).toBe('Jane Doe CV.doc');
   });
 });
+
+describe('structured export: extra sections from the source CV', () => {
+  it('renders locked extra sections once, after projects and before education', () => {
+    const format = loadStructuredFormatter();
+    const html = format({
+      skeleton: {
+        name: 'MICHAEL T BALI',
+        headline: 'Senior MLOps Engineer',
+        contacts: ['Birmingham, UK | m@example.com'],
+        roles: [{ id: 'role_0', company: 'Acme', dates: '2020 - Present', title: 'Engineer' }],
+        projects: [],
+        extraSections: [{
+          heading: 'TECHNICAL LEADERSHIP & PROJECTS',
+          items: ['Authored Beyond the Ticket, a published guide (Amazon).', 'Built an AI-powered log analysis tool.'],
+        }],
+        educationLines: ['BSc Information Technology, 2018'],
+      },
+      content: {
+        summary: 'Summary.',
+        competencies: [],
+        roles: [{ id: 'role_0', focus: null, bullets: ['Did the work.'] }],
+      },
+    });
+
+    expect(html).toContain('<h2 class="cv-section-header">Technical Leadership &amp; Projects</h2>');
+    expect(html.match(/Beyond the Ticket/g)).toHaveLength(1);
+    const sectionIdx = html.indexOf('Technical Leadership');
+    expect(sectionIdx).toBeGreaterThan(html.indexOf('Professional Experience'));
+    expect(sectionIdx).toBeLessThan(html.indexOf('Education, Certifications'));
+  });
+});
