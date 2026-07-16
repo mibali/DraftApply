@@ -2416,6 +2416,11 @@ Do not add anything new. Return the complete corrected CV.`;
     if (!raw) return [];
     const INCLUDE = /\b(LEADERSHIP|PROJECTS?|ACHIEVEMENTS?|ACCOMPLISHMENTS?|PUBLICATIONS?|AWARDS?|VOLUNTEER(?:ING)?|STRATEGY)\b/;
     const EXCLUDE = /\b(EDUCATION|CERTIFICATIONS?|SKILLS?|EXPERIENCE|SUMMARY|COMPETENC)\w*\b/;
+    // A plain PROJECTS section already renders through the structured
+    // projects slot; capturing it here too would render its bullets twice.
+    // It is only preserved here when structured project parsing found
+    // nothing (e.g. entries without URLs), so content is never lost.
+    const hasStructuredProjects = (cvData?.projects || []).length > 0;
     const lines = raw.split('\n');
     const sections = [];
     const seenHeadings = new Set();
@@ -2430,7 +2435,8 @@ Do not add anything new. Return the complete corrected CV.`;
     for (const rawLine of lines) {
       const line = String(rawLine || '').trim();
       const heading = /^[A-Z][A-Z &,/'()\-]{5,69}$/.test(line) && !/\d/.test(line);
-      if (heading && INCLUDE.test(line) && !EXCLUDE.test(line)) {
+      if (heading && INCLUDE.test(line) && !EXCLUDE.test(line)
+          && !(hasStructuredProjects && /^PROJECTS?$/.test(line))) {
         const key = this._normaliseText(line);
         if (current) sections.push(current);
         // Duplicated PDF text layers repeat whole sections; keep the first.

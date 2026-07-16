@@ -813,3 +813,32 @@ describe('reference-format CV: structure preservation end-to-end', () => {
     expect(catchAll.items).toEqual(['Neptune.ai']);
   });
 });
+
+describe('extra sections never duplicate structured slots', () => {
+  const base = ['Jane Doe', 'jane@example.com', '', 'PROFESSIONAL EXPERIENCE',
+    'Acme | Engineer | Jan 2020 - Present',
+    '• Built reliable API integrations for enterprise customers.', ''];
+
+  it('a PROJECTS section with structured entries renders once, via the projects slot', () => {
+    const parsed = new CVParser().parse([...base, 'PROJECTS',
+      'SignalBoard (https://signal.example.test)',
+      '• Built an incident dashboard for enterprise clients.', '', 'EDUCATION', 'BSc'].join('\n'));
+    const skel = tailor.buildCvSkeleton(parsed, { jobTitle: 'X' });
+    expect(skel.projects).toHaveLength(1);
+    expect(skel.extraSections).toEqual([]);
+    const rendered = tailor.renderTailoredCV(skel,
+      tailor.validateStructuredContent({ summary: null, competencies: [], roles: [] }, skel, { cvData: parsed }));
+    expect(rendered.match(/incident dashboard/g)).toHaveLength(1);
+  });
+
+  it('a PROJECTS section without URLs is preserved once, via extra sections', () => {
+    const parsed = new CVParser().parse([...base, 'PROJECTS',
+      '• Built an incident dashboard for enterprise clients.', '', 'EDUCATION', 'BSc'].join('\n'));
+    const skel = tailor.buildCvSkeleton(parsed, { jobTitle: 'X' });
+    expect(skel.projects).toEqual([]);
+    expect(skel.extraSections).toHaveLength(1);
+    const rendered = tailor.renderTailoredCV(skel,
+      tailor.validateStructuredContent({ summary: null, competencies: [], roles: [] }, skel, { cvData: parsed }));
+    expect(rendered.match(/incident dashboard/g)).toHaveLength(1);
+  });
+});
