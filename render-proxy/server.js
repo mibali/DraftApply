@@ -104,7 +104,7 @@ const REDIS_RECONNECT_MAX_MS = coercePositiveInteger(process.env.REDIS_RECONNECT
 const REDIS_STARTUP_TIMEOUT_MS = coercePositiveInteger(process.env.REDIS_STARTUP_TIMEOUT_MS, 30_000);
 const SUBJECT_QUOTA_OPTIONS = {
   maxConcurrentPerSubject: coercePositiveInteger(process.env.QUOTA_MAX_CONCURRENT_PER_SUBJECT, 1),
-  maxRequestsPerSubject: coercePositiveInteger(process.env.QUOTA_MAX_REQUESTS_PER_SUBJECT, 20),
+  maxRequestsPerSubject: coercePositiveInteger(process.env.QUOTA_MAX_REQUESTS_PER_SUBJECT, 100),
   maxTokensPerSubject: coercePositiveInteger(process.env.QUOTA_MAX_TOKENS_PER_SUBJECT, 500_000),
   maxSpendMicrosPerSubject: coercePositiveInteger(process.env.QUOTA_MAX_SPEND_MICROS_PER_SUBJECT, 500_000),
 };

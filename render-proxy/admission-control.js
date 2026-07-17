@@ -47,7 +47,7 @@ export async function connectRedisAtStartup(client, timeoutMs = 30_000) {
 export class MemoryAdmissionStore {
   constructor({
     maxConcurrent = 8, maxRequests = 1000, maxTokens = 2_000_000, maxSpendMicros = 100_000_000,
-    maxConcurrentPerSubject = 1, maxRequestsPerSubject = 20, maxTokensPerSubject = 500_000,
+    maxConcurrentPerSubject = 1, maxRequestsPerSubject = 100, maxTokensPerSubject = 500_000,
     maxSpendMicrosPerSubject = 500_000,
   } = {}) {
     this.limits = {
@@ -100,7 +100,7 @@ export class RedisAdmissionStore {
   constructor(client, {
     key = 'draftapply:quota', maxConcurrent = 100, maxRequests = 10000,
     maxTokens = 20_000_000, maxSpendMicros = 1_000_000_000,
-    maxConcurrentPerSubject = 1, maxRequestsPerSubject = 20,
+    maxConcurrentPerSubject = 1, maxRequestsPerSubject = 100,
     maxTokensPerSubject = 500_000, maxSpendMicrosPerSubject = 500_000,
     windowSeconds = 86400, leaseSeconds = 120,
   } = {}) {
