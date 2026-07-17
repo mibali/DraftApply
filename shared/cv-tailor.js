@@ -2781,7 +2781,7 @@ The candidate's CV structure (name, contact details, companies, employment dates
 
 OUTPUT SCHEMA — return exactly this shape:
 {
-  "summary": {"text":"3-4 sentence professional summary targeting the role","sourceIds":["..."]},
+  "summary": {"text":"3-4 sentence professional summary tailored to the target role (rule 11)","sourceIds":["..."]},
   "competencies": [ { "label": "Category name", "items": [{"text":"Skill or Tool","sourceIds":["..."]}] } ],
   "roles": [ { "id": "role_0", "focus": {"text":"one-line positioning","sourceIds":["..."]} or null, "bullets": [{"text":"...","sourceIds":["..."]}] } ]
 }
@@ -2796,7 +2796,8 @@ STRICT RULES:
 7. "focus" is a single line (max 120 characters) positioning that role for the target job, or null for roles with no meaningful connection to it.
 8. Keep each role's bullet count close to its original count (minimum 1, maximum 6). Never leave a role empty.
 9. No section headers, dates, company names, or contact details anywhere in your output.
-10. The output must be valid JSON: double quotes, no trailing commas, no comments.`;
+10. The output must be valid JSON: double quotes, no trailing commas, no comments.
+11. Write the summary as 3-4 flowing sentences that read as one coherent paragraph, in this arc: (1) professional identity — discipline and years of experience phrased for the target role; (2) the hands-on strengths and technologies from the CV that answer the job's most important requirements; (3) how the candidate works or delivers impact; (4) an optional differentiator or recognition. Rephrase the candidate's own summary and strongest evidence with the target role's vocabulary — do not copy the original summary verbatim, and do not stitch together disconnected fragments. Every sentence must stay fully supported by the cited sources.`;
 
     const rolesBlock = skeleton.roles.map(role => {
       const bullets = role.originalBullets.length
@@ -2898,23 +2899,43 @@ Return the corrected JSON object now.`;
     const groundingContext = buildGroundingContext(cvData, { confirmedFacts: safeConfirmedSkills });
     const summaryClaim = typeof content.summary === 'object' && !Array.isArray(content.summary) ? content.summary : null;
     const summarySourceIds = Array.isArray(summaryClaim?.sourceIds) ? summaryClaim.sourceIds.filter(id => typeof id === 'string') : [];
-    const acceptedSummary = String(summaryClaim?.text || '').split(/(?<=[.!?])\s+/)
+    const summaryEvidenceIds = new Set(summarySourceIds.filter(id => groundingContext.sourceIndex[id]));
+    const suppliedSummarySentences = String(summaryClaim?.text || '').split(/(?<=[.!?])\s+/)
       .map(sentence => this._clampInline(sentence, 600))
-      .filter(sentence => sentence && isTextSupported(sentence, groundingContext, {
+      .filter(Boolean);
+    // A model citation slip must not gut a truthful tailored summary: a
+    // sentence whose citations fail gets a second chance against every CV
+    // record at the same evidence bar, and the supporting records join the
+    // summary's evidence trail.
+    const groundedSummarySentences = suppliedSummarySentences.filter(sentence => {
+      if (isTextSupported(sentence, groundingContext, {
         sourceIds: summarySourceIds,
         requireSourceIds: true,
-      }).supported)
-      .join(' ');
+      }).supported) return true;
+      const fallbackRecords = (groundingContext.records || []).filter(record =>
+        isTextSupported(sentence, groundingContext, {
+          sourceIds: [record.sourceId],
+          requireSourceIds: true,
+        }).supported);
+      if (fallbackRecords.length === 0) return false;
+      for (const record of fallbackRecords.slice(0, 3)) summaryEvidenceIds.add(record.sourceId);
+      return true;
+    });
+    const acceptedSummary = groundedSummarySentences.join(' ');
     const originalSummarySentences = String(cvData?.summary || '').split(/(?<=[.!?])\s+/).map(sentence => this._clampInline(sentence, 600)).filter(Boolean).slice(0, 4);
-    const acceptedSummarySentences = acceptedSummary.split(/(?<=[.!?])\s+/).filter(Boolean);
-    const summaryFellBelowSourceShape = originalSummarySentences.length > 1 && acceptedSummarySentences.length < 2;
+    // A summary that lost most of its sentences to grounding reads as
+    // disconnected fragments; the user's own coherent summary is better than
+    // a choppy tailored one.
+    const summaryFellBelowSourceShape = originalSummarySentences.length > 1
+      && (groundedSummarySentences.length < 2
+        || groundedSummarySentences.length < suppliedSummarySentences.length / 2);
     const summary = summaryFellBelowSourceShape
       ? this._clampInline(originalSummarySentences.join(' '), 1200)
       : acceptedSummary;
     const summaryEvidence = summary
       ? summaryFellBelowSourceShape
         ? ['summary:0'].filter(id => groundingContext.sourceIndex[id])
-        : summarySourceIds.filter(id => groundingContext.sourceIndex[id])
+        : [...summaryEvidenceIds]
       : [];
     const competencies = this._normaliseStructuredCompetencies(content.competencies, {
       matchMap,

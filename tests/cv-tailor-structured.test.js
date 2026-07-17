@@ -842,3 +842,37 @@ describe('extra sections never duplicate structured slots', () => {
     expect(rendered.match(/incident dashboard/g)).toHaveLength(1);
   });
 });
+
+describe('summary grounding: coherence over choppiness', () => {
+  const parsed = new CVParser().parse(EMDASH_FORMAT_CV);
+  const skel = tailor.buildCvSkeleton(parsed, { jobTitle: 'Senior MLOps Engineer' });
+  const roleBulletId = skel.roles.find(r => /DualMind/.test(r.company)).originalBulletEvidence[0].sourceIds[0];
+
+  it('keeps a truthful tailored sentence whose citations the model botched (second-chance grounding)', () => {
+    const content = tailor.validateStructuredContent({
+      summary: {
+        // Both sentences are grounded in the CV; the model cited a wrong id.
+        text: 'Cloud, platform, and MLOps engineer with 7+ years across production support, DevOps, Kubernetes, CI/CD, and ML deployment. Implemented data and model lifecycle management with DVC and MLflow, including dataset tracking and experiment logging.',
+        sourceIds: ['summary:0'],
+      },
+      competencies: [], roles: [],
+    }, skel, { matchMap: [], confirmedSkills: [], cvData: parsed });
+    expect(content.summary).toMatch(/DVC and MLflow/);
+    // The second-chance evidence trail includes the supporting record.
+    expect(content.summaryEvidence).toContain(roleBulletId);
+  });
+
+  it('falls back to the original summary when grounding guts most of the tailored one', () => {
+    const content = tailor.validateStructuredContent({
+      summary: {
+        text: 'Cloud, platform, and MLOps engineer with 7+ years across production support, DevOps, Kubernetes, CI/CD, and ML deployment. Won the Nobel Prize for infrastructure. Managed a team of 400 engineers at Google. Shipped autonomous vehicles to Mars.',
+        sourceIds: ['summary:0'],
+      },
+      competencies: [], roles: [],
+    }, skel, { matchMap: [], confirmedSkills: [], cvData: parsed });
+    // 1 of 4 sentences grounded -> incoherent fragment; prefer the original.
+    expect(content.summary).not.toMatch(/Nobel|Google|Mars/);
+    expect(content.summary).toMatch(/^Cloud, platform, and MLOps engineer/);
+    expect(content.summaryEvidence).toEqual(['summary:0']);
+  });
+});

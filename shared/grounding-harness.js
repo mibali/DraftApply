@@ -19,7 +19,13 @@ function normalise(value) {
 }
 
 function tokens(value) {
-  return normalise(value).split(/\s+/).filter(token => token.length > 2 && !STOP.has(token));
+  // normalise() keeps dots for dotted names (Node.js, Neptune.ai), which
+  // leaves sentence-final words carrying their full stop ("logging.") and
+  // never matching the same word inside evidence. Trailing dots are
+  // punctuation, not part of the token.
+  return normalise(value).split(/\s+/)
+    .map(token => token.replace(/\.+$/, ''))
+    .filter(token => token.length > 2 && !STOP.has(token));
 }
 
 function splitSentences(text) {
