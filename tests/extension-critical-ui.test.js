@@ -201,3 +201,19 @@ describe('extension critical modal behavior', () => {
     expect(popupHtml).toContain('agent-domain-prompts');
   });
 });
+
+describe('answer generation uses full CV facts and respects user authorship', () => {
+  it('merges CV hyperlink annotations into the answer payload so URLs hidden behind link text are answerable', () => {
+    expect(contentJs).toContain('_cvTextWithLinks(cvResponse)');
+    expect(contentJs).toMatch(/cvText:\s+this\._cvTextWithLinks\(cvResponse\)/);
+    // No payload site may bypass the merge and send bare stored text.
+    expect(contentJs).not.toMatch(/cvText:\s+cvResponse\.cvText\b/);
+  });
+
+  it('lets the user insert their own edited answer, gated only by the field character limit', () => {
+    expect(contentJs).toContain('const isUserEdit = this.answerUserEdited && Boolean(current)');
+    expect(contentJs).toContain("insertButton.textContent = overLimit ? 'Over Character Limit' : 'Insert (Your Edit)'");
+    // The old behavior forced regeneration after any manual edit.
+    expect(contentJs).not.toContain("'Regenerate to Validate'");
+  });
+});

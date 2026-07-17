@@ -1094,6 +1094,23 @@ class DraftApplyExtension {
     }
   }
 
+  // The CV file's hyperlink annotations (a "LinkedIn" link whose URL lives in
+  // the PDF's annotation layer, not its text) are part of the CV's facts.
+  // Older saved CVs may lack the extracted "Links:" block in their text, so
+  // answers reported the LinkedIn URL as "not found" even though the
+  // annotation was in storage. Merge any URL the text doesn't already
+  // contain, near the header so context truncation can never drop it.
+  _cvTextWithLinks(cvResponse) {
+    const text = String(cvResponse?.cvText || '');
+    const annotations = Array.isArray(cvResponse?.linkAnnotations) ? cvResponse.linkAnnotations : [];
+    const missing = annotations.filter(a => a?.url && !text.includes(a.url));
+    if (missing.length === 0) return text;
+    const lines = text.split('\n');
+    lines.splice(Math.min(3, lines.length), 0, ...missing.map(a =>
+      (a.text && !/^https?:/i.test(a.text)) ? `${a.text}: ${a.url}` : a.url));
+    return lines.join('\n');
+  }
+
   async _startPrefetch(field) {
     const label = this.findFieldLabel(field);
     const fieldHint = field.name || field.id || field.placeholder || null;
@@ -1114,7 +1131,7 @@ class DraftApplyExtension {
       question,
       length: this._inferLengthFromField(field) || 'medium',
       tone:   'natural',
-      cvText:         cvResponse.cvText,
+      cvText:         this._cvTextWithLinks(cvResponse),
       jobTitle:       jobContextForPayload.jobTitle,
       company:        jobContextForPayload.company,
       jobDescription: jobContextForPayload.jobDescription,
@@ -1279,7 +1296,7 @@ class DraftApplyExtension {
         question,
         length,
         tone,
-        cvText:         cvResponse.cvText,
+        cvText:         this._cvTextWithLinks(cvResponse),
         jobTitle:       jobContextForPayload.jobTitle,
         company:        jobContextForPayload.company,
         jobDescription: jobContextForPayload.jobDescription,
