@@ -36,7 +36,7 @@ describe('production proxy safety primitives', () => {
   it('reserves and releases concurrency while retaining quota usage', async () => {
     const store = new MemoryAdmissionStore({ maxConcurrent: 1, maxRequests: 2 });
     const reservation = await store.reserve({ subjectKey: 'install-a', tokens: 10 });
-    await expect(store.reserve({ subjectKey: 'install-a', tokens: 1 })).rejects.toMatchObject({ code: 'quota_exceeded' });
+    await expect(store.reserve({ subjectKey: 'install-a', tokens: 1 })).rejects.toMatchObject({ code: 'quota_global_concurrency' });
     await store.release(reservation);
     await expect(store.reserve({ subjectKey: 'install-a', tokens: 1 })).resolves.toEqual(expect.any(String));
     expect(store.used.requests).toBe(2);
@@ -50,7 +50,7 @@ describe('production proxy safety primitives', () => {
       maxRequestsPerSubject: 1,
     });
     const first = await store.reserve({ subjectKey: 'install-a', tokens: 1 });
-    await expect(store.reserve({ subjectKey: 'install-a', tokens: 1 })).rejects.toMatchObject({ code: 'quota_exceeded' });
+    await expect(store.reserve({ subjectKey: 'install-a', tokens: 1 })).rejects.toMatchObject({ code: 'quota_subject_concurrency' });
     const second = await store.reserve({ subjectKey: 'install-b', tokens: 1 });
     await store.release(first);
     await store.release(second);
@@ -79,5 +79,21 @@ describe('production proxy safety primitives', () => {
       recordProviderTrace({ provider: 'openrouter', outcome: 'success' });
       expect(reconciledUsage()).toEqual({});
     });
+  });
+});
+
+describe('quota denial codes name the cap that fired', () => {
+  it('distinguishes subject token and spend caps from request caps', async () => {
+    const tokenStore = new MemoryAdmissionStore({ maxTokensPerSubject: 100 });
+    await expect(tokenStore.reserve({ subjectKey: 'a', tokens: 101 }))
+      .rejects.toMatchObject({ code: 'quota_subject_tokens' });
+    const spendStore = new MemoryAdmissionStore({ maxSpendMicrosPerSubject: 100 });
+    await expect(spendStore.reserve({ subjectKey: 'a', tokens: 1, spendMicros: 101 }))
+      .rejects.toMatchObject({ code: 'quota_subject_spend' });
+    const reqStore = new MemoryAdmissionStore({ maxRequestsPerSubject: 1, maxConcurrentPerSubject: 2 });
+    const first = await reqStore.reserve({ subjectKey: 'a', tokens: 1 });
+    await expect(reqStore.reserve({ subjectKey: 'a', tokens: 1 }))
+      .rejects.toMatchObject({ code: 'quota_subject_requests' });
+    await reqStore.release(first);
   });
 });

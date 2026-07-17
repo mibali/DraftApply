@@ -105,8 +105,8 @@ const REDIS_STARTUP_TIMEOUT_MS = coercePositiveInteger(process.env.REDIS_STARTUP
 const SUBJECT_QUOTA_OPTIONS = {
   maxConcurrentPerSubject: coercePositiveInteger(process.env.QUOTA_MAX_CONCURRENT_PER_SUBJECT, 1),
   maxRequestsPerSubject: coercePositiveInteger(process.env.QUOTA_MAX_REQUESTS_PER_SUBJECT, 100),
-  maxTokensPerSubject: coercePositiveInteger(process.env.QUOTA_MAX_TOKENS_PER_SUBJECT, 500_000),
-  maxSpendMicrosPerSubject: coercePositiveInteger(process.env.QUOTA_MAX_SPEND_MICROS_PER_SUBJECT, 500_000),
+  maxTokensPerSubject: coercePositiveInteger(process.env.QUOTA_MAX_TOKENS_PER_SUBJECT, 5_000_000),
+  maxSpendMicrosPerSubject: coercePositiveInteger(process.env.QUOTA_MAX_SPEND_MICROS_PER_SUBJECT, 5_000_000),
 };
 
 // Recipe module – default is the bundled open-source recipe. Set RECIPE_PATH to override.

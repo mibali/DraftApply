@@ -46,9 +46,9 @@ export async function connectRedisAtStartup(client, timeoutMs = 30_000) {
 
 export class MemoryAdmissionStore {
   constructor({
-    maxConcurrent = 8, maxRequests = 1000, maxTokens = 2_000_000, maxSpendMicros = 100_000_000,
-    maxConcurrentPerSubject = 1, maxRequestsPerSubject = 100, maxTokensPerSubject = 500_000,
-    maxSpendMicrosPerSubject = 500_000,
+    maxConcurrent = 8, maxRequests = 1000, maxTokens = 20_000_000, maxSpendMicros = 100_000_000,
+    maxConcurrentPerSubject = 1, maxRequestsPerSubject = 100, maxTokensPerSubject = 5_000_000,
+    maxSpendMicrosPerSubject = 5_000_000,
   } = {}) {
     this.limits = {
       maxConcurrent, maxRequests, maxTokens, maxSpendMicros,
@@ -60,11 +60,16 @@ export class MemoryAdmissionStore {
   }
   async reserve({ subjectKey = 'anonymous', tokens = 0, spendMicros = 0 }) {
     const subject = this.subjects.get(subjectKey) || { concurrent: 0, requests: 0, tokens: 0, spendMicros: 0 };
-    if (this.active.size >= this.limits.maxConcurrent || this.used.requests + 1 > this.limits.maxRequests ||
-      this.used.tokens + tokens > this.limits.maxTokens || this.used.spendMicros + spendMicros > this.limits.maxSpendMicros ||
-      subject.concurrent >= this.limits.maxConcurrentPerSubject || subject.requests + 1 > this.limits.maxRequestsPerSubject ||
-      subject.tokens + tokens > this.limits.maxTokensPerSubject ||
-      subject.spendMicros + spendMicros > this.limits.maxSpendMicrosPerSubject) throw new AdmissionDeniedError();
+    // Distinct denial codes: "quota_exceeded" alone made a token/spend cap
+    // denial indistinguishable from a request-count denial in production.
+    if (this.active.size >= this.limits.maxConcurrent) throw new AdmissionDeniedError('quota_global_concurrency');
+    if (this.used.requests + 1 > this.limits.maxRequests) throw new AdmissionDeniedError('quota_global_requests');
+    if (this.used.tokens + tokens > this.limits.maxTokens) throw new AdmissionDeniedError('quota_global_tokens');
+    if (this.used.spendMicros + spendMicros > this.limits.maxSpendMicros) throw new AdmissionDeniedError('quota_global_spend');
+    if (subject.concurrent >= this.limits.maxConcurrentPerSubject) throw new AdmissionDeniedError('quota_subject_concurrency');
+    if (subject.requests + 1 > this.limits.maxRequestsPerSubject) throw new AdmissionDeniedError('quota_subject_requests');
+    if (subject.tokens + tokens > this.limits.maxTokensPerSubject) throw new AdmissionDeniedError('quota_subject_tokens');
+    if (subject.spendMicros + spendMicros > this.limits.maxSpendMicrosPerSubject) throw new AdmissionDeniedError('quota_subject_spend');
     const id = crypto.randomUUID();
     this.active.set(id, { subjectKey, tokens, spendMicros });
     this.used.requests++; this.used.tokens += tokens; this.used.spendMicros += spendMicros;
@@ -101,7 +106,7 @@ export class RedisAdmissionStore {
     key = 'draftapply:quota', maxConcurrent = 100, maxRequests = 10000,
     maxTokens = 20_000_000, maxSpendMicros = 1_000_000_000,
     maxConcurrentPerSubject = 1, maxRequestsPerSubject = 100,
-    maxTokensPerSubject = 500_000, maxSpendMicrosPerSubject = 500_000,
+    maxTokensPerSubject = 5_000_000, maxSpendMicrosPerSubject = 5_000_000,
     windowSeconds = 86400, leaseSeconds = 120,
   } = {}) {
     this.client = client;
@@ -119,9 +124,9 @@ export class RedisAdmissionStore {
     const holdsKey = `${this.key}:holds`;
     const expiriesKey = `${this.key}:hold-expiries`;
     const now = Date.now();
-    const lua = `local expired=redis.call('ZRANGEBYSCORE',KEYS[4],'-inf',ARGV[13]); for _,hold in ipairs(expired) do local raw=redis.call('HGET',KEYS[3],hold); if raw then local ok,info=pcall(cjson.decode,raw); if not ok then info={subject=raw,global=string.match(raw,'^(.*):subject:')} end; local gc=tonumber(redis.call('HGET',info.global,'concurrent') or '0'); if gc>0 then redis.call('HINCRBY',info.global,'concurrent',-1) end; local sc=tonumber(redis.call('HGET',info.subject,'concurrent') or '0'); if sc>0 then redis.call('HINCRBY',info.subject,'concurrent',-1) end; redis.call('HDEL',KEYS[3],hold) end; redis.call('ZREM',KEYS[4],hold) end; local gc=tonumber(redis.call('HGET',KEYS[1],'concurrent') or '0'); local gr=tonumber(redis.call('HGET',KEYS[1],'requests') or '0'); local gt=tonumber(redis.call('HGET',KEYS[1],'tokens') or '0'); local gs=tonumber(redis.call('HGET',KEYS[1],'spend') or '0'); local sc=tonumber(redis.call('HGET',KEYS[2],'concurrent') or '0'); local sr=tonumber(redis.call('HGET',KEYS[2],'requests') or '0'); local st=tonumber(redis.call('HGET',KEYS[2],'tokens') or '0'); local ss=tonumber(redis.call('HGET',KEYS[2],'spend') or '0'); if gc>=tonumber(ARGV[3]) or gr+1>tonumber(ARGV[4]) or gt+tonumber(ARGV[1])>tonumber(ARGV[5]) or gs+tonumber(ARGV[2])>tonumber(ARGV[6]) or sc>=tonumber(ARGV[7]) or sr+1>tonumber(ARGV[8]) or st+tonumber(ARGV[1])>tonumber(ARGV[9]) or ss+tonumber(ARGV[2])>tonumber(ARGV[10]) then return 0 end; for _,k in ipairs({KEYS[1],KEYS[2]}) do redis.call('HINCRBY',k,'concurrent',1); redis.call('HINCRBY',k,'requests',1); redis.call('HINCRBY',k,'tokens',ARGV[1]); redis.call('HINCRBY',k,'spend',ARGV[2]); redis.call('EXPIRE',k,ARGV[12]) end; redis.call('HSET',KEYS[3],ARGV[11],cjson.encode({subject=KEYS[2],global=KEYS[1],tokens=tonumber(ARGV[1]),spend=tonumber(ARGV[2])})); redis.call('ZADD',KEYS[4],ARGV[14],ARGV[11]); return 1`;
+    const lua = `local expired=redis.call('ZRANGEBYSCORE',KEYS[4],'-inf',ARGV[13]); for _,hold in ipairs(expired) do local raw=redis.call('HGET',KEYS[3],hold); if raw then local ok,info=pcall(cjson.decode,raw); if not ok then info={subject=raw,global=string.match(raw,'^(.*):subject:')} end; local gc=tonumber(redis.call('HGET',info.global,'concurrent') or '0'); if gc>0 then redis.call('HINCRBY',info.global,'concurrent',-1) end; local sc=tonumber(redis.call('HGET',info.subject,'concurrent') or '0'); if sc>0 then redis.call('HINCRBY',info.subject,'concurrent',-1) end; redis.call('HDEL',KEYS[3],hold) end; redis.call('ZREM',KEYS[4],hold) end; local gc=tonumber(redis.call('HGET',KEYS[1],'concurrent') or '0'); local gr=tonumber(redis.call('HGET',KEYS[1],'requests') or '0'); local gt=tonumber(redis.call('HGET',KEYS[1],'tokens') or '0'); local gs=tonumber(redis.call('HGET',KEYS[1],'spend') or '0'); local sc=tonumber(redis.call('HGET',KEYS[2],'concurrent') or '0'); local sr=tonumber(redis.call('HGET',KEYS[2],'requests') or '0'); local st=tonumber(redis.call('HGET',KEYS[2],'tokens') or '0'); local ss=tonumber(redis.call('HGET',KEYS[2],'spend') or '0'); if gc>=tonumber(ARGV[3]) then return 'quota_global_concurrency' end; if gr+1>tonumber(ARGV[4]) then return 'quota_global_requests' end; if gt+tonumber(ARGV[1])>tonumber(ARGV[5]) then return 'quota_global_tokens' end; if gs+tonumber(ARGV[2])>tonumber(ARGV[6]) then return 'quota_global_spend' end; if sc>=tonumber(ARGV[7]) then return 'quota_subject_concurrency' end; if sr+1>tonumber(ARGV[8]) then return 'quota_subject_requests' end; if st+tonumber(ARGV[1])>tonumber(ARGV[9]) then return 'quota_subject_tokens' end; if ss+tonumber(ARGV[2])>tonumber(ARGV[10]) then return 'quota_subject_spend' end; for _,k in ipairs({KEYS[1],KEYS[2]}) do redis.call('HINCRBY',k,'concurrent',1); redis.call('HINCRBY',k,'requests',1); redis.call('HINCRBY',k,'tokens',ARGV[1]); redis.call('HINCRBY',k,'spend',ARGV[2]); redis.call('EXPIRE',k,ARGV[12]) end; redis.call('HSET',KEYS[3],ARGV[11],cjson.encode({subject=KEYS[2],global=KEYS[1],tokens=tonumber(ARGV[1]),spend=tonumber(ARGV[2])})); redis.call('ZADD',KEYS[4],ARGV[14],ARGV[11]); return 1`;
     const ok = await this.client.eval(lua, { keys: [globalKey, subjectRedisKey, holdsKey, expiriesKey], arguments: [String(tokens), String(spendMicros), String(this.maxConcurrent), String(this.maxRequests), String(this.maxTokens), String(this.maxSpendMicros), String(this.maxConcurrentPerSubject), String(this.maxRequestsPerSubject), String(this.maxTokensPerSubject), String(this.maxSpendMicrosPerSubject), id, String(this.windowSeconds * 2), String(now), String(now + this.leaseSeconds * 1000)] });
-    if (!ok) throw new AdmissionDeniedError(); return id;
+    if (ok !== 1) throw new AdmissionDeniedError(typeof ok === 'string' ? ok : 'quota_exceeded'); return id;
   }
   async release(id) {
     const holdsKey = `${this.key}:holds`;
@@ -167,6 +172,7 @@ export function admissionMiddleware(store, estimate = req => {
     let id;
     try { id = await store.reserve(estimate(req)); } catch (error) {
       const denied = error instanceof AdmissionDeniedError;
+      if (denied) console.warn(`[admission] denied ${req.path}: ${error.code}`);
       return res.status(denied ? 429 : 503).json({
         error: denied ? 'Request quota exceeded' : 'Quota service unavailable',
         code: denied ? error.code : 'quota_store_unavailable',
