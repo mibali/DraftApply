@@ -382,18 +382,25 @@ class DraftApplyExtension {
       modal.querySelector('#da-tone-select').value = pill.dataset.value;
     };
 
-    // Live character counter — only active when field has a maxLength
+    // Live character counter — only active when field has a maxLength.
+    // A manual edit makes the answer the USER'S text: the grounding gate
+    // exists to stop the model fabricating on their behalf, not to stop a
+    // person typing their own answer. Edited answers are insertable (within
+    // the field's character limit); only unedited ungrounded model output
+    // stays blocked.
     modal.querySelector('#da-answer-output').addEventListener('input', () => {
+      this.answerUserEdited = true;
       if (this.answerValidation) {
-        this.answerUserEdited = true;
         this.answerValidation = null;
         this.reviewAcknowledged = false;
         this.lastAnswer = null;
-        const insertButton = this.modal?.querySelector?.('#da-btn-insert');
-        if (insertButton) {
-          insertButton.disabled = true;
-          insertButton.textContent = 'Regenerate to Validate';
-        }
+      }
+      const text = String(this.modal?.querySelector?.('#da-answer-output')?.value || '').trim();
+      const overLimit = Boolean(this.currentFieldMaxLength && text.length > this.currentFieldMaxLength);
+      const insertButton = this.modal?.querySelector?.('#da-btn-insert');
+      if (insertButton) {
+        insertButton.disabled = !text || overLimit;
+        insertButton.textContent = overLimit ? 'Over Character Limit' : 'Insert (Your Edit)';
       }
       this._updateCharCounter();
     });
@@ -1784,13 +1791,23 @@ class DraftApplyExtension {
     const answerToInsert = current || this.lastAnswer;
     const insertBtn = this.modal?.querySelector?.('#da-btn-insert');
 
-    if (!this.answerValidation || this.answerUserEdited || answerToInsert !== this.validatedAnswer || this.answerValidation.status !== 'pass') {
-      this.showNotification('This answer is not grounded and cannot be inserted. You can edit, copy, or regenerate it.', 'error');
+    // Text the user edited is their own answer — insertable as-is (within
+    // the field's character limit). The grounding gate applies only to
+    // unedited model output.
+    const isUserEdit = this.answerUserEdited && Boolean(current);
+    if (!isUserEdit
+        && (!this.answerValidation || answerToInsert !== this.validatedAnswer || this.answerValidation.status !== 'pass')) {
+      this.showNotification('This answer is not grounded and cannot be inserted. You can edit it into your own words, copy it, or regenerate.', 'error');
       return;
     }
 
     if (!answerToInsert) {
       this.showNotification('No answer to insert yet.', 'error');
+      return;
+    }
+
+    if (isUserEdit && this.currentFieldMaxLength && answerToInsert.length > this.currentFieldMaxLength) {
+      this.showNotification(`Your answer is ${answerToInsert.length} characters; the field allows ${this.currentFieldMaxLength}. Shorten it to insert.`, 'error');
       return;
     }
 

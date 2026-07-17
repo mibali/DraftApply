@@ -318,3 +318,38 @@ describe('domain risk prompt guard', () => {
     expect(result.userPrompt).toContain('rn license');
   });
 });
+
+describe('location and residence form fields (regression: rambling career-history answers)', () => {
+  it('routes "Where are you located?" to the short-factual prompt, not general', () => {
+    const prompt = buildPrompts({
+      question: 'Where are you located? (State/Province & Country)',
+      length: 'short',
+      tone: 'natural',
+      cvText: CV,
+      maxChars: 255,
+    });
+    expect(prompt.questionType).toBe('short_factual');
+    expect(prompt.systemPrompt).toMatch(/CURRENT SITUATION/);
+    expect(prompt.systemPrompt).toMatch(/Do NOT mention past jobs/);
+  });
+
+  it('routes residence/timezone variants to short-factual', () => {
+    for (const question of [
+      'What is your current location?',
+      'Where are you based?',
+      'What timezone do you work in?',
+    ]) {
+      expect(buildPrompts({ question, cvText: CV }).questionType).toBe('short_factual');
+    }
+  });
+
+  it('keeps bare location field labels on the data-extraction path', () => {
+    const prompt = buildPrompts({ question: 'City of residence', cvText: CV });
+    expect(prompt.systemPrompt).toMatch(/data extraction/i);
+  });
+
+  it('keeps relocation-willingness questions as yes/no, not short-factual', () => {
+    const prompt = buildPrompts({ question: 'Are you willing to relocate?', cvText: CV });
+    expect(prompt.questionType).toBe('yes_no');
+  });
+});

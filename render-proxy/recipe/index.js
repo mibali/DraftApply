@@ -344,7 +344,15 @@ function detectQuestionType(question) {
     /deadline[s]?\s+or\s+timeline/.test(q) ||
     /timeline\s+consideration/.test(q) ||
     /any\s+(deadline|timeline|constraint|commitment)[s]?\s+(we|you|to)\s+/i.test(q) ||
-    /\bimmediately\s+available\b/.test(q)
+    /\bimmediately\s+available\b/.test(q) ||
+    // Location / residence / timezone form fields ("Where are you located?
+    // (State/Province & Country)") are one-line facts about the candidate's
+    // current situation, never career-history questions.
+    /where\s+(are|do)\s+you\s+(currently\s+)?(located|based|resid|liv)/.test(q) ||
+    /\b(current|your)\s+location\b/.test(q) ||
+    /\bstate\s*\/?\s*province\b/.test(q) ||
+    /\b(city|country)\s+of\s+residence\b/.test(q) ||
+    /\bwhat\s+time\s*zone\b/.test(q)
   ) return 'short_factual';
 
   // Yes / No questions
