@@ -303,6 +303,7 @@ class DraftApplyExtension {
           <div class="da-answer-label">Generated Answer <span id="da-char-hint" class="da-char-hint"></span></div>
           <textarea class="da-answer-output" id="da-answer-output" placeholder="Your answer will appear here. You can edit it before inserting."></textarea>
           <div id="da-char-counter" class="da-char-counter" hidden></div>
+          <div id="da-verify-badge" class="da-verify-badge" hidden></div>
           <div id="da-agent-insights" class="da-agent-insights" hidden></div>
           <input type="hidden" id="da-length-select" value="medium">
           <input type="hidden" id="da-tone-select" value="natural">
@@ -444,38 +445,40 @@ class DraftApplyExtension {
     this.updateContextBadge();
   }
 
-  updateContextBadge() {
+  updateContextBadge(contextOverride = null) {
     if (!this.modal) return;
     const badge = this.modal.querySelector('#da-context-badge');
     const info = this.modal.querySelector('#da-context-info');
     
-    const quality = this.pageContext?.contextQuality;
-    const hasRealContext = quality === 'structured' || quality === 'heuristic';
+    const context = contextOverride || this.pageContext || {};
+    const quality = context.contextQuality;
+    const hasRealContext = quality === 'structured' || quality === 'heuristic' || quality === 'saved' || quality === 'user_provided';
     const hasNoisyContext = quality === 'fullpage';
 
     if (hasRealContext) {
-      badge.textContent = '✓ Job context detected';
+      badge.textContent = quality === 'saved'
+        ? '✓ Full JD (saved)'
+        : quality === 'user_provided'
+          ? '✓ Full JD (pasted)'
+          : '✓ Detected JD';
       badge.className = 'da-context-badge da-badge-success';
       info.className = 'da-context-info';
 
       // Avoid innerHTML: page content is untrusted
       info.replaceChildren();
       const strong = document.createElement('strong');
-      strong.textContent = this.pageContext.jobTitle || 'Job';
+      strong.textContent = context.jobTitle || 'Job';
       info.appendChild(strong);
 
-      if (this.pageContext.company) {
-        info.appendChild(document.createTextNode(' at ' + this.pageContext.company));
+      if (context.company) {
+        info.appendChild(document.createTextNode(' at ' + context.company));
       }
 
-      const meta = document.createElement('span');
-      meta.className = 'da-context-meta';
-      const reqCount = this.pageContext.requirements?.length ?? 0;
-      const jdLen = Math.round((this.pageContext.jobDescription?.length ?? 0) / 100) * 100;
-      meta.textContent = `${reqCount} requirements detected • ${jdLen}+ chars`;
-      info.appendChild(meta);
+      // One line is enough: the job title (and company) tells the user their
+      // answers are tailored. Requirement counts and character tallies are
+      // parser telemetry, not applicant-facing information.
     } else if (hasNoisyContext) {
-      badge.textContent = '⚠ Partial context';
+      badge.textContent = '⚠ Partial JD';
       badge.className = 'da-context-badge da-badge-warning';
       info.className = 'da-context-info da-context-warning';
       info.replaceChildren();
@@ -488,7 +491,7 @@ class DraftApplyExtension {
       pasteBtn.onclick = () => this._showJdPasteArea();
       info.append(warnMsg, document.createTextNode(' '), pasteBtn);
     } else {
-      badge.textContent = 'No context';
+      badge.textContent = 'No JD';
       badge.className = 'da-context-badge';
       info.className = 'da-context-info da-context-none';
       info.replaceChildren();
@@ -1059,6 +1062,7 @@ class DraftApplyExtension {
         company: ctx.company || undefined,
         jobDescription,
         requirements: (ctx.requirements?.length > 0) ? ctx.requirements : undefined,
+        contextQuality: ctx.contextQuality,
       };
     }
 
@@ -1083,6 +1087,7 @@ class DraftApplyExtension {
         company: ctx.company || tailorCvDraft.company?.trim() || undefined,
         jobDescription: draftJobDescription,
         requirements: undefined,
+        contextQuality: 'saved',
       };
     } catch (_) {
       return {
@@ -1092,6 +1097,16 @@ class DraftApplyExtension {
         requirements: undefined,
       };
     }
+  }
+
+  _questionNeedsJobContext(question = '') {
+    const q = String(question || '').toLowerCase().trim();
+    return !(
+      /^(full\s*)?name\b|^(first|last|middle|preferred|legal)\s*name\b/.test(q) ||
+      /^(e-?mail|phone|mobile|cell|address|city|state|country|postal|zip|location)\b/.test(q) ||
+      /\b(linkedin|github|gitlab|portfolio|website|behance|dribbble|kaggle|stack\s*overflow|twitter|x\.com)\b/.test(q) ||
+      /\b(notice period|availability|start date|work authori[sz]ation|right to work|visa|sponsorship|salary|compensation|pay rate)\b/.test(q)
+    );
   }
 
   // The CV file's hyperlink annotations (a "LinkedIn" link whose URL lives in
@@ -1126,6 +1141,8 @@ class DraftApplyExtension {
     const ctx = this.pageContext || {};
     const cacheKey = this.answerCacheKey(question, ctx);
     const jobContextForPayload = await this._jobContextForPayload(ctx);
+    this.updateContextBadge(jobContextForPayload);
+    if (!jobContextForPayload.jobDescription && this._questionNeedsJobContext(question)) return;
     const fieldMaxLen = (field.maxLength > 0) ? field.maxLength : null;
     const payload = {
       question,
@@ -1136,6 +1153,7 @@ class DraftApplyExtension {
       company:        jobContextForPayload.company,
       jobDescription: jobContextForPayload.jobDescription,
       requirements:   jobContextForPayload.requirements,
+      jdContextQuality: jobContextForPayload.contextQuality || 'none',
       maxChars:       fieldMaxLen || undefined,
     };
 
@@ -1292,6 +1310,12 @@ class DraftApplyExtension {
       const ctx = this.pageContext || {};
       // Prefer reliable page context, then fall back to the user's saved Tailor JD.
       const jobContextForPayload = await this._jobContextForPayload(ctx);
+      this.updateContextBadge(jobContextForPayload);
+      if (!jobContextForPayload.jobDescription && this._questionNeedsJobContext(question)) {
+        output.value = 'A job description is required for a tailored answer. Paste the JD above, then generate again.';
+        this._showJdPasteArea();
+        return;
+      }
       const structuredPayload = {
         question,
         length,
@@ -1301,6 +1325,7 @@ class DraftApplyExtension {
         company:        jobContextForPayload.company,
         jobDescription: jobContextForPayload.jobDescription,
         requirements:   jobContextForPayload.requirements,
+        jdContextQuality: jobContextForPayload.contextQuality || 'none',
         pageUrl:        ctx.url || window.location.href,
         platform:       ctx.platform || undefined,
         maxChars:       this.currentFieldMaxLength || undefined,
@@ -1450,32 +1475,16 @@ class DraftApplyExtension {
     }
   }
 
-  renderModelBadge(meta) {
+  // Provider/model names are pipeline internals, not applicant-facing
+  // information — the header stays clean. Details remain available in the
+  // background logs and API metadata.
+  renderModelBadge() {
     const badge = this.modal?.querySelector('#da-model-badge');
     if (!badge) return;
-    const provider = meta?.provider || meta?.openRouterMetadata?.endpoints?.available?.find?.(item => item.selected)?.provider;
-    const model = meta?.model || meta?.openRouterMetadata?.model || meta?.openRouterMetadata?.requested;
-    const fallbackFrom = meta?.fallbackFrom;
-    if (!provider && !model) {
-      badge.hidden = true;
-      badge.textContent = '';
-      badge.className = 'da-model-badge';
-      badge.removeAttribute('title');
-      return;
-    }
-
-    const providerLabel = provider === 'openrouter'
-      ? 'OpenRouter'
-      : provider === 'groq'
-        ? 'Groq'
-        : provider === 'local-openai'
-          ? 'Local'
-          : provider || 'Model';
-    const modelLabel = model ? this.shortModelName(model) : '';
-    badge.textContent = modelLabel ? `${providerLabel}: ${modelLabel}` : providerLabel;
-    badge.className = `da-model-badge ${provider === 'openrouter' || fallbackFrom ? 'da-model-badge-fallback' : ''}`;
-    badge.title = [meta?.qualityModeReason, model].filter(Boolean).join('\n');
-    badge.hidden = false;
+    badge.hidden = true;
+    badge.textContent = '';
+    badge.className = 'da-model-badge';
+    badge.removeAttribute('title');
   }
 
   shortModelName(model) {
@@ -1494,37 +1503,36 @@ class DraftApplyExtension {
     const box = this.modal?.querySelector('#da-agent-insights');
     if (!box) return;
 
-    const workflow = insights?.workflow;
-    const stagesValue = insights?.pipelineStages || insights?.agentChain;
-    const chain = Array.isArray(stagesValue)
-      ? stagesValue
-      : String(stagesValue || '').split('>').map(item => item.trim()).filter(Boolean);
     const evidence = Array.isArray(insights?.evidence) ? insights.evidence : [];
     const matched = Array.isArray(insights?.matchedRequirements) ? insights.matchedRequirements : [];
-    const truth = insights?.truthfulness;
     const domainRisk = insights?.domainRisk || insights?.truthfulnessReport?.domainRisk;
 
-    if (!workflow && evidence.length === 0 && matched.length === 0 && !truth && !domainRisk) {
+    if (evidence.length === 0 && matched.length === 0 && !domainRisk) {
       box.hidden = true;
       box.textContent = '';
       return;
     }
 
+    // Everything below is supporting detail, not the primary path. It lives
+    // inside a collapsed disclosure; the always-visible surface is only the
+    // verification badge rendered by _setAnswerValidation. Internal
+    // vocabulary (workflow names, stage counts, grounding tallies) is not
+    // shown at all.
     const parts = [];
-    const title = workflow === 'applicationAnswer' ? 'Answer workflow' : 'DraftApply workflow';
-    const meta = [
-      insights?.questionType ? this.escapeHtml(insights.questionType.replace(/_/g, ' ')) : null,
-      chain.length ? `${chain.length} stages` : null,
-    ].filter(Boolean).join(' · ');
 
-    parts.push(`<div class="da-agent-title"><span>${title}</span>${meta ? `<small>${meta}</small>` : ''}</div>`);
-
-    if (evidence.length > 0) {
+    const seenEvidence = new Set();
+    const uniqueEvidence = evidence.filter(item => {
+      const key = `${item.label || item.type || ''}|${item.text || ''}`.toLowerCase();
+      if (seenEvidence.has(key)) return false;
+      seenEvidence.add(key);
+      return true;
+    });
+    if (uniqueEvidence.length > 0) {
       parts.push(`
         <div class="da-agent-section">
-          <div class="da-agent-label">CV evidence used</div>
+          <div class="da-agent-label">Based on</div>
           <div class="da-agent-chips">
-            ${evidence.map(item => `
+            ${uniqueEvidence.map(item => `
               <span class="da-agent-chip" title="${this.escapeHtml(item.text || '')}">
                 ${this.escapeHtml(item.label || item.type || 'Evidence')}
               </span>
@@ -1533,13 +1541,14 @@ class DraftApplyExtension {
         </div>`);
     }
 
-    if (matched.length > 0) {
+    const supportedMatches = matched.filter(item => item.supported);
+    if (supportedMatches.length > 0) {
       parts.push(`
         <div class="da-agent-section">
-          <div class="da-agent-label">JD requirements checked</div>
+          <div class="da-agent-label">Speaks to</div>
           <div class="da-agent-chips">
-            ${matched.map(item => `
-              <span class="da-agent-chip ${item.supported ? 'da-agent-chip-ok' : 'da-agent-chip-muted'}">
+            ${supportedMatches.map(item => `
+              <span class="da-agent-chip da-agent-chip-ok">
                 ${this.escapeHtml(item.requirement || '')}
               </span>
             `).join('')}
@@ -1570,14 +1579,16 @@ class DraftApplyExtension {
         </div>`);
     }
 
-    if (truth) {
-      parts.push(`
-        <div class="da-agent-trust">
-          Input grounding: ${Number(truth.allowedCount || 0)} supported claim${Number(truth.allowedCount || 0) === 1 ? '' : 's'}, ${Number(truth.unsupportedCount || 0)} unsupported requirement${Number(truth.unsupportedCount || 0) === 1 ? '' : 's'} excluded from prompt evidence.
-        </div>`);
+    if (parts.length === 0) {
+      box.hidden = true;
+      box.textContent = '';
+      return;
     }
-
-    box.innerHTML = parts.join('');
+    box.innerHTML = `
+      <details class="da-agent-details">
+        <summary class="da-agent-summary">Details</summary>
+        ${parts.join('')}
+      </details>`;
     box.hidden = false;
   }
 
@@ -1809,12 +1820,16 @@ class DraftApplyExtension {
     const insertBtn = this.modal?.querySelector?.('#da-btn-insert');
 
     // Text the user edited is their own answer — insertable as-is (within
-    // the field's character limit). The grounding gate applies only to
-    // unedited model output.
+    // the field's character limit). For model output, grounded ('pass') and
+    // review-state answers insert directly; only an answer the validator
+    // found unsupported by the CV is stopped, with a plain explanation
+    // instead of a persistent blocked state.
     const isUserEdit = this.answerUserEdited && Boolean(current);
+    const modelStatus = this.answerValidation?.status;
     if (!isUserEdit
-        && (!this.answerValidation || answerToInsert !== this.validatedAnswer || this.answerValidation.status !== 'pass')) {
-      this.showNotification('This answer is not grounded and cannot be inserted. You can edit it into your own words, copy it, or regenerate.', 'error');
+        && (!this.answerValidation || answerToInsert !== this.validatedAnswer
+          || (modelStatus !== 'pass' && modelStatus !== 'review'))) {
+      this.showNotification('This answer includes things DraftApply could not verify from your CV. Edit it into your own words, or regenerate.', 'error');
       return;
     }
 
@@ -1892,16 +1907,37 @@ class DraftApplyExtension {
       : null;
     this.answerValidationRequestId = requestId;
     this.answerUserEdited = false;
-    this.reviewAcknowledged = false;
     const button = this.modal?.querySelector?.('#da-btn-insert');
     if (!button) return;
     const status = validation?.status;
     const hasAnswer = Boolean(this.modal?.querySelector?.('#da-answer-output')?.value?.trim());
-    button.disabled = !hasAnswer || status !== 'pass';
-    button.textContent = status === 'review' ? 'Review Required' : status === 'block' ? 'Insertion Blocked' : 'Insert Answer';
-    this.lastAnswer = status === 'pass'
+    // The button stays a plain "Insert Answer" in every state — validation
+    // state lives in the compact badge, not in alarming button labels.
+    // Grounded and review-state answers insert directly (the user is looking
+    // at the text); only an ungrounded answer is stopped, at click time.
+    button.disabled = !hasAnswer;
+    button.textContent = 'Insert Answer';
+    this._renderVerifyBadge(status);
+    this.lastAnswer = status === 'pass' || status === 'review'
       ? String(this.modal?.querySelector?.('#da-answer-output')?.value || '')
       : null;
+  }
+
+  _renderVerifyBadge(status) {
+    const badge = this.modal?.querySelector?.('#da-verify-badge');
+    if (!badge) return;
+    if (status === 'pass') {
+      badge.textContent = '✓ Checked against your CV';
+      badge.className = 'da-verify-badge da-verify-ok';
+      badge.hidden = false;
+    } else if (status === 'review' || status === 'block') {
+      badge.textContent = '⚠ Read this one before inserting';
+      badge.className = 'da-verify-badge da-verify-warn';
+      badge.hidden = false;
+    } else {
+      badge.hidden = true;
+      badge.textContent = '';
+    }
   }
 
   async copyToClipboard() {
@@ -1944,7 +1980,7 @@ class DraftApplyExtension {
         'heuristic'
       );
     }
-    nextContext.contextQuality = 'heuristic';
+    nextContext.contextQuality = 'user_provided';
     this.setPageContext(nextContext);
     area.hidden = true;
     this.updateContextBadge();

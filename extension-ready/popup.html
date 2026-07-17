@@ -668,6 +668,19 @@
       margin-bottom: 9px;
     }
 
+    .agent-insights-summary {
+      cursor: pointer;
+      font-size: 12px;
+      color: #64748b;
+      font-weight: 600;
+      user-select: none;
+      list-style: none;
+    }
+    .agent-insights-summary::before { content: '▸ '; }
+    details[open] > .agent-insights-summary::before { content: '▾ '; }
+    .agent-insights-summary::-webkit-details-marker { display: none; }
+    .tw-details { margin-top: 8px; }
+
     .agent-insights-title small {
       color: #8493aa;
       font-size: 10px;
@@ -1200,10 +1213,8 @@
             </div>
           </div>
           <div class="match-group" id="match-missing" hidden>
-            <div class="match-group-label match-label-gray">Not found in your CV</div>
-            <div class="missing-skill-help">Tick any skills you genuinely have — they'll be included in the tailored CV.</div>
+            <div class="match-group-label match-label-gray">Not in your CV</div>
             <div class="match-chips" id="match-missing-chips"></div>
-            <div class="trust-note">Only used for this tailored CV. Not saved for training.</div>
           </div>
           <div class="match-group" id="match-domain" hidden>
             <div class="match-group-label match-label-purple">Also common in this domain</div>

@@ -141,13 +141,19 @@ describe('extension critical modal behavior', () => {
     expect(backgroundJs).not.toContain("type: 'STREAM_CHUNK', requestId: effectiveRequestId");
   });
 
-  it('keeps insertion disabled until a request-scoped final validation arrives', () => {
+  it('gates only ungrounded model output, with the state shown as a badge instead of button labels', () => {
     expect(contentJs).toContain('id="da-btn-insert" disabled');
     expect(contentJs).toContain("if (message.type === 'STREAM_FINAL')");
     expect(contentJs).toContain('if (this.currentRequestId !== message.requestId) return');
-    expect(contentJs).toContain("this.answerValidation.status !== 'pass'");
-    expect(contentJs).toContain("button.disabled = !hasAnswer || status !== 'pass'");
-    expect(contentJs).not.toContain('Review & Insert');
+    // Grounded and review-state answers insert directly; ungrounded output is
+    // stopped at click time with a plain explanation.
+    expect(contentJs).toContain("modelStatus !== 'pass' && modelStatus !== 'review'");
+    expect(contentJs).toContain('could not verify from your CV');
+    // No alarming persistent button states; validation lives in the badge.
+    expect(contentJs).not.toContain('Review Required');
+    expect(contentJs).not.toContain('Insertion Blocked');
+    expect(contentJs).toContain('_renderVerifyBadge');
+    expect(contentJs).toContain('Checked against your CV');
   });
 
   it('shows the exact OpenRouter model when answer generation falls back from Groq', () => {
@@ -158,13 +164,11 @@ describe('extension critical modal behavior', () => {
     expect(contentJs).toContain('DraftApply used OpenRouter fallback${model}.');
   });
 
-  it('renders a compact model badge for generated answer output', () => {
-    expect(contentJs).toContain('id="da-model-badge"');
+  it('keeps provider/model internals out of the modal header', () => {
     expect(contentJs).toContain('renderModelBadge');
-    expect(contentJs).toContain('this.shortModelName(model)');
-    expect(contentJs).toContain('qualityModeReason');
-    expect(contentCss).toContain('.da-model-badge');
-    expect(contentCss).toContain('.da-model-badge-fallback');
+    // The badge element stays for layout compatibility but is always hidden.
+    expect(contentJs).not.toContain('this.shortModelName(model)');
+    expect(contentJs).not.toContain("providerLabel: modelLabel");
   });
 
   it('accepts both legacy unsupportedRequirements and API-contract missingSkills in Tailor CV reports', () => {
@@ -182,14 +186,18 @@ describe('extension critical modal behavior', () => {
     expect(backgroundJs).toContain('agentChain');
   });
 
-  it('renders stage-3 architecture insights only when proxy metadata is available', () => {
+  it('keeps supporting detail behind collapsed disclosures with no internal vocabulary', () => {
     expect(contentJs).toContain('id="da-agent-insights"');
     expect(contentJs).toContain('renderAgentInsights');
-    expect(contentJs).toContain('CV evidence used');
+    expect(contentJs).toContain('<details class="da-agent-details">');
     expect(popupHtml).toContain('id="tailor-agent-insights"');
     expect(popupJs).toContain('renderTailorAgentInsights');
-    expect(popupJs).toContain('Matched from your CV');
-    expect(popupJs).toContain('retrieval.status');
+    expect(popupJs).toContain('agent-insights-details');
+    // Internal vocabulary and duplicate lists stay out of the UI.
+    for (const phrase of ['stages</', ' agents', 'retrieval active', 'Input grounding', 'held back</']) {
+      expect(contentJs).not.toContain(phrase);
+      expect(popupJs).not.toContain(phrase);
+    }
   });
 
   it('renders domain review cues from proxy metadata without replacing agent insights', () => {
@@ -215,6 +223,24 @@ describe('answer generation uses full CV facts and respects user authorship', ()
     expect(contentJs).toContain("insertButton.textContent = overLimit ? 'Over Character Limit' : 'Insert (Your Edit)'");
     // The old behavior forced regeneration after any manual edit.
     expect(contentJs).not.toContain("'Regenerate to Validate'");
+  });
+});
+
+describe('job-description context disclosure', () => {
+  it('labels full, saved, partial, and missing JD context explicitly', () => {
+    expect(contentJs).toContain("'✓ Full JD (saved)'");
+    expect(contentJs).toContain("'✓ Full JD (pasted)'");
+    expect(contentJs).toContain("'✓ Detected JD'");
+    expect(contentJs).toContain("badge.textContent = '⚠ Partial JD'");
+    expect(contentJs).toContain("badge.textContent = 'No JD'");
+    expect(contentJs).toContain("contextQuality: 'saved'");
+    expect(contentJs).toContain("jdContextQuality: jobContextForPayload.contextQuality || 'none'");
+  });
+
+  it('requires a JD for narrative answers while allowing factual CV fields', () => {
+    expect(contentJs).toContain('_questionNeedsJobContext(question');
+    expect(contentJs).toContain('A job description is required for a tailored answer');
+    expect(contentJs).toMatch(/linkedin\|github\|gitlab\|portfolio/);
   });
 });
 

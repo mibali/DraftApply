@@ -840,3 +840,27 @@
 .da-btn-jd-cancel:hover {
   background: #e2e8f0;
 }
+
+/* Compact verification badge — the only always-visible trust surface */
+.da-verify-badge {
+  margin-top: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: 6px;
+  display: inline-block;
+}
+.da-verify-ok { color: #15803d; background: #f0fdf4; }
+.da-verify-warn { color: #a16207; background: #fefce8; }
+
+/* Supporting detail lives behind a collapsed disclosure */
+.da-agent-details > summary.da-agent-summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: #64748b;
+  user-select: none;
+  list-style: none;
+}
+.da-agent-details > summary.da-agent-summary::before { content: '▸ '; }
+.da-agent-details[open] > summary.da-agent-summary::before { content: '▾ '; }
+.da-agent-details > summary.da-agent-summary::-webkit-details-marker { display: none; }

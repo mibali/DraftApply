@@ -991,10 +991,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       return esc(w);
     }
 
-    const sections = [];
+    // Accuracy items (a changed company name, an invented figure) demand the
+    // user's attention and stay visible. Structural quality signals are for
+    // the curious - collapsed behind "More checks".
+    const primary = [];
+    const secondary = [];
 
     if (accuracy.length > 0) {
-      sections.push(`
+      primary.push(`
         <div class="tw-group tw-group-accuracy">
           <div class="tw-group-label">Accuracy — check these are still correct</div>
           <ul class="tailor-warning-list">${accuracy.map(w => `<li>${humaniseAccuracy(w)}</li>`).join('')}</ul>
@@ -1002,7 +1006,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     if (missing.length > 0) {
-      sections.push(`
+      secondary.push(`
         <div class="tw-group tw-group-missing">
           <div class="tw-group-label">Skills not added — add manually if relevant</div>
           <ul class="tailor-warning-list">${missing.map(s => `<li><strong>${esc(s)}</strong></li>`).join('')}</ul>
@@ -1010,14 +1014,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     if (quality.length > 0) {
-      sections.push(`
+      secondary.push(`
         <div class="tw-group tw-group-quality">
           <div class="tw-group-label">Quality checks</div>
           <ul class="tailor-warning-list">${quality.map(w => `<li>${humaniseQuality(w)}</li>`).join('')}</ul>
         </div>`);
     }
 
-    return `<div class="tailor-warning-title">Review before sending</div>${sections.join('')}`;
+    if (primary.length === 0 && secondary.length === 0) return '';
+    const secondaryBlock = secondary.length > 0
+      ? `<details class="tw-details"><summary class="agent-insights-summary">More checks</summary>${secondary.join('')}</details>`
+      : '';
+    return `<div class="tailor-warning-title">Review before sending</div>${primary.join('')}${secondaryBlock}`;
   }
 
   function isParserArtefactWarning(warning) {
@@ -1056,13 +1064,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     const missing = normalizeMissingSkills(matchReport);
     if (missing.length > 0) {
-      if (reviewMode) {
-        renderMissingSkillChecks(missing);
-      } else {
-        elements.matchMissingChips.innerHTML = missing
-          .map(s => `<span class="match-chip match-chip-missing">${esc(s)}</span>`)
-          .join('');
-      }
+      // Informational only. The tick-to-confirm flow let unvetted JD phrases
+      // flow into the CV's competencies; missing skills are now simply shown
+      // so the user knows the gap, and the tailored CV never claims them.
+      elements.matchMissingChips.innerHTML = missing
+        .map(s => `<span class="match-chip match-chip-missing">${esc(s)}</span>`)
+        .join('');
       elements.matchMissing.hidden = false;
       elements.matchAllClear.hidden = true;
     } else {
@@ -1071,28 +1078,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       elements.matchAllClear.hidden = !reviewMode;
     }
 
-    // Domain suggestions — only shown in review mode with checkboxes
-    if (reviewMode && domainSuggestions.length > 0) {
-      elements.matchDomainChips.textContent = '';
-      for (const tool of domainSuggestions) {
-        const label = document.createElement('label');
-        label.className = 'missing-skill-check';
-
-        const checkbox = document.createElement('input');
-        checkbox.type = 'checkbox';
-        checkbox.value = tool;
-        checkbox.dataset.domainSkill = 'true';
-
-        const text = document.createElement('span');
-        text.textContent = tool;
-
-        label.append(checkbox, text);
-        elements.matchDomainChips.append(label);
-      }
-      elements.matchDomain.hidden = false;
-    } else {
-      elements.matchDomain.hidden = true;
-    }
+    // Domain-suggestion confirmations retired along with the tick-to-confirm
+    // flow: suggested tools the CV cannot evidence stay out of the CV.
+    elements.matchDomain.hidden = true;
   }
 
   function renderTailorAgentInsights(insights = {}) {
@@ -1124,30 +1112,18 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
 
+    // Supporting detail only: the match report above already tells the user
+    // what matched and what's missing. No workflow/agent/retrieval vocabulary,
+    // no duplicate matched-skills list — the remaining groups fold into one
+    // collapsed disclosure.
     const sections = [];
-    const meta = [
-      workflow === 'tailoredCv' ? 'Tailored CV workflow' : workflow,
-      chain.length ? `${chain.length} agents` : null,
-      retrieval.status ? `retrieval ${retrieval.status}` : null,
-      Number.isFinite(Number(truth.unsupportedCount)) ? `${Number(truth.unsupportedCount)} held back` : null,
-    ].filter(Boolean).join(' · ');
-
-    sections.push(`<div class="agent-insights-title"><span>Review guidance</span><small>${esc(meta || 'Workflow active')}</small></div>`);
-
-    if (supported.length > 0) {
-      sections.push(renderInsightChipGroup('Matched from your CV', supported, 'agent-chip-ok'));
-    }
 
     if (transferable.length > 0) {
-      sections.push(renderInsightChipGroup('Transferable evidence to frame carefully', transferable, 'agent-chip-info'));
-    }
-
-    if (missing.length > 0) {
-      sections.push(renderInsightChipGroup('Needs confirmation', missing, 'agent-chip-muted'));
+      sections.push(renderInsightChipGroup('Adjacent experience (framed carefully, never claimed)', transferable, 'agent-chip-info'));
     }
 
     if (risky.length > 0) {
-      sections.push(renderInsightChipGroup('Held back unless confirmed', risky, 'agent-chip-warn'));
+      sections.push(renderInsightChipGroup('Left out — not evidenced in your CV', risky, 'agent-chip-warn'));
     }
 
     if (domainRisk.detected) {
@@ -1170,7 +1146,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       sections.push(renderInsightChipGroup('Additional ATS evidence to keep visible', visibleEvidenceOnly, 'agent-chip-info'));
     }
 
-    box.innerHTML = sections.join('');
+    if (sections.length === 0) {
+      box.hidden = true;
+      box.textContent = '';
+      return;
+    }
+    box.innerHTML = `
+      <details class="agent-insights-details">
+        <summary class="agent-insights-summary">Details</summary>
+        ${sections.join('')}
+      </details>`;
     box.hidden = false;
   }
 
@@ -1186,25 +1171,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   function normaliseInsightValue(value) {
     return String(value || '').toLowerCase().replace(/[^a-z0-9+#.]+/g, ' ').trim();
-  }
-
-  function renderMissingSkillChecks(missing) {
-    elements.matchMissingChips.textContent = '';
-    for (const skill of missing) {
-      const label = document.createElement('label');
-      label.className = 'missing-skill-check';
-
-      const checkbox = document.createElement('input');
-      checkbox.type = 'checkbox';
-      checkbox.value = skill;
-      checkbox.dataset.missingSkill = 'true';
-
-      const text = document.createElement('span');
-      text.textContent = skill;
-
-      label.append(checkbox, text);
-      elements.matchMissingChips.append(label);
-    }
   }
 
   function normalizeMissingSkills(matchReport = {}) {
@@ -1369,6 +1335,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const raw = String(url || '').trim();
     if (/linkedin\.com/i.test(raw)) return 'LinkedIn';
     if (/github\.com/i.test(raw)) return 'GitHub';
+    if (/gitlab\.com/i.test(raw)) return 'GitLab';
+    if (/stackoverflow\.com/i.test(raw)) return 'Stack Overflow';
     if (/behance\.net/i.test(raw)) return 'Behance';
     if (/dribbble\.com/i.test(raw)) return 'Dribbble';
     if (/kaggle\.com/i.test(raw)) return 'Kaggle';
