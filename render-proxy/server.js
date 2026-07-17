@@ -22,6 +22,8 @@ import { JDParser } from '../shared/jd-parser.js';
 import { CVTailor } from '../shared/cv-tailor.js';
 import { evaluateAnswer, buildRegenerationFeedback } from '../shared/answer-evaluator.js';
 import { buildGroundingContext, validateApplicationAnswer } from '../shared/grounding-harness.js';
+import { extractProfileUrl } from '../shared/profile-url-extractor.js';
+import { validateAnswerStructure } from '../shared/answer-structure-validator.js';
 import {
   rebuildTailoredCvAgentContext,
   runApplicationAnswerAgents,
@@ -29,6 +31,7 @@ import {
 } from '../shared/agent-workflows.js';
 import {
   buildEvidenceRetrievalInputs,
+  cosineSimilarity,
   rerankMatchMapWithEmbeddings,
 } from '../shared/evidence-retrieval.js';
 import {
@@ -926,6 +929,19 @@ const DETERMINISTIC_EXTRACTORS = [
     const m = cv.match(/(?:https?:\/\/)?(?:www\.)?github\.com\/[\w\-]+\/?/i);
     return m ? normalizeExtractedUrl(m[0]) : null;
   }],
+  [/^gitlab(?:\s*(?:url|link|profile|page))*$/i, cv => {
+    const m = cv.match(/(?:https?:\/\/)?(?:www\.)?gitlab\.com\/[\w\-_%]+\/?/i);
+    return m ? normalizeExtractedUrl(m[0]) : null;
+  }],
+  [/^(behance|dribbble|kaggle)(?:\s*(?:url|link|profile|page))*$/i, (cv, question) => {
+    const host = /^behance/i.test(question) ? 'behance.net' : /^dribbble/i.test(question) ? 'dribbble.com' : 'kaggle.com';
+    const m = cv.match(new RegExp(`(?:https?:\\/\\/)?(?:www\\.)?${host.replace('.', '\\.')}/[\\w\\-_%]+/?`, 'i'));
+    return m ? normalizeExtractedUrl(m[0]) : null;
+  }],
+  [/^stack\s*overflow(?:\s*(?:url|link|profile|page))*$/i, cv => {
+    const m = cv.match(/(?:https?:\/\/)?(?:www\.)?stackoverflow\.com\/users\/\d+\/[\w\-_%]+\/?/i);
+    return m ? normalizeExtractedUrl(m[0]) : null;
+  }],
   [/^(portfolio|personal\s*website?|personal\s*site|blog)(?:\s*(?:url|link|profile|page|website))*$/i, cv => {
     // Any URL that isn't LinkedIn/GitHub/Twitter
     const labeled = cv.match(/\b(?:portfolio|website|personal\s*site|blog)[:\s-]+((?:https?:\/\/|www\.)?[\w.-]+\.[a-z]{2,}(?:\/[\w\-._~:/?#%@!$&'()*+,;=]*)?)/i);
@@ -959,10 +975,12 @@ function normalizeExtractedUrl(raw) {
 }
 
 function tryDeterministicExtract(cleanedQuestion, cvText) {
+  const profileUrl = extractProfileUrl(cleanedQuestion, cvText);
+  if (profileUrl) return profileUrl;
   for (const [pattern, extractor] of DETERMINISTIC_EXTRACTORS) {
     if (pattern.test(cleanedQuestion)) {
       try {
-        const result = extractor(cvText || '');
+        const result = extractor(cvText || '', cleanedQuestion);
         if (result?.trim()) return result.trim();
       } catch { /* ignore extractor errors, fall through to LLM */ }
     }
@@ -1122,7 +1140,7 @@ const GROUNDING_SCHEMA_VERSION = '1.0';
 const ANSWER_VALIDATOR_VERSION = '1.0';
 
 function answerValidation(answer, context, body, question, questionType) {
-  return validateApplicationAnswer(answer, {
+  const grounding = validateApplicationAnswer(answer, {
     context: buildGroundingContext(context?.cvData || {}, {
       targetCompany: body.company || '',
       confirmedFacts: Array.isArray(body.confirmedFacts) ? body.confirmedFacts.filter(value => typeof value === 'string') : [],
@@ -1130,6 +1148,10 @@ function answerValidation(answer, context, body, question, questionType) {
     question,
     questionType,
   });
+  const structure = validateAnswerStructure(answer, question, questionType);
+  const status = grounding.status === 'block' ? 'block'
+    : structure.status === 'review' || grounding.status === 'review' ? 'review' : 'pass';
+  return { ...grounding, status, structure };
 }
 
 function pipelineMetadata(context) {
@@ -1357,6 +1379,29 @@ async function applyEmbeddingRetrieval(tailorAgentContext, tailor = new CVTailor
   }
 }
 
+async function applyApplicationEmbeddingRetrieval(context, question, jobDescription = '') {
+  if (!LOCAL_EMBEDDING_BASE_URL || !context?.candidateEvidenceMap?.evidenceItems?.length) return context;
+  const evidence = context.candidateEvidenceMap.evidenceItems.slice(0, 80);
+  const query = `${question}\n${String(jobDescription || '').slice(0, 12000)}`.trim();
+  try {
+    const embeddings = await callEmbeddingEndpoint([
+      ...evidence.map(item => `${item.label || item.type}: ${item.text}`),
+      query,
+    ]);
+    const queryVector = embeddings[evidence.length];
+    if (!queryVector) return context;
+    const semanticEvidence = evidence
+      .map((item, index) => ({ ...item, semanticScore: cosineSimilarity(embeddings[index], queryVector) }))
+      .filter(item => Number.isFinite(item.semanticScore) && item.semanticScore > 0)
+      .sort((a, b) => b.semanticScore - a.semanticScore)
+      .slice(0, 6);
+    return semanticEvidence.length ? { ...context, semanticEvidence } : context;
+  } catch (error) {
+    if (error instanceof RequestDeadlineError) throw error;
+    return context;
+  }
+}
+
 /**
  * Strip common form-field artifacts (*, :, ?) so recipe patterns match cleanly.
  * This runs engine-side so every recipe benefits without duplicating the logic.
@@ -1386,6 +1431,12 @@ app.post('/api/generate', authRequired, generateLimiter, costlyAdmission, async 
     // ── Structured payload → recipe builds the prompts ──
     if (typeof body.cvText !== 'string' || body.cvText.length < 50) {
       return res.status(400).json({ error: 'Missing or empty cvText' });
+    }
+    if (body.cvText.length > 60000) {
+      return res.status(413).json({
+        error: 'CV text is too large to use completely. Please remove duplicated PDF text layers or upload a CV under 60,000 characters.',
+        code: 'cv_too_large_for_complete_context',
+      });
     }
     // Clean the question label (strip *, :, "Please enter your...", etc.)
     const cleanedQuestion = cleanFieldLabel(body.question);
@@ -1419,6 +1470,14 @@ app.post('/api/generate', authRequired, generateLimiter, costlyAdmission, async 
       });
     }
 
+    if (answerAgentContext) {
+      answerAgentContext = await applyApplicationEmbeddingRetrieval(
+        answerAgentContext,
+        cleanedQuestion,
+        body.jobDescription || '',
+      );
+    }
+
     try {
       const result = recipe.buildPrompts({
         question:       cleanedQuestion,
@@ -1428,6 +1487,7 @@ app.post('/api/generate', authRequired, generateLimiter, costlyAdmission, async 
         cvData:         answerAgentContext?.cvData,
         jdData:         answerAgentContext?.jdData,
         matchMap:       answerAgentContext?.matchMap?.length > 0 ? answerAgentContext.matchMap : undefined,
+        semanticEvidence: answerAgentContext?.semanticEvidence,
         domainRisk:     answerAgentContext?.domainRisk,
         roleProfile:    answerAgentContext?.jdData?.roleProfile || undefined,
         jobTitle:       body.jobTitle || undefined,
@@ -1678,30 +1738,44 @@ app.post('/api/cv/upload', authRequired, generateLimiter, upload.single('cv'), a
     if (mimetype === 'application/pdf') {
       // Extract text AND hyperlink annotations (e.g. LinkedIn URL hidden behind hyperlinked text)
       const collectedUrls = [];
-      const pdfData = await pdfParse(buffer, {
-        pagerender: async function(pageData) {
-          try {
-            const annotations = await pageData.getAnnotations();
-            for (const ann of annotations) {
-              const url = ann.url || ann.unsafeUrl;
-              if (url) collectedUrls.push(url);
+      let pdfData;
+      try {
+        pdfData = await pdfParse(buffer, {
+          pagerender: async function(pageData) {
+            try {
+              const annotations = await pageData.getAnnotations();
+              for (const ann of annotations) {
+                const url = ann.url || ann.unsafeUrl;
+                if (url) collectedUrls.push(url);
+              }
+            } catch (_) { /* annotations unavailable, ignore */ }
+            // Standard text rendering (matches pdf-parse default)
+            const textContent = await pageData.getTextContent();
+            let lastY = '';
+            let pageText = '';
+            for (const item of textContent.items) {
+              if (lastY === item.transform[5] || !lastY) {
+                pageText += item.str;
+              } else {
+                pageText += '\n' + item.str;
+              }
+              lastY = item.transform[5];
             }
-          } catch (_) { /* annotations unavailable, ignore */ }
-          // Standard text rendering (matches pdf-parse default)
-          const textContent = await pageData.getTextContent();
-          let lastY = '';
-          let pageText = '';
-          for (const item of textContent.items) {
-            if (lastY === item.transform[5] || !lastY) {
-              pageText += item.str;
-            } else {
-              pageText += '\n' + item.str;
-            }
-            lastY = item.transform[5];
+            return pageText;
           }
-          return pageText;
+        });
+      } catch (annotatedParseError) {
+        // The annotation-aware render path can fail on PDFs the default
+        // parser still reads. Never let link extraction cost the upload.
+        try {
+          pdfData = await pdfParse(buffer);
+        } catch (parseError) {
+          console.error('CV upload: PDF unreadable:', parseError.message);
+          return res.status(422).json({
+            error: 'This PDF could not be read — it may be scanned, password-protected, or exported in an unusual format. Re-export it (Print → Save as PDF often works), or paste your CV text instead.',
+          });
         }
-      });
+      }
       text = pdfData.text;
       if (collectedUrls.length > 0) {
         const uniqueUrls = [...new Set(collectedUrls)];
@@ -1710,10 +1784,18 @@ app.post('/api/cv/upload', authRequired, generateLimiter, upload.single('cv'), a
       }
     } else if (mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
       // Extract text + hyperlink URLs (e.g. LinkedIn linked behind display text)
-      const [rawResult, htmlResult] = await Promise.all([
-        mammoth.extractRawText({ buffer }),
-        mammoth.convertToHtml({ buffer })
-      ]);
+      let rawResult, htmlResult;
+      try {
+        [rawResult, htmlResult] = await Promise.all([
+          mammoth.extractRawText({ buffer }),
+          mammoth.convertToHtml({ buffer })
+        ]);
+      } catch (docxError) {
+        console.error('CV upload: DOCX unreadable:', docxError.message);
+        return res.status(422).json({
+          error: 'This Word file could not be read — it may be corrupted or not a real .docx. Re-save it as .docx or PDF, or paste your CV text instead.',
+        });
+      }
       text = rawResult.value;
       linkAnnotations = extractLinkAnnotationsFromHtml(htmlResult.value);
       const docxUrls = [...new Set(linkAnnotations.map(item => item.url))];
@@ -1723,13 +1805,21 @@ app.post('/api/cv/upload', authRequired, generateLimiter, upload.single('cv'), a
     } else if (mimetype === 'text/plain') {
       text = buffer.toString('utf-8');
     } else {
-      return res.status(400).json({ error: 'Unsupported file type' });
+      return res.status(400).json({
+        error: 'Unsupported file type — upload a PDF, DOCX, or TXT. Legacy .doc files are not supported: re-save as .docx or PDF.',
+      });
     }
 
     text = String(text)
       .replace(/\r\n/g, '\n')
       .replace(/\n{3,}/g, '\n\n')
       .trim();
+
+    if (!text) {
+      return res.status(422).json({
+        error: 'No selectable text found in this file — it looks like a scanned or image-based document. Export a text-based version, or paste your CV text instead.',
+      });
+    }
 
     res.json({
       success: true,
@@ -1739,7 +1829,8 @@ app.post('/api/cv/upload', authRequired, generateLimiter, upload.single('cv'), a
       size: req.file.size
     });
   } catch (e) {
-    res.status(500).json({ error: 'Failed to process CV file' });
+    console.error('CV upload error:', e);
+    res.status(500).json({ error: `Could not process this file (${String(e?.message || 'unknown error').slice(0, 120)}). Try re-exporting it, or paste your CV text instead.` });
   }
 });
 
@@ -1786,6 +1877,8 @@ function linkLabelFromUrl(url = '') {
   const raw = String(url || '').trim();
   if (/linkedin\.com/i.test(raw)) return 'LinkedIn';
   if (/github\.com/i.test(raw)) return 'GitHub';
+  if (/gitlab\.com/i.test(raw)) return 'GitLab';
+  if (/stackoverflow\.com/i.test(raw)) return 'Stack Overflow';
   if (/behance\.net/i.test(raw)) return 'Behance';
   if (/dribbble\.com/i.test(raw)) return 'Dribbble';
   if (/kaggle\.com/i.test(raw)) return 'Kaggle';
