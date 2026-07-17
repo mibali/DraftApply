@@ -26,6 +26,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     cvLoadedSection: document.getElementById('cv-loaded-section'),
     cvText:          document.getElementById('cv-text'),
     profileLinks:    document.getElementById('profile-links'),
+    factNotice:      document.getElementById('fact-notice'),
+    factAvailability: document.getElementById('fact-availability'),
+    factWorkAuth:    document.getElementById('fact-work-auth'),
+    factRelocation:  document.getElementById('fact-relocation'),
+    factSalary:      document.getElementById('fact-salary'),
     cvPreview:       document.getElementById('cv-preview'),
     saveCvBtn:       document.getElementById('save-cv-btn'),
     changeCvBtn:     document.getElementById('change-cv-btn'),
@@ -164,8 +169,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     const response = await chrome.runtime.sendMessage({ type: 'GET_CV' });
     if (response.cvText) showCVLoaded(response.cvText);
     try {
-      const { userProfileLinks } = await chrome.storage.local.get('userProfileLinks');
+      const { userProfileLinks, applicationFacts } = await chrome.storage.local.get(['userProfileLinks', 'applicationFacts']);
       if (elements.profileLinks && userProfileLinks) elements.profileLinks.value = userProfileLinks;
+      const facts = applicationFacts || {};
+      if (elements.factNotice) elements.factNotice.value = facts.notice || '';
+      if (elements.factAvailability) elements.factAvailability.value = facts.availability || '';
+      if (elements.factWorkAuth) elements.factWorkAuth.value = facts.workAuthorization || '';
+      if (elements.factRelocation) elements.factRelocation.value = facts.relocation || '';
+      if (elements.factSalary) elements.factSalary.value = facts.salary || '';
     } catch { /* first run */ }
   }
 
@@ -357,6 +368,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         ...extractedAnnotations.filter(a => !seenUrls.has(String(a?.url || '').toLowerCase())),
       ];
       await chrome.storage.local.set({ userProfileLinks: profileLinksRaw });
+      await chrome.storage.local.set({ applicationFacts: {
+        notice: elements.factNotice?.value?.trim() || '',
+        availability: elements.factAvailability?.value?.trim() || '',
+        workAuthorization: elements.factWorkAuth?.value?.trim() || '',
+        relocation: elements.factRelocation?.value?.trim() || '',
+        salary: elements.factSalary?.value?.trim() || '',
+      }});
       await chrome.runtime.sendMessage({ type: 'SAVE_CV', cvText: text, linkAnnotations });
       pendingCvLinkAnnotations = linkAnnotations;
       if (cvChanged) await resetTailorStateForCvChange();

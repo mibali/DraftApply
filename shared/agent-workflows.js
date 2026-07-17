@@ -2,6 +2,7 @@ import { CVParser } from './cv-parser.js';
 import { JDParser } from './jd-parser.js';
 import { CVTailor } from './cv-tailor.js';
 import { classifyDomainRisk } from './domain-packs/domain-classifier.js';
+import { questionType } from './question-classifier.js';
 
 export const APPLICATION_ANSWER_STAGES = [
   'Question Classification',
@@ -56,14 +57,7 @@ function unique(values) {
 }
 
 export function questionClassifierAgent(question = '') {
-  const q = String(question || '').toLowerCase();
-  if (/cover\s*letter|motivation\s+letter|letter\s+of\s+interest/.test(q)) return 'cover_letter';
-  if (/why\s+(do|would|are)|what\s+(interests?|attracts?|draws?)/.test(q)) return 'motivation_or_why';
-  if (/tell\s+me\s+about\s+a\s+time|describe\s+a\s+(time|situation)|give\s+.*example/.test(q)) return 'behavioral';
-  if (/salary|compensation|pay|rate/.test(q)) return 'salary';
-  if (/notice\s*period|start\s+date|availability|visa|right\s+to\s+work|authori[sz]ation/.test(q)) return 'short_factual';
-  if (/^(are|do|have|can|will|would|is|did)\s+you\b/i.test(String(question || '').trim())) return 'yes_no';
-  return 'general';
+  return questionType(question);
 }
 
 export function cvParsingAgent(cvText, existingCvData = null, parser = new CVParser()) {
@@ -96,6 +90,29 @@ export function candidateEvidenceMapAgent(cvData = {}) {
         roleSourceId: exp.sourceId,
       });
     }
+  }
+
+  for (const project of cvData.projects || []) {
+    const label = `Project: ${project.name || 'Unnamed project'}`;
+    for (const [index, bullet] of (project.bullets || project.responsibilities || []).entries()) {
+      evidenceItems.push({
+        type: 'project',
+        label,
+        text: bullet,
+        sourceId: project.bulletEvidence?.[index]?.sourceId,
+        projectSourceId: project.sourceId,
+      });
+    }
+    for (const skill of project.skills || []) {
+      evidenceItems.push({ type: 'project_skill', label, text: skill, projectSourceId: project.sourceId });
+    }
+  }
+
+  for (const education of cvData.education || []) {
+    const text = typeof education === 'string'
+      ? education
+      : [education.degree, education.institution, education.dates].filter(Boolean).join(', ');
+    if (text) evidenceItems.push({ type: 'education', label: 'Education', text });
   }
 
   for (const cert of cvData.certifications || []) {

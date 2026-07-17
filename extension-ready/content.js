@@ -1126,6 +1126,12 @@ class DraftApplyExtension {
     return lines.join('\n');
   }
 
+  _confirmedFacts(cvResponse) {
+    return Object.entries(cvResponse?.applicationFacts || {})
+      .filter(([, value]) => String(value || '').trim())
+      .map(([key, value]) => `${key}: ${String(value).trim()}`);
+  }
+
   async _startPrefetch(field) {
     const label = this.findFieldLabel(field);
     const fieldHint = field.name || field.id || field.placeholder || null;
@@ -1149,6 +1155,7 @@ class DraftApplyExtension {
       length: this._inferLengthFromField(field) || 'medium',
       tone:   'natural',
       cvText:         this._cvTextWithLinks(cvResponse),
+      confirmedFacts: this._confirmedFacts(cvResponse),
       jobTitle:       jobContextForPayload.jobTitle,
       company:        jobContextForPayload.company,
       jobDescription: jobContextForPayload.jobDescription,
@@ -1321,6 +1328,7 @@ class DraftApplyExtension {
         length,
         tone,
         cvText:         this._cvTextWithLinks(cvResponse),
+        confirmedFacts: this._confirmedFacts(cvResponse),
         jobTitle:       jobContextForPayload.jobTitle,
         company:        jobContextForPayload.company,
         jobDescription: jobContextForPayload.jobDescription,

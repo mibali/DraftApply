@@ -501,10 +501,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'GET_CV') {
-    chrome.storage.local.get(['cvText', 'cvLinkAnnotations'], (result) => {
+    chrome.storage.local.get(['cvText', 'cvLinkAnnotations', 'applicationFacts'], (result) => {
       sendResponse({
         cvText: result.cvText || null,
         linkAnnotations: Array.isArray(result.cvLinkAnnotations) ? result.cvLinkAnnotations : [],
+        applicationFacts: result.applicationFacts || {},
       });
     });
     return true;

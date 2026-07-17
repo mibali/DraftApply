@@ -5,6 +5,19 @@ import { groundingCases, groundingCv } from './fixtures/grounding-adversarial.js
 import { evaluateGroundingCases } from './grounding-evaluation-helper.js';
 
 describe('deterministic grounding harness', () => {
+  it('accepts a truthful ordinary paraphrase without weakening protected claims', () => {
+    const cvData = {
+      experience: [{
+        title: 'Support Engineer', company: 'Acme',
+        responsibilities: ['Diagnosed production incidents by analysing logs and isolating failing services'],
+      }],
+    };
+    const result = validateApplicationAnswer(
+      'I diagnosed production incidents by analysing logs and isolating services.',
+      { cvData, question: 'How do you troubleshoot production problems?', questionType: 'general' },
+    );
+    expect(result.status).toBe('pass');
+  });
   const context = buildGroundingContext(groundingCv, { targetCompany: 'TargetCo' });
 
   it.each(groundingCases)('$id', fixture => {

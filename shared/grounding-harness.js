@@ -88,7 +88,7 @@ export function selectEvidence(context, text, { roleSourceId = null, limit = 6 }
     .slice(0, limit).map(item => item.record);
 }
 
-export function isTextSupported(text, context, { roleSourceId = null, allowedSourceIds = null, sourceIds = [], requireSourceIds = false } = {}) {
+export function isTextSupported(text, context, { roleSourceId = null, allowedSourceIds = null, sourceIds = [], requireSourceIds = false, minOverlapRatio = 0.85 } = {}) {
   const allowed = Array.isArray(allowedSourceIds) ? new Set(allowedSourceIds) : null;
   const roleCandidates = (context?.records || []).filter(record => !roleSourceId || record.roleSourceId === roleSourceId);
   const validProposedSourceIds = sourceIds.filter(id => context?.sourceIndex?.[id]
@@ -119,7 +119,7 @@ export function isTextSupported(text, context, { roleSourceId = null, allowedSou
     if (employerClaim && (!record.company || !normalise(record.company).includes(normalise(employerClaim)))) return false;
     const evidenceTokens = new Set(tokens(evidence));
     const overlap = claimTokens.filter(token => evidenceTokens.has(token)).length;
-    return claimTokens.length > 0 && overlap >= Math.max(1, Math.ceil(claimTokens.length * 0.85));
+    return claimTokens.length > 0 && overlap >= Math.max(1, Math.ceil(claimTokens.length * minOverlapRatio));
   });
   return { supported, validProposedSourceIds };
 }
@@ -169,7 +169,12 @@ export function validateApplicationAnswer(answer, options = {}) {
           if (CREDENTIAL.test(proposition) && PREPARATION.test(record.text)) return false;
           return propositionTokens.length > 0 && propositionTokens.every(token => evidenceTokens.has(token));
         })
-      : isTextSupported(supportText, context).supported;
+      : isTextSupported(supportText, context, {
+          // Ordinary prose is expected to paraphrase the CV. Protected facts
+          // (metrics, employers, credentials, dates and personal state) keep
+          // the strict threshold and their dedicated checks above.
+          minOverlapRatio: claim.type === 'factual_assertion' ? 0.55 : 0.85,
+        }).supported;
     const personalConfirmed = !personalQuestion || (context.records || []).some(record =>
       record.type === 'user_confirmed' && isTextSupported(supportText || claim.text, {
         records: [record], sourceIndex: { [record.sourceId]: record },

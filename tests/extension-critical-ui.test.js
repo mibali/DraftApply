@@ -254,6 +254,6 @@ describe('user-entered profile links', () => {
     expect(popupJs).toContain('...manualLinks,');
     expect(popupJs).toContain("chrome.storage.local.set({ userProfileLinks: profileLinksRaw })");
     // Restored into the input on popup load.
-    expect(popupJs).toContain("chrome.storage.local.get('userProfileLinks')");
+    expect(popupJs).toContain("chrome.storage.local.get(['userProfileLinks', 'applicationFacts'])");
   });
 });

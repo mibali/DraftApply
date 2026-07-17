@@ -143,6 +143,80 @@ Used log analysis to reproduce and isolate customer platform issues.`,
     expect(prompt.userPrompt).toMatch(/\[Achievement\] Improved production reliability/);
   });
 
+  it('keeps the complete original CV and all parsed role bullets available to answer generation', () => {
+    const omittedByOldCaps = 'Recovered a legacy public-sector migration by aligning six resistant stakeholder groups.';
+    const rawCv = `${CV}\n\nVOLUNTEERING\nMentored career changers through a community technology programme.\n${omittedByOldCaps}`;
+    const prompt = buildPrompts({
+      question: 'Describe a time you influenced stakeholders during a difficult migration',
+      cvText: rawCv,
+      jobDescription: 'Lead complex customer migrations and build stakeholder alignment.',
+      cvData: {
+        contactInfo: { name: 'Michael T Bali' },
+        experience: [{
+          title: 'Migration Lead', company: 'Legacy Systems Ltd', dates: '2018-2020',
+          responsibilities: [
+            'First bullet', 'Second bullet', 'Third bullet', 'Fourth bullet',
+            'Fifth bullet', 'Sixth bullet', 'Seventh bullet', omittedByOldCaps,
+          ],
+        }],
+      },
+    });
+
+    expect(prompt.userPrompt).toContain(omittedByOldCaps);
+    expect(prompt.userPrompt).toContain('VOLUNTEERING');
+    expect(prompt.userPrompt.match(/VOLUNTEERING/g)).toHaveLength(1);
+    expect(prompt.userPrompt).not.toMatch(/COMPLETE ORIGINAL CV — SOURCE OF TRUTH/);
+  });
+
+  it('does not duplicate the canonical CV when parsed data is available', () => {
+    const marker = 'UNIQUE_SOURCE_MARKER_FOR_PROMPT';
+    const prompt = buildPrompts({
+      question: 'Describe your relevant experience',
+      cvText: `${CV}\n${marker}`,
+      jobDescription: 'Build reliable systems.',
+      cvData: { experience: [{ title: 'Engineer', company: 'Acme', responsibilities: ['Built reliable systems'] }] },
+    });
+    expect(prompt.userPrompt.match(new RegExp(marker, 'g'))).toHaveLength(1);
+  });
+
+  it('uses a technical answer contract and covers every part of multi-part questions', () => {
+    const prompt = buildPrompts({
+      question: 'Describe your experience designing cloud API architectures, and explain one important technical decision you made?',
+      cvText: CV,
+      jobDescription: 'Design secure cloud APIs and explain architectural tradeoffs.',
+    });
+    expect(prompt.questionType).toBe('technical');
+    expect(prompt.systemPrompt).toMatch(/TECHNICAL ANSWER CONTRACT/);
+    expect(prompt.userPrompt).toMatch(/MULTI-PART QUESTION/);
+  });
+
+  it('never invents an absent personal fact', () => {
+    const prompt = buildPrompts({ question: 'What is your notice period?', cvText: CV });
+    expect(prompt.questionType).toBe('personal_factual');
+    expect(prompt.systemPrompt).toMatch(/Never infer a personal fact/);
+    expect(prompt.systemPrompt).toMatch(/Needs your input/);
+  });
+
+  it('selects semantically related project evidence even without exact question wording', () => {
+    const prompt = buildPrompts({
+      question: 'Tell me about influencing without authority',
+      cvText: CV,
+      jobDescription: 'Partner across teams to secure support for technical change.',
+      cvData: {
+        experience: [{ title: 'Engineer', company: 'Acme', responsibilities: ['Maintained internal services'] }],
+        projects: [{
+          name: 'Platform Adoption',
+          bullets: ['Secured executive buy-in and aligned cross-functional stakeholders around the rollout plan'],
+          skills: ['facilitation'],
+        }],
+      },
+    });
+
+    expect(prompt.userPrompt).toMatch(/MOST RELEVANT CV BULLETS AND EVIDENCE/);
+    expect(prompt.userPrompt).toMatch(/\[Project: Platform Adoption\]/);
+    expect(prompt.userPrompt).toMatch(/Secured executive buy-in/);
+  });
+
   it('allows cover letters to use top matched requirements even without question word overlap', () => {
     const prompt = buildPrompts({
       question: 'Cover letter',
