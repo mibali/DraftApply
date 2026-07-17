@@ -1468,11 +1468,10 @@ class DraftApplyExtension {
     await this.generateAnswer(question);
   }
 
-  _showFallbackNotice(result) {
-    if (result?.provider === 'openrouter' && result?.fallbackFrom === 'groq') {
-      const model = result.model ? `: ${result.model}` : '';
-      this.showNotification(`Groq is busy, so DraftApply used OpenRouter fallback${model}.`);
-    }
+  _showFallbackNotice() {
+    // Provider fallback is invisible to the user by design: which engine
+    // produced the answer is an internal concern, and the quality gates are
+    // identical on both paths.
   }
 
   // Provider/model names are pipeline internals, not applicant-facing
@@ -1485,18 +1484,6 @@ class DraftApplyExtension {
     badge.textContent = '';
     badge.className = 'da-model-badge';
     badge.removeAttribute('title');
-  }
-
-  shortModelName(model) {
-    const raw = String(model || '').trim();
-    if (!raw) return '';
-    return raw
-      .replace(/^openrouter\//, '')
-      .replace(/:free$/, ' free')
-      .split('/')
-      .slice(-1)[0]
-      .replace(/-/g, ' ')
-      .slice(0, 34);
   }
 
   renderAgentInsights(insights) {

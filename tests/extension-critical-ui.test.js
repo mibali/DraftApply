@@ -156,12 +156,13 @@ describe('extension critical modal behavior', () => {
     expect(contentJs).toContain('Checked against your CV');
   });
 
-  it('shows the exact OpenRouter model when answer generation falls back from Groq', () => {
+  it('keeps provider fallback invisible to the user while metadata still flows for telemetry', () => {
     expect(backgroundJs).toContain("response.headers.get('X-DraftApply-Model')");
     expect(backgroundJs).toContain("type: 'STREAM_META'");
     expect(contentJs).toContain("if (message.type === 'STREAM_META')");
-    expect(contentJs).toContain('const model = result.model ? `: ${result.model}` :');
-    expect(contentJs).toContain('DraftApply used OpenRouter fallback${model}.');
+    // No provider/model names in any user-facing notification.
+    expect(contentJs).not.toContain('OpenRouter fallback');
+    expect(contentJs).not.toContain('Groq is busy');
   });
 
   it('keeps provider/model internals out of the modal header', () => {
