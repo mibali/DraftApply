@@ -25,6 +25,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     cvInputSection:  document.getElementById('cv-input-section'),
     cvLoadedSection: document.getElementById('cv-loaded-section'),
     cvText:          document.getElementById('cv-text'),
+    profileLinks:    document.getElementById('profile-links'),
     cvPreview:       document.getElementById('cv-preview'),
     saveCvBtn:       document.getElementById('save-cv-btn'),
     changeCvBtn:     document.getElementById('change-cv-btn'),
@@ -162,6 +163,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   async function loadState() {
     const response = await chrome.runtime.sendMessage({ type: 'GET_CV' });
     if (response.cvText) showCVLoaded(response.cvText);
+    try {
+      const { userProfileLinks } = await chrome.storage.local.get('userProfileLinks');
+      if (elements.profileLinks && userProfileLinks) elements.profileLinks.value = userProfileLinks;
+    } catch { /* first run */ }
   }
 
   async function refreshStatsUI() {
@@ -317,6 +322,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
+  // Profile URLs the user typed in the popup. Many CVs carry "LinkedIn" as
+  // styled text with the URL nowhere in the file (not even as a PDF link
+  // annotation), so questions like "LinkedIn URL" honestly answered "Not
+  // found in CV". User-entered URLs are authoritative and merge into the
+  // same link-annotation channel answers already consume.
+  function parseProfileLinks(raw) {
+    return String(raw || '').split(/[,\s]+/).map(value => value.trim()).filter(Boolean)
+      .map(value => (/^https?:\/\//i.test(value) ? value : `https://${value}`))
+      .filter(value => { try { new URL(value); return true; } catch { return false; } })
+      .slice(0, 10)
+      .map(url => ({ text: linkLabelFromUrl(url), url }));
+  }
+
   async function saveCV() {
     const text = elements.cvText.value.trim();
     if (text.length < 50) {
@@ -328,9 +346,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       const previous = await chrome.runtime.sendMessage({ type: 'GET_CV' }).catch(() => ({}));
       const cvChanged = Boolean(previous?.cvText && previous.cvText !== text);
-      const linkAnnotations = cvChanged || pendingCvLinkAnnotations.length > 0
+      const extractedAnnotations = cvChanged || pendingCvLinkAnnotations.length > 0
         ? pendingCvLinkAnnotations
         : Array.isArray(previous?.linkAnnotations) ? previous.linkAnnotations : [];
+      const profileLinksRaw = elements.profileLinks?.value?.trim() || '';
+      const manualLinks = parseProfileLinks(profileLinksRaw);
+      const seenUrls = new Set(manualLinks.map(a => a.url.toLowerCase()));
+      const linkAnnotations = [
+        ...manualLinks,
+        ...extractedAnnotations.filter(a => !seenUrls.has(String(a?.url || '').toLowerCase())),
+      ];
+      await chrome.storage.local.set({ userProfileLinks: profileLinksRaw });
       await chrome.runtime.sendMessage({ type: 'SAVE_CV', cvText: text, linkAnnotations });
       pendingCvLinkAnnotations = linkAnnotations;
       if (cvChanged) await resetTailorStateForCvChange();

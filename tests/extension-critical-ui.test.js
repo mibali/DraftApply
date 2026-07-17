@@ -217,3 +217,16 @@ describe('answer generation uses full CV facts and respects user authorship', ()
     expect(contentJs).not.toContain("'Regenerate to Validate'");
   });
 });
+
+describe('user-entered profile links', () => {
+  it('popup saves manual profile URLs into the link-annotation channel answers consume', () => {
+    expect(popupHtml).toContain('id="profile-links"');
+    expect(popupJs).toContain("profileLinks:    document.getElementById('profile-links')");
+    expect(popupJs).toContain('function parseProfileLinks(raw)');
+    // Manual links take precedence and are stored for future sessions.
+    expect(popupJs).toContain('...manualLinks,');
+    expect(popupJs).toContain("chrome.storage.local.set({ userProfileLinks: profileLinksRaw })");
+    // Restored into the input on popup load.
+    expect(popupJs).toContain("chrome.storage.local.get('userProfileLinks')");
+  });
+});
