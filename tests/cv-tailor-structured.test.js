@@ -111,7 +111,11 @@ describe('buildCvSkeleton', () => {
       b.endsWith('lifecycle management for cloud-native ML workloads.'))).toBe(true);
   });
 
-  it('does not re-append parsed email/phone already inside a combined raw header line', () => {
+  it('does not re-append parsed email/phone/LinkedIn already inside a combined raw header line', () => {
+    // The header already shows "LinkedIn" as a labelled word - re-adding the
+    // parsed contactInfo.linkedin URL as its own line would duplicate a link
+    // already presented (the real defect: a live CV rendered the same
+    // LinkedIn URL twice, once via the header word and once as a bare line).
     const combined = tailor.buildCvSkeleton({
       ...cvData,
       rawText: [
@@ -122,7 +126,26 @@ describe('buildCvSkeleton', () => {
         'Cloud, platform, and MLOps engineer.',
       ].join('\n'),
     }, jdData);
-    expect(combined.contacts).toEqual(['Birmingham, UK | mtb@example.com | 07401731548 | LinkedIn', 'linkedin.com/in/michael-bali']);
+    expect(combined.contacts).toEqual(['Birmingham, UK | mtb@example.com | 07401731548 | LinkedIn']);
+  });
+
+  it('renders a distinct profile link as a clean "Label: url" line when the header names no such platform', () => {
+    // contactInfo.linkedin carries information genuinely absent from the raw
+    // header (no "LinkedIn" word, no url) - this is new information, not a
+    // duplicate, and should still appear, tidily labelled.
+    const withDistinctLinkedIn = tailor.buildCvSkeleton({
+      ...cvData,
+      rawText: [
+        'MICHAEL T BALI',
+        'mtb@example.com',
+        '07401731548',
+        'Birmingham, UK',
+        '',
+        'PROFESSIONAL SUMMARY',
+        'Cloud, platform, and MLOps engineer.',
+      ].join('\n'),
+    }, jdData);
+    expect(withDistinctLinkedIn.contacts).toContain('LinkedIn: linkedin.com/in/michael-bali');
   });
 
   it('extracts education lines verbatim from a compound raw section header', () => {
@@ -578,7 +601,7 @@ describe('renderTailoredCV', () => {
       'mtb@example.com',
       '07401731548',
       'Birmingham, UK',
-      'linkedin.com/in/michael-bali',
+      'LinkedIn: linkedin.com/in/michael-bali',
       '',
       'PROFESSIONAL SUMMARY',
       'Cloud, platform, and MLOps engineer targeting ML platform work.',
@@ -874,5 +897,32 @@ describe('summary grounding: coherence over choppiness', () => {
     expect(content.summary).not.toMatch(/Nobel|Google|Mars/);
     expect(content.summary).toMatch(/^Cloud, platform, and MLOps engineer/);
     expect(content.summaryEvidence).toEqual(['summary:0']);
+  });
+});
+
+describe('buildCvSkeleton regression: auto-generated "Links:" trailer never reaches the header or education', () => {
+  it('produces one clean header line and a URL-free education section end-to-end', () => {
+    const parsed = new CVParser().parse(`MICHAEL T BALI
+Birmingham, UK | mtbdesigns01@gmail.com | 07401731548 | LinkedIn
+PROFESSIONAL SUMMARY
+Cloud, platform, and MLOps engineer with 7+ years of experience.
+PROFESSIONAL EXPERIENCE
+Sourcegraph | UK
+Feb 2026 - Present
+DevOps & Platform Engineer
+• Published an article on the Sourcegraph engineering blog.
+EDUCATION, CERTIFICATIONS & RECOGNITION
+• BSc Information Technology, University of Cape Coast, 2018
+• Certified Kubernetes Administrator (CKA)
+
+Links:
+https://www.linkedin.com/in/michael-temitope-b-830640171/
+https://www.amazon.co.uk/dp/B0H8M8Q2CG
+https://sourcegraph.com/blog/how-our-support-engineers-use-deep-search
+https://github.com/sourcegraph/handbook/blob/main/content/k8-migration.md`);
+    const skel = tailor.buildCvSkeleton(parsed, { jobTitle: 'MLOps Engineer' });
+    expect(skel.contacts).toEqual(['Birmingham, UK | mtbdesigns01@gmail.com | 07401731548 | LinkedIn']);
+    expect(skel.educationLines.join(' ')).not.toMatch(/https?:\/\//);
+    expect(skel.educationLines.some(line => /^links?:?$/i.test(line))).toBe(false);
   });
 });

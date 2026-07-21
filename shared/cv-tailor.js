@@ -2674,16 +2674,27 @@ Do not add anything new. Return the complete corrected CV.`;
     // ("Birmingham, UK | email | phone | LinkedIn") must not be appended
     // again as standalone lines - that renders the email/phone twice.
     const collectedText = collected.join(' | ').toLowerCase();
-    const merged = [...collected, ...[
-      contactInfo.email,
-      contactInfo.phone,
-      contactInfo.linkedin,
-      contactInfo.github,
-      contactInfo.website,
-      contactInfo.portfolio,
-      contactInfo.twitter,
-    ].map(v => String(v || '').trim()).filter(Boolean)
-      .filter(value => !collectedText.includes(value.toLowerCase()))];
+    const emailPhoneFallback = [contactInfo.email, contactInfo.phone]
+      .map(v => String(v || '').trim()).filter(Boolean)
+      .filter(value => !collectedText.includes(value.toLowerCase()));
+    // Profile-link fields (LinkedIn/GitHub/Twitter) are skipped when the
+    // header already presents that platform as a labelled word (e.g. "...|
+    // LinkedIn") - adding the URL again would just duplicate a link already
+    // shown. A field with no matching word in the header (or no header
+    // lines at all) is genuinely new information and is rendered as
+    // "Label: url" so it stays tidy even without hyperlinking support.
+    const collectedHasWord = (word) => new RegExp(`\\b${word}\\b`, 'i').test(collectedText);
+    const profileLinkFallback = [
+      ['LinkedIn', contactInfo.linkedin, collectedHasWord('linkedin')],
+      ['GitHub', contactInfo.github, collectedHasWord('github')],
+      ['Portfolio', contactInfo.portfolio, false],
+      ['Website', contactInfo.website, false],
+      ['Twitter', contactInfo.twitter, collectedHasWord('twitter') || collectedHasWord('x\\.com')],
+    ]
+      .filter(([, url]) => String(url || '').trim())
+      .filter(([, url, alreadyLabelled]) => !alreadyLabelled && !collectedText.includes(String(url).trim().toLowerCase()))
+      .map(([label, url]) => `${label}: ${String(url).trim()}`);
+    const merged = [...collected, ...emailPhoneFallback, ...profileLinkFallback];
     const seen = new Set();
     return merged.filter(value => {
       if (value.length > 500 || /[.!?]\s/.test(value)) return false;
@@ -2700,7 +2711,7 @@ Do not add anything new. Return the complete corrected CV.`;
     const raw = String(cvData?.rawText || '');
     if (raw) {
       const lines = raw.split('\n');
-      const OTHER_HEADER = /^(professional\s+summary|summary|profile|about|objective|core\s+competenc(?:y|ies)|(?:professional\s+)?experience|employment(?:\s+history)?|work\s+history|technical\s+skills?|skills|technologies|projects?|achievements?|languages?|interests?|references?)\s*[:\-]?\s*$/i;
+      const OTHER_HEADER = /^(professional\s+summary|summary|profile|about|objective|core\s+competenc(?:y|ies)|(?:professional\s+)?experience|employment(?:\s+history)?|work\s+history|technical\s+skills?|skills|technologies|projects?|achievements?|languages?|interests?|references?|links?)\s*[:\-]?\s*$/i;
       let start = -1;
       for (let i = 0; i < lines.length; i++) {
         const trimmed = String(lines[i] || '').trim();

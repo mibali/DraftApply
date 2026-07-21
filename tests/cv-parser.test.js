@@ -511,3 +511,76 @@ describe('CVParser: em-dash header format + labelled skill categories (reference
     }
   });
 });
+
+describe('CVParser regression: auto-generated "Links:" trailer pollution (live defect)', () => {
+  // Real defect: PDF upload appends a "Links:" block collecting EVERY
+  // hyperlink annotation in the source document - including reference links
+  // inside body bullets (a blog post, a conference page) - right after
+  // whatever section happens to be last (usually Education). Left in the
+  // text, it got swallowed whole into Education as bogus bullets AND
+  // poisoned contactInfo.github/website with unrelated company/product URLs.
+  const cvText = `MICHAEL T BALI
+Birmingham, UK | mtbdesigns01@gmail.com | 07401731548 | LinkedIn
+PROFESSIONAL SUMMARY
+Cloud, platform, and MLOps engineer with 7+ years of experience.
+PROFESSIONAL EXPERIENCE
+Sourcegraph | UK
+Feb 2026 - Present
+DevOps & Platform Engineer
+• Published an article on the Sourcegraph engineering blog.
+EDUCATION, CERTIFICATIONS & RECOGNITION
+• BSc Information Technology, University of Cape Coast, 2018
+• Certified Kubernetes Administrator (CKA)
+
+Links:
+https://www.linkedin.com/in/michael-temitope-b-830640171/
+https://www.amazon.co.uk/dp/B0H8M8Q2CG
+https://sourcegraph.com/blog/how-our-support-engineers-use-deep-search
+https://github.com/sourcegraph/handbook/blob/main/content/k8-migration.md`;
+
+  const cv = new CVParser().parse(cvText);
+
+  it('strips the auto-generated Links: trailer from rawText', () => {
+    expect(cv.rawText).not.toMatch(/\nLinks:\n/);
+    expect(cv.rawText).not.toMatch(/amazon\.co\.uk|sourcegraph\.com\/blog/);
+  });
+
+  it('does not misattribute an unrelated body/reference link as the candidate\'s own GitHub or website', () => {
+    expect(cv.contactInfo.github).toBe('');
+    expect(cv.contactInfo.website).toBe('');
+    // The header word "LinkedIn" carries no URL of its own once the trailer
+    // (the only place the URL appeared) is stripped - this is correct: the
+    // header line is preserved and rendered as-is by the tailoring layer.
+    expect(cv.contactInfo.linkedin).toBe('');
+  });
+
+  it('does not leave any URL or "Links:" heading inside the education section', () => {
+    expect(cv.education.join(' ')).not.toMatch(/https?:\/\//);
+  });
+});
+
+describe('CVParser: contact-info matching is scoped to the header, not the whole document', () => {
+  it('ignores a GitHub URL that appears only in a body bullet, far from the header', () => {
+    const cv = new CVParser().parse(`Jane Doe
+jane@example.com
+
+PROFESSIONAL EXPERIENCE
+Acme | Engineer | 2020 - Present
+• Migrated the team's internal tools, referencing github.com/some-other-org/tool for context.
+
+EDUCATION
+BSc Computer Science`);
+    expect(cv.contactInfo.github).toBe('');
+  });
+
+  it('still finds a genuine GitHub URL presented in the header', () => {
+    const cv = new CVParser().parse(`Jane Doe
+jane@example.com
+github.com/janedoe
+
+PROFESSIONAL EXPERIENCE
+Acme | Engineer | 2020 - Present
+• Did the work.`);
+    expect(cv.contactInfo.github).toBe('github.com/janedoe');
+  });
+});

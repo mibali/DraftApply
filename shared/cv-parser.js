@@ -31,9 +31,9 @@ export class CVParser {
    * @returns {Object} Structured CV data
    */
   parse(text) {
-    const normalizedText = this._normaliseExtractionSpacing(
+    const normalizedText = this._stripAutoLinksTrailer(this._normaliseExtractionSpacing(
       this._insertMissingSpaceBeforeMonths(this._normaliseSpacedHeadings(text))
-    );
+    ));
     this.rawText = normalizedText;
     const experience = this.extractExperience(normalizedText);
     const summary = this.extractSummary(normalizedText);
@@ -63,6 +63,26 @@ export class CVParser {
     };
 
     return this.structured;
+  }
+
+  // CV upload appends a trailing "Links:\n<url>\n<url>..." block collecting
+  // every hyperlink annotation found anywhere in the source PDF/DOCX -
+  // including reference links inside body bullets (a blog post, a book, a
+  // conference page), not just the candidate's own profile links. Left in
+  // the text, it gets swallowed whole into whatever section happens to
+  // precede it (usually Education, since PDF extraction appends it after
+  // the last page's content) and poisons contact-field regex matching.
+  // The same links remain available separately via the upload API's
+  // linkAnnotations field, so this block is pure noise once removed - only
+  // stripped when every line after "Links:" is a bare URL, so a real
+  // human-authored "Links" section (with descriptive text) is left alone.
+  _stripAutoLinksTrailer(text) {
+    const raw = String(text || '');
+    const match = raw.match(/\n{1,3}Links:[ \t]*\n([\s\S]*)$/i);
+    if (!match) return raw;
+    const trailerLines = match[1].split('\n').map(line => line.trim()).filter(Boolean);
+    if (trailerLines.length === 0 || !trailerLines.every(line => /^https?:\/\/\S+$/i.test(line))) return raw;
+    return raw.slice(0, match.index).replace(/\s+$/, '');
   }
 
   _normaliseExtractionSpacing(text) {
@@ -174,13 +194,21 @@ export class CVParser {
 
   extractContactInfo(text) {
     const lines = text.split('\n').map(line => line.trim()).filter(Boolean);
+    // Profile links (LinkedIn/GitHub/website/portfolio) live in the header.
+    // Matching them against the whole document lets an unrelated reference
+    // link deep in the body - a company's GitHub org mentioned in a bullet,
+    // a book URL in an achievements section - get misattributed as the
+    // candidate's own profile. Email/phone stay whole-document: those
+    // patterns don't have that false-positive risk.
+    const firstSectionIdx = lines.findIndex((line, i) => i > 0 && this._isExactSectionHeading(line));
+    const headerText = lines.slice(0, firstSectionIdx === -1 ? 20 : Math.min(firstSectionIdx, 20)).join('\n');
     const emailMatch = text.match(/[\w.-]+@[\w.-]+\.\w+/);
     const phoneMatch = text.match(/(?:^|[^\d])((?:\+?\d{10,15})|(?:\+\d{1,3}[\s.-]?)?(?:\(?\d{2,4}\)?[\s.-])\d{3,4}[\s.-]\d{3,4})(?!\d)/m);
-    const linkedinMatch = text.match(/(?:https?:\/\/)?(?:www\.)?linkedin\.com\/in\/[\w-]+\/?/i);
-    const githubMatch = text.match(/(?:https?:\/\/)?(?:www\.)?github\.com\/[\w-]+\/?/i);
-    const websiteMatch = text.match(/\b(?:https?:\/\/|www\.)(?!(?:www\.)?(?:linkedin|github|twitter|x)\.com\b)[\w.-]+\.[a-z]{2,}(?:\/[\w./-]*)?/i);
-    const twitterMatch = text.match(/(?:https?:\/\/)?(?:www\.)?(?:twitter\.com|x\.com)\/[\w-]+\/?/i);
-    const portfolioMatch = text.match(/(?:portfolio|behance\.net|dribbble\.com|kaggle\.com)[:\s]*(?:https?:\/\/)?[\w./-]+/i);
+    const linkedinMatch = headerText.match(/(?:https?:\/\/)?(?:www\.)?linkedin\.com\/in\/[\w-]+\/?/i);
+    const githubMatch = headerText.match(/(?:https?:\/\/)?(?:www\.)?github\.com\/[\w-]+\/?/i);
+    const websiteMatch = headerText.match(/\b(?:https?:\/\/|www\.)(?!(?:www\.)?(?:linkedin|github|twitter|x)\.com\b)[\w.-]+\.[a-z]{2,}(?:\/[\w./-]*)?/i);
+    const twitterMatch = headerText.match(/(?:https?:\/\/)?(?:www\.)?(?:twitter\.com|x\.com)\/[\w-]+\/?/i);
+    const portfolioMatch = headerText.match(/(?:portfolio|behance\.net|dribbble\.com|kaggle\.com)[:\s]*(?:https?:\/\/)?[\w./-]+/i);
 
     return {
       name: this._findContactName(lines),

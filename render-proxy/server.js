@@ -1778,9 +1778,14 @@ app.post('/api/cv/upload', authRequired, generateLimiter, upload.single('cv'), a
       }
       text = pdfData.text;
       if (collectedUrls.length > 0) {
+        // linkAnnotations already carries every collected URL back to the
+        // client for hyperlinking and answer generation - appending them as
+        // a visible "Links:" text block duplicates that information as bare
+        // URLs, and (since a PDF's annotations include ordinary reference
+        // links inside body bullets, not just the candidate's own profile
+        // links) gets misread as extra contact fields or extra CV content.
         const uniqueUrls = [...new Set(collectedUrls)];
         linkAnnotations = uniqueUrls.map(url => ({ text: linkLabelFromUrl(url), url }));
-        text += '\n\nLinks:\n' + uniqueUrls.join('\n');
       }
     } else if (mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
       // Extract text + hyperlink URLs (e.g. LinkedIn linked behind display text)
@@ -1798,10 +1803,6 @@ app.post('/api/cv/upload', authRequired, generateLimiter, upload.single('cv'), a
       }
       text = rawResult.value;
       linkAnnotations = extractLinkAnnotationsFromHtml(htmlResult.value);
-      const docxUrls = [...new Set(linkAnnotations.map(item => item.url))];
-      if (docxUrls.length > 0) {
-        text += '\n\nLinks:\n' + docxUrls.join('\n');
-      }
     } else if (mimetype === 'text/plain') {
       text = buffer.toString('utf-8');
     } else {

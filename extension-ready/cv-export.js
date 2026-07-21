@@ -719,15 +719,19 @@ function splitLongSkillItem(item) {
 function formatCvToHtml(rawText, fallbackContactUrls = {}, linkAnnotations = []) {
   // Strip trailing "Links:" section added by PDF/DOCX extractor — links are
   // already inline in the text; we don't want them duplicated at the bottom.
+  // Extract social URLs from the STRIPPED text: the trailer collects every
+  // hyperlink annotation in the source file, including unrelated reference
+  // links inside body bullets, so scanning it for "the LinkedIn/GitHub URL"
+  // risks matching one of those instead of the candidate's own profile.
+  const mainText = rawText.replace(/\n\nLinks:\n[\s\S]+$/i, '').trim();
   // Merge: tailored-text URLs take priority; original CV URLs fill any gaps.
-  const tailoredUrls = extractSocialUrls(rawText);
+  const tailoredUrls = extractSocialUrls(mainText);
   const socialUrls = {};
   for (const key of ['linkedin', 'github', 'portfolio', 'website', 'twitter']) {
     socialUrls[key] = tailoredUrls[key] || fallbackContactUrls[key] || '';
   }
   const knownSocialUrls = new Set(Object.values(socialUrls).filter(Boolean).map(normalizeUrl));
-  const emailDomains = extractEmailDomains(rawText);
-  const mainText = rawText.replace(/\n\nLinks:\n[\s\S]+$/i, '').trim();
+  const emailDomains = extractEmailDomains(mainText);
   const lines = normaliseExportLines(mainText);
 
   let html = '';

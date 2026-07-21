@@ -1298,7 +1298,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       let linkAnnotations = [];
       try {
         const cvResp = await chrome.runtime.sendMessage({ type: 'GET_CV' });
-        contactUrls = extractCvContactUrls(cvResp?.cvText || '');
+        contactUrls = extractCvContactUrls(stripAutoLinksTrailer(cvResp?.cvText || ''));
         linkAnnotations = Array.isArray(cvResp?.linkAnnotations) ? cvResp.linkAnnotations : [];
       } catch { /* non-fatal */ }
 
@@ -1318,12 +1318,30 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
+  // "Links:" is CV-upload's own trailer collecting every hyperlink
+  // annotation in the source file (including reference links inside body
+  // bullets - a blog post, a book, a conference page), not just the
+  // candidate's own profile links. Only stripped when every line after it
+  // is a bare URL, so a genuine human-authored "Links" section is untouched.
+  function stripAutoLinksTrailer(text) {
+    const raw = String(text || '');
+    const match = raw.match(/\n{1,3}Links:[ \t]*\n([\s\S]*)$/i);
+    if (!match) return raw;
+    const trailerLines = match[1].split('\n').map(line => line.trim()).filter(Boolean);
+    if (trailerLines.length === 0 || !trailerLines.every(line => /^https?:\/\/\S+$/i.test(line))) return raw;
+    return raw.slice(0, match.index).replace(/\s+$/, '');
+  }
+
   function extractCvContactUrls(text) {
     const ensure = (u) => u ? (u.startsWith('http') ? u : 'https://' + u) : '';
-    const li  = text.match(/(?:https?:\/\/)?(?:www\.)?linkedin\.com\/in\/[\w-]+\/?/i);
-    const gh  = text.match(/(?:https?:\/\/)?(?:www\.)?github\.com\/[\w-]+\/?/i);
-    const tw  = text.match(/(?:https?:\/\/)?(?:www\.)?(?:twitter|x)\.com\/[\w-]+\/?/i);
-    const web = text.match(
+    // Scoped to the header: a profile-link regex matched against the whole
+    // document can pick up an unrelated reference link from further down
+    // the CV and misreport it as the candidate's own LinkedIn/GitHub/site.
+    const headerText = text.split('\n').slice(0, 20).join('\n');
+    const li  = headerText.match(/(?:https?:\/\/)?(?:www\.)?linkedin\.com\/in\/[\w-]+\/?/i);
+    const gh  = headerText.match(/(?:https?:\/\/)?(?:www\.)?github\.com\/[\w-]+\/?/i);
+    const tw  = headerText.match(/(?:https?:\/\/)?(?:www\.)?(?:twitter|x)\.com\/[\w-]+\/?/i);
+    const web = headerText.match(
       /(?<!@)\b(?:(?:https?:\/\/|www\.)?(?!(?:www\.)?(?:linkedin|github|twitter|x)\.com\b)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(?:\/[a-z0-9\-._~:/?#[\]@!$&'()*+,;=%]*)?)/i
     );
     return {
