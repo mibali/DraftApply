@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -43,4 +43,21 @@ describe('extension build configuration', () => {
 
   it.each(['http://localhost:8787', 'http://127.0.0.1:3000', 'http://[::1]:8080'])
     ('allows loopback HTTP %s', value => expect(validateProxyUrl(value)).toBe(value));
+});
+
+describe('extension build excludes OS/editor artifacts', () => {
+  it('never copies .DS_Store from the source directory into the built package', () => {
+    // extension-ready/ is a real working directory on someone's disk; a
+    // stray .DS_Store there must never end up in the package a reviewer or
+    // a real user installs from the Chrome Web Store.
+    const dsStorePath = 'extension-ready/.DS_Store';
+    writeFileSync(dsStorePath, 'not a real extension file');
+    try {
+      const dir = output();
+      buildExtension({ outputDir: dir });
+      expect(existsSync(join(dir, '.DS_Store'))).toBe(false);
+    } finally {
+      rmSync(dsStorePath, { force: true });
+    }
+  });
 });

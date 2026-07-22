@@ -31,7 +31,16 @@ export function buildExtension({ proxyUrl = OFFICIAL_PROXY_URL, outputDir = join
   }
   rmSync(resolvedOutput, { recursive: true, force: true });
   mkdirSync(resolvedOutput, { recursive: true });
-  cpSync(SOURCE_DIR, resolvedOutput, { recursive: true });
+  // extension-ready/ is a working directory on a real filesystem, so OS/editor
+  // cruft (.DS_Store, editor swap files) can sit alongside the real source
+  // without being tracked in git. A blind recursive copy ships it straight
+  // into the package a reviewer or a real user installs from the Chrome Web
+  // Store; filter it out here instead of relying on every contributor's
+  // working directory being clean.
+  cpSync(SOURCE_DIR, resolvedOutput, {
+    recursive: true,
+    filter: (src) => !/(^|\/)(\.DS_Store|Thumbs\.db|desktop\.ini|.*~|\.swp)$/i.test(src.slice(SOURCE_DIR.length)),
+  });
 
   const manifestPath = join(resolvedOutput, 'manifest.json');
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));

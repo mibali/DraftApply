@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "DraftApply",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "description": "Generate authentic job application answers using your CV",
   "permissions": [
     "storage",
