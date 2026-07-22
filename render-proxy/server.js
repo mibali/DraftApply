@@ -25,6 +25,9 @@ import { buildGroundingContext, validateApplicationAnswer } from '../shared/grou
 import { extractProfileUrl } from '../shared/profile-url-extractor.js';
 import { validateAnswerStructure } from '../shared/answer-structure-validator.js';
 import {
+  extractLinkAnnotationsFromHtml, extractAnnotationLabel, linkLabelFromUrl,
+} from './link-annotations.js';
+import {
   rebuildTailoredCvAgentContext,
   runApplicationAnswerAgents,
   runTailoredCvAgents,
@@ -1737,20 +1740,26 @@ app.post('/api/cv/upload', authRequired, generateLimiter, upload.single('cv'), a
     let linkAnnotations = [];
     if (mimetype === 'application/pdf') {
       // Extract text AND hyperlink annotations (e.g. LinkedIn URL hidden behind hyperlinked text)
-      const collectedUrls = [];
+      const collectedLinks = [];
       let pdfData;
       try {
         pdfData = await pdfParse(buffer, {
           pagerender: async function(pageData) {
+            // Fetch text content BEFORE processing annotations so each link's
+            // rectangle can be correlated with the text sitting inside it -
+            // a PDF link annotation carries only a URL and a bounding box,
+            // never the underlying words, so without this the label is just
+            // a domain guess ("sourcegraph.com") that never matches the
+            // CV's actual prose ("How Support Engineers Use Deep Search...").
+            const textContent = await pageData.getTextContent();
             try {
               const annotations = await pageData.getAnnotations();
               for (const ann of annotations) {
                 const url = ann.url || ann.unsafeUrl;
-                if (url) collectedUrls.push(url);
+                if (url) collectedLinks.push({ url, label: extractAnnotationLabel(ann.rect, textContent.items) });
               }
             } catch (_) { /* annotations unavailable, ignore */ }
             // Standard text rendering (matches pdf-parse default)
-            const textContent = await pageData.getTextContent();
             let lastY = '';
             let pageText = '';
             for (const item of textContent.items) {
@@ -1772,20 +1781,23 @@ app.post('/api/cv/upload', authRequired, generateLimiter, upload.single('cv'), a
         } catch (parseError) {
           console.error('CV upload: PDF unreadable:', parseError.message);
           return res.status(422).json({
-            error: 'This PDF could not be read — it may be scanned, password-protected, or exported in an unusual format. Re-export it (Print → Save as PDF often works), or paste your CV text instead.',
+            error: 'This PDF could not be read — it may be scanned, password-protected, or use a format this tool cannot parse. Try exporting it as a .docx instead, or paste your CV text directly.',
           });
         }
       }
       text = pdfData.text;
-      if (collectedUrls.length > 0) {
+      if (collectedLinks.length > 0) {
         // linkAnnotations already carries every collected URL back to the
         // client for hyperlinking and answer generation - appending them as
         // a visible "Links:" text block duplicates that information as bare
         // URLs, and (since a PDF's annotations include ordinary reference
         // links inside body bullets, not just the candidate's own profile
         // links) gets misread as extra contact fields or extra CV content.
-        const uniqueUrls = [...new Set(collectedUrls)];
-        linkAnnotations = uniqueUrls.map(url => ({ text: linkLabelFromUrl(url), url }));
+        const byUrl = new Map();
+        for (const { url, label } of collectedLinks) {
+          if (!byUrl.has(url)) byUrl.set(url, label);
+        }
+        linkAnnotations = [...byUrl.entries()].map(([url, label]) => ({ text: label || linkLabelFromUrl(url), url }));
       }
     } else if (mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
       // Extract text + hyperlink URLs (e.g. LinkedIn linked behind display text)
@@ -1834,61 +1846,6 @@ app.post('/api/cv/upload', authRequired, generateLimiter, upload.single('cv'), a
     res.status(500).json({ error: `Could not process this file (${String(e?.message || 'unknown error').slice(0, 120)}). Try re-exporting it, or paste your CV text instead.` });
   }
 });
-
-function extractLinkAnnotationsFromHtml(html = '') {
-  const annotations = [];
-  const seen = new Set();
-  const anchorRe = /<a\b[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
-  let match;
-  while ((match = anchorRe.exec(String(html || '')))) {
-    const url = normaliseAnnotationUrl(decodeHtmlEntities(match[1]));
-    const label = cleanAnnotationLabel(match[2]) || linkLabelFromUrl(url);
-    if (!url || !label) continue;
-    const key = `${label.toLowerCase()}|${url}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    annotations.push({ text: label, url });
-  }
-  return annotations.slice(0, 100);
-}
-
-function cleanAnnotationLabel(value = '') {
-  return decodeHtmlEntities(String(value || '')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()).slice(0, 120);
-}
-
-function decodeHtmlEntities(value = '') {
-  return String(value || '')
-    .replace(/&amp;/g, '&')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>');
-}
-
-function normaliseAnnotationUrl(url = '') {
-  const clean = String(url || '').trim();
-  if (!/^https?:\/\//i.test(clean)) return '';
-  return clean;
-}
-
-function linkLabelFromUrl(url = '') {
-  const raw = String(url || '').trim();
-  if (/linkedin\.com/i.test(raw)) return 'LinkedIn';
-  if (/github\.com/i.test(raw)) return 'GitHub';
-  if (/gitlab\.com/i.test(raw)) return 'GitLab';
-  if (/stackoverflow\.com/i.test(raw)) return 'Stack Overflow';
-  if (/behance\.net/i.test(raw)) return 'Behance';
-  if (/dribbble\.com/i.test(raw)) return 'Dribbble';
-  if (/kaggle\.com/i.test(raw)) return 'Kaggle';
-  try {
-    return new URL(raw).hostname.replace(/^www\./i, '');
-  } catch {
-    return raw;
-  }
-}
 
 /**
  * Job Description Extraction endpoint
