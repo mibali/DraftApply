@@ -202,9 +202,21 @@
 
     /* ── Print ── */
 
-    /* Suppress browser-injected date / title / URL headers and footers.
-       Chrome only adds those when no @page margin is set via CSS. */
-    @page { margin: 0; }
+    /* @page margin is the only thing Chrome repeats on EVERY printed page.
+       #cv-page's own padding is a single continuous box split across pages
+       by pagination, so it only ever supplies spacing at the very top of
+       page 1 and the very bottom of the last page — any page break in
+       between lands content flush against the physical edge with no
+       breathing room. Real @page margins fix that for every page; #cv-page
+       carries no padding of its own in print so the two don't stack.
+       Capped at 8mm (tested empirically): Chrome reserves the @page margin
+       band to draw its own injected date/title/URL header and page-number
+       footer once the margin is large enough to fit that text (observed
+       threshold ~9mm) - a margin below that draws nothing there, which is
+       what let @page{margin:0} suppress it before. 8mm is the largest value
+       that stays under that threshold while still giving every page real,
+       consistent breathing room. */
+    @page { margin: 8mm; }
 
     /* Keep each experience/education entry together — no mid-entry page breaks */
     .cv-entry { break-inside: avoid; }
@@ -215,7 +227,7 @@
       #cv-page {
         margin: 0;
         box-shadow: none;
-        padding: 15mm 15mm;
+        padding: 0;
         min-height: auto;
       }
       .cv-entry { break-inside: avoid; }

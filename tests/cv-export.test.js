@@ -664,3 +664,37 @@ describe('structured export: extra sections from the source CV', () => {
     expect(sectionIdx).toBeLessThan(html.indexOf('Education, Certifications'));
   });
 });
+
+describe('PDF export print margins (regression: content flush against the top of page 2+)', () => {
+  const exportHtml = fs.readFileSync(new URL('../extension-ready/cv-export.html', import.meta.url), 'utf8');
+  // Strip comments before matching so explanatory prose mentioning old
+  // values/syntax (e.g. "what let @page{margin:0} suppress it before")
+  // can't be mistaken for a live CSS rule.
+  const css = exportHtml.replace(/\/\*[\s\S]*?\*\//g, '');
+
+  it('uses a nonzero @page margin so every printed page gets consistent spacing, not just page 1', () => {
+    // @page is the only mechanism Chrome repeats on every physical page; a
+    // single continuous #cv-page div's own padding only ever applies once,
+    // at the very top of page 1 and bottom of the last page, leaving any
+    // page break in between flush against the physical edge.
+    const match = css.match(/@page\s*\{\s*margin:\s*(\d+)mm/);
+    expect(match).toBeTruthy();
+    const marginMm = Number(match[1]);
+    expect(marginMm).toBeGreaterThan(0);
+    // Empirically verified (headless Chrome print-to-pdf, default flags):
+    // Chrome starts drawing its own injected date/title header and
+    // page-number footer once the @page margin is large enough to fit that
+    // text (observed threshold ~9mm) - a margin at or above that silently
+    // reintroduces the exact browser chrome this template deliberately
+    // suppresses. Stay comfortably under it.
+    expect(marginMm).toBeLessThanOrEqual(8);
+  });
+
+  it('does not double up margin by also padding #cv-page in print mode', () => {
+    const printBlockStart = css.indexOf('@media print');
+    expect(printBlockStart).toBeGreaterThanOrEqual(0);
+    const cvPageStart = css.indexOf('#cv-page', printBlockStart);
+    const cvPageRule = css.slice(cvPageStart, css.indexOf('}', cvPageStart));
+    expect(cvPageRule).toMatch(/padding:\s*0/);
+  });
+});
