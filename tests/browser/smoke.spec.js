@@ -65,8 +65,15 @@ test('a block final remains non-insertable', async ({ extension }) => {
   await job.locator('#da-question-preview').fill('BLOCK this unsupported answer');
   await job.locator('#da-btn-regenerate').click();
   await expect(job.locator('#da-answer-output')).toHaveValue('This unsupported claim must not be inserted.');
-  await expect(job.locator('#da-btn-insert')).toBeDisabled();
-  await expect(job.locator('#da-btn-insert')).toHaveText('Insertion Blocked');
+  // The insert button no longer carries alarming persistent states ("Review
+  // Required" / "Insertion Blocked") - it always reads "Insert Answer" and
+  // stays enabled for any non-empty text. An unverified model answer is
+  // intercepted at click time instead: clicking Insert shows a warning and
+  // never writes the text into the page's field.
+  const insertBtn = job.locator('#da-btn-insert');
+  await expect(insertBtn).toBeEnabled();
+  await expect(insertBtn).toHaveText('Insert Answer');
+  await insertBtn.click();
   await expect(job.locator('#application-answer')).toHaveValue('');
 });
 

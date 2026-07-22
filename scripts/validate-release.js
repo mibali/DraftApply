@@ -11,7 +11,13 @@ const DIST_DIR = join(ROOT, 'dist');
 
 const args = new Set(process.argv.slice(2));
 const explicitTag = [...args].find(arg => arg.startsWith('--tag='))?.slice('--tag='.length);
-const tag = explicitTag || process.env.GITHUB_REF_NAME || '';
+// GITHUB_REF_NAME is set on every workflow run, not only tag pushes - on an
+// ordinary branch push or pull_request run it's a branch name or GitHub's
+// synthetic PR merge ref ("13/merge"), never a real release tag. Gating on
+// GITHUB_REF_TYPE === 'tag' (only set to that value for an actual tag push)
+// keeps this assertion meaningful only when it's genuinely checking a
+// release tag, instead of failing every ordinary CI run against main.
+const tag = explicitTag || (process.env.GITHUB_REF_TYPE === 'tag' ? process.env.GITHUB_REF_NAME : '') || '';
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
