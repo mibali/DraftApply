@@ -15,6 +15,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const TAILOR_JOB_POLL_INTERVAL_MS = 1500;
   const TAILOR_JOB_MAX_POLL_MS = 7 * 60 * 1000;
   const TAILOR_FALLBACK_HINT_MS = 10 * 1000;
+  let pendingCvLinkAnnotations = [];
 
   const elements = {
     cvStatusDot:     document.getElementById('cv-status-dot'),
@@ -24,6 +25,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     cvInputSection:  document.getElementById('cv-input-section'),
     cvLoadedSection: document.getElementById('cv-loaded-section'),
     cvText:          document.getElementById('cv-text'),
+    profileLinks:    document.getElementById('profile-links'),
+    factNotice:      document.getElementById('fact-notice'),
+    factAvailability: document.getElementById('fact-availability'),
+    factWorkAuth:    document.getElementById('fact-work-auth'),
+    factRelocation:  document.getElementById('fact-relocation'),
+    factSalary:      document.getElementById('fact-salary'),
     cvPreview:       document.getElementById('cv-preview'),
     saveCvBtn:       document.getElementById('save-cv-btn'),
     changeCvBtn:     document.getElementById('change-cv-btn'),
@@ -70,6 +77,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     matchMissingChips:     document.getElementById('match-missing-chips'),
     matchDomain:           document.getElementById('match-domain'),
     matchDomainChips:      document.getElementById('match-domain-chips'),
+    tailorAgentInsights:   document.getElementById('tailor-agent-insights'),
     tailorWarningsBox:     document.getElementById('tailor-warnings-box'),
     tailorOutputWrap:      document.getElementById('tailor-output-wrap'),
     tailorOutput:          document.getElementById('tailor-output'),
@@ -160,6 +168,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   async function loadState() {
     const response = await chrome.runtime.sendMessage({ type: 'GET_CV' });
     if (response.cvText) showCVLoaded(response.cvText);
+    try {
+      const { userProfileLinks, applicationFacts } = await chrome.storage.local.get(['userProfileLinks', 'applicationFacts']);
+      if (elements.profileLinks && userProfileLinks) elements.profileLinks.value = userProfileLinks;
+      const facts = applicationFacts || {};
+      if (elements.factNotice) elements.factNotice.value = facts.notice || '';
+      if (elements.factAvailability) elements.factAvailability.value = facts.availability || '';
+      if (elements.factWorkAuth) elements.factWorkAuth.value = facts.workAuthorization || '';
+      if (elements.factRelocation) elements.factRelocation.value = facts.relocation || '';
+      if (elements.factSalary) elements.factSalary.value = facts.salary || '';
+    } catch { /* first run */ }
   }
 
   async function refreshStatsUI() {
@@ -209,7 +227,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       const status = await chrome.runtime.sendMessage({ type: 'CHECK_PROXY' });
       if (status && !status.error) {
         elements.proxyStatusDot.classList.add('ready');
-        elements.proxyStatusText.textContent = `Proxy: ${status.provider || 'Online'}`;
+        elements.proxyStatusText.textContent = `Proxy: ${providerLabel(status.provider || 'online')}${status.model ? ` · ${shortModelName(status.model)}` : ''}`;
+        elements.proxyStatusText.title = [
+          status.qualityMode ? `${qualityModeLabel(status.qualityMode)}: ${status.qualityModeReason || ''}` : '',
+          status.modelRouter?.applicationAnswer?.reason || status.model || '',
+        ].filter(Boolean).join('\n');
         proxyUrl = status.proxyUrl;
       } else {
         elements.proxyStatusDot.classList.add('error');
@@ -246,7 +268,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.uploadArea.querySelector('.upload-hint').textContent = 'Extracting text…';
 
     try {
-      const text = await extractTextFromFile(file);
+      const extracted = await extractTextFromFile(file);
+      const text = typeof extracted === 'string' ? extracted : extracted?.text || '';
+      pendingCvLinkAnnotations = Array.isArray(extracted?.linkAnnotations) ? extracted.linkAnnotations : [];
       elements.cvText.value = text;
       elements.uploadArea.querySelector('.upload-hint').textContent = 'Text extracted — click Save CV';
       showMessage('File loaded. Review and click Save CV.');
@@ -260,7 +284,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   async function extractTextFromFile(file) {
     if (file.type === 'text/plain' || file.name.endsWith('.txt')) {
-      return await file.text();
+      const text = await file.text();
+      return { text, linkAnnotations: extractLinkAnnotationsFromText(text) };
     }
 
     if (!proxyUrl) {
@@ -294,7 +319,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       const result = await response.json();
-      return result.text;
+      return {
+        text: result.text || '',
+        linkAnnotations: Array.isArray(result.linkAnnotations) ? result.linkAnnotations : [],
+      };
     } catch (e) {
       if (e?.name === 'AbortError') {
         throw new Error('Timed out — the service may be starting up. Please try again in a few seconds.');
@@ -303,6 +331,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  // Profile URLs the user typed in the popup. Many CVs carry "LinkedIn" as
+  // styled text with the URL nowhere in the file (not even as a PDF link
+  // annotation), so questions like "LinkedIn URL" honestly answered "Not
+  // found in CV". User-entered URLs are authoritative and merge into the
+  // same link-annotation channel answers already consume.
+  function parseProfileLinks(raw) {
+    return String(raw || '').split(/[,\s]+/).map(value => value.trim()).filter(Boolean)
+      .map(value => (/^https?:\/\//i.test(value) ? value : `https://${value}`))
+      .filter(value => { try { new URL(value); return true; } catch { return false; } })
+      .slice(0, 10)
+      .map(url => ({ text: linkLabelFromUrl(url), url }));
   }
 
   async function saveCV() {
@@ -316,7 +357,26 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       const previous = await chrome.runtime.sendMessage({ type: 'GET_CV' }).catch(() => ({}));
       const cvChanged = Boolean(previous?.cvText && previous.cvText !== text);
-      await chrome.runtime.sendMessage({ type: 'SAVE_CV', cvText: text });
+      const extractedAnnotations = cvChanged || pendingCvLinkAnnotations.length > 0
+        ? pendingCvLinkAnnotations
+        : Array.isArray(previous?.linkAnnotations) ? previous.linkAnnotations : [];
+      const profileLinksRaw = elements.profileLinks?.value?.trim() || '';
+      const manualLinks = parseProfileLinks(profileLinksRaw);
+      const seenUrls = new Set(manualLinks.map(a => a.url.toLowerCase()));
+      const linkAnnotations = [
+        ...manualLinks,
+        ...extractedAnnotations.filter(a => !seenUrls.has(String(a?.url || '').toLowerCase())),
+      ];
+      await chrome.storage.local.set({ userProfileLinks: profileLinksRaw });
+      await chrome.storage.local.set({ applicationFacts: {
+        notice: elements.factNotice?.value?.trim() || '',
+        availability: elements.factAvailability?.value?.trim() || '',
+        workAuthorization: elements.factWorkAuth?.value?.trim() || '',
+        relocation: elements.factRelocation?.value?.trim() || '',
+        salary: elements.factSalary?.value?.trim() || '',
+      }});
+      await chrome.runtime.sendMessage({ type: 'SAVE_CV', cvText: text, linkAnnotations });
+      pendingCvLinkAnnotations = linkAnnotations;
       if (cvChanged) await resetTailorStateForCvChange();
       showCVLoaded(text);
       showMessage(cvChanged ? 'CV saved. Re-analyze any saved JD before generating a new tailored CV.' : 'CV saved successfully');
@@ -336,6 +396,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.tailorOutputWrap.hidden = true;
     elements.tailorActionRow.hidden = true;
     elements.tailorWarningsBox.hidden = true;
+    if (elements.tailorAgentInsights) {
+      elements.tailorAgentInsights.hidden = true;
+      elements.tailorAgentInsights.textContent = '';
+    }
     elements.tailorResults.hidden = true;
     elements.tailorAnalyzeBtn.hidden = false;
     elements.tailorAnalyzeBtn.disabled = false;
@@ -737,6 +801,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       displayMatchReport(result.matchReport, { reviewMode: true, domainSuggestions: result.domainSuggestions || [] });
+      renderTailorAgentInsights(result.agentInsights || result);
       await saveTailorDraft();
       elements.tailorAnalyzeBtn.hidden = true;
       elements.tailorReanalyzeBtn.style.display = 'block';
@@ -831,16 +896,31 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
+  // Structured payload from the last generation (docs/structured-cv-generation.md).
+  // Passed to the export page so it can render HTML directly from structure
+  // instead of re-parsing text - but only while the textarea still matches
+  // the rendered text (a user edit invalidates the structured copy).
+  let lastStructuredCv = null;
+  let lastStructuredText = '';
+
   function displayTailorResults(result) {
     const { tailoredCvText, matchReport, warnings, provider, fallbackFrom, model, auditSkipped } = result;
+    lastStructuredCv = result.structuredCv || null;
+    lastStructuredText = tailoredCvText || '';
     displayMatchReport(matchReport, { reviewMode: false, domainSuggestions: [] });
+    renderTailorAgentInsights(result.agentInsights || result);
 
     const badge = document.getElementById('tailor-provider-badge');
     if (badge) {
       if (provider) {
+        const label = providerLabel(provider);
+        const modelLabel = shortModelName(model);
         badge.textContent = fallbackFrom
-          ? `${provider === 'openrouter' ? 'OpenRouter' : provider} fallback from ${fallbackFrom === 'groq' ? 'Groq' : fallbackFrom}${model ? ` (${model})` : ''}`
-          : (provider === 'openrouter' ? 'OpenRouter' : 'Groq');
+          ? `${label} fallback${modelLabel ? `: ${modelLabel}` : ''}`
+          : `${label}${modelLabel ? `: ${modelLabel}` : ''}`;
+        badge.title = fallbackFrom
+          ? `Fallback from ${providerLabel(fallbackFrom)}. Model: ${model || 'unknown'}`
+          : `Model: ${model || 'unknown'}`;
         badge.style.background = provider === 'openrouter' ? '#fef3c7' : '#d1fae5';
         badge.style.color = provider === 'openrouter' ? '#92400e' : '#065f46';
         badge.style.display = 'inline-block';
@@ -871,6 +951,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function formatTailorWarnings(warnings = []) {
+    warnings = (Array.isArray(warnings) ? warnings : []).filter(w => !isParserArtefactWarning(w));
+    if (warnings.length === 0) return '';
+
     // Sort warnings into three buckets for display
     const accuracy = [];   // locked fields changed, fabricated metrics
     const missing  = [];   // user-confirmed skills the LLM didn't add
@@ -926,10 +1009,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       return esc(w);
     }
 
-    const sections = [];
+    // Accuracy items (a changed company name, an invented figure) demand the
+    // user's attention and stay visible. Structural quality signals are for
+    // the curious - collapsed behind "More checks".
+    const primary = [];
+    const secondary = [];
 
     if (accuracy.length > 0) {
-      sections.push(`
+      primary.push(`
         <div class="tw-group tw-group-accuracy">
           <div class="tw-group-label">Accuracy — check these are still correct</div>
           <ul class="tailor-warning-list">${accuracy.map(w => `<li>${humaniseAccuracy(w)}</li>`).join('')}</ul>
@@ -937,7 +1024,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     if (missing.length > 0) {
-      sections.push(`
+      secondary.push(`
         <div class="tw-group tw-group-missing">
           <div class="tw-group-label">Skills not added — add manually if relevant</div>
           <ul class="tailor-warning-list">${missing.map(s => `<li><strong>${esc(s)}</strong></li>`).join('')}</ul>
@@ -945,14 +1032,26 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     if (quality.length > 0) {
-      sections.push(`
+      secondary.push(`
         <div class="tw-group tw-group-quality">
           <div class="tw-group-label">Quality checks</div>
           <ul class="tailor-warning-list">${quality.map(w => `<li>${humaniseQuality(w)}</li>`).join('')}</ul>
         </div>`);
     }
 
-    return `<div class="tailor-warning-title">Review before sending</div>${sections.join('')}`;
+    if (primary.length === 0 && secondary.length === 0) return '';
+    const secondaryBlock = secondary.length > 0
+      ? `<details class="tw-details"><summary class="agent-insights-summary">More checks</summary>${secondary.join('')}</details>`
+      : '';
+    return `<div class="tailor-warning-title">Review before sending</div>${primary.join('')}${secondaryBlock}`;
+  }
+
+  function isParserArtefactWarning(warning) {
+    const val = (String(warning || '').match(/: "(.+)"$/) || [])[1] || '';
+    if (!val || val.length > 80) return false;
+    const month = '(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)';
+    const place = '(?:UK|United Kingdom|England|Scotland|Wales|Ireland|Nigeria|USA|United States|Canada|Germany|France|Remote|London|Birmingham|Manchester|Lagos|Abuja)';
+    return new RegExp(`\\b${place}${month}\\b|,\\s*\\b${place}\\s*${month}\\b`, 'i').test(val);
   }
 
   function displayMatchReport(matchReport, { reviewMode, domainSuggestions = [] } = {}) {
@@ -981,15 +1080,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       elements.matchConfirmed.hidden = true;
     }
 
-    const missing = matchReport?.unsupportedRequirements || [];
+    const missing = normalizeMissingSkills(matchReport);
     if (missing.length > 0) {
-      if (reviewMode) {
-        renderMissingSkillChecks(missing);
-      } else {
-        elements.matchMissingChips.innerHTML = missing
-          .map(s => `<span class="match-chip match-chip-missing">${esc(s)}</span>`)
-          .join('');
-      }
+      // Informational only. The tick-to-confirm flow let unvetted JD phrases
+      // flow into the CV's competencies; missing skills are now simply shown
+      // so the user knows the gap, and the tailored CV never claims them.
+      elements.matchMissingChips.innerHTML = missing
+        .map(s => `<span class="match-chip match-chip-missing">${esc(s)}</span>`)
+        .join('');
       elements.matchMissing.hidden = false;
       elements.matchAllClear.hidden = true;
     } else {
@@ -998,47 +1096,150 @@ document.addEventListener('DOMContentLoaded', async () => {
       elements.matchAllClear.hidden = !reviewMode;
     }
 
-    // Domain suggestions — only shown in review mode with checkboxes
-    if (reviewMode && domainSuggestions.length > 0) {
-      elements.matchDomainChips.textContent = '';
-      for (const tool of domainSuggestions) {
-        const label = document.createElement('label');
-        label.className = 'missing-skill-check';
-
-        const checkbox = document.createElement('input');
-        checkbox.type = 'checkbox';
-        checkbox.value = tool;
-        checkbox.dataset.domainSkill = 'true';
-
-        const text = document.createElement('span');
-        text.textContent = tool;
-
-        label.append(checkbox, text);
-        elements.matchDomainChips.append(label);
-      }
-      elements.matchDomain.hidden = false;
-    } else {
-      elements.matchDomain.hidden = true;
-    }
+    // Domain-suggestion confirmations retired along with the tick-to-confirm
+    // flow: suggested tools the CV cannot evidence stay out of the CV.
+    elements.matchDomain.hidden = true;
   }
 
-  function renderMissingSkillChecks(missing) {
-    elements.matchMissingChips.textContent = '';
-    for (const skill of missing) {
-      const label = document.createElement('label');
-      label.className = 'missing-skill-check';
+  function renderTailorAgentInsights(insights = {}) {
+    const box = elements.tailorAgentInsights;
+    if (!box) return;
 
-      const checkbox = document.createElement('input');
-      checkbox.type = 'checkbox';
-      checkbox.value = skill;
-      checkbox.dataset.missingSkill = 'true';
+    const workflow = insights.workflow;
+    const chain = Array.isArray(insights.agentChain) ? insights.agentChain : [];
+    const gap = insights.gapAnalysis || {};
+    const keywords = insights.keywordOptimisation || {};
+    const ats = insights.atsFormatting || {};
+    const truth = insights.truthfulness || {};
+    const retrieval = insights.evidenceRetrieval || {};
+    const domainRisk = insights.domainRisk || insights.truthfulnessReport?.domainRisk || {};
+    const missing = Array.isArray(gap.missingRequirements) ? gap.missingRequirements : [];
+    const transferable = Array.isArray(gap.transferableRequirements) ? gap.transferableRequirements : [];
+    const supported = Array.isArray(keywords.supportedKeywords) ? keywords.supportedKeywords : [];
+    const risky = Array.isArray(keywords.riskyKeywords) ? keywords.riskyKeywords : [];
+    const visibleEvidence = Array.isArray(ats.requiredVisibleEvidence) ? ats.requiredVisibleEvidence : [];
+    const supportedKeys = new Set(supported.map(value => normaliseInsightValue(value)).filter(Boolean));
+    const visibleEvidenceOnly = visibleEvidence.filter(value => {
+      const key = normaliseInsightValue(value);
+      return key && !supportedKeys.has(key);
+    });
 
-      const text = document.createElement('span');
-      text.textContent = skill;
-
-      label.append(checkbox, text);
-      elements.matchMissingChips.append(label);
+    if (!workflow && missing.length === 0 && transferable.length === 0 && supported.length === 0 && risky.length === 0 && visibleEvidence.length === 0 && !domainRisk.detected) {
+      box.hidden = true;
+      box.textContent = '';
+      return;
     }
+
+    // Supporting detail only: the match report above already tells the user
+    // what matched and what's missing. No workflow/agent/retrieval vocabulary,
+    // no duplicate matched-skills list — the remaining groups fold into one
+    // collapsed disclosure.
+    const sections = [];
+
+    if (transferable.length > 0) {
+      sections.push(renderInsightChipGroup('Adjacent experience (framed carefully, never claimed)', transferable, 'agent-chip-info'));
+    }
+
+    if (risky.length > 0) {
+      sections.push(renderInsightChipGroup('Left out — not evidenced in your CV', risky, 'agent-chip-warn'));
+    }
+
+    if (domainRisk.detected) {
+      const profile = domainRisk.primaryProfile?.label || 'Domain review';
+      const prompts = Array.isArray(domainRisk.reviewPrompts) ? domainRisk.reviewPrompts : [];
+      const credentialWarnings = Array.isArray(domainRisk.credentialWarnings) ? domainRisk.credentialWarnings : [];
+      sections.push(`
+        <div class="agent-insights-group agent-domain-review">
+          <div class="agent-insights-label">Domain review</div>
+          <div class="agent-domain-title">${esc(profile)}${domainRisk.primaryProfile?.riskLevel ? ` · ${esc(domainRisk.primaryProfile.riskLevel)}` : ''}</div>
+          ${credentialWarnings.length > 0 ? `
+            <div class="agent-insights-chips">
+              ${credentialWarnings.flatMap(item => item.missingCredentials || []).slice(0, 6).map(value => `<span class="agent-chip agent-chip-warn">${esc(value)}</span>`).join('')}
+            </div>` : ''}
+          ${prompts.length > 0 ? `<ul class="agent-domain-prompts">${prompts.slice(0, 3).map(value => `<li>${esc(value)}</li>`).join('')}</ul>` : ''}
+        </div>`);
+    }
+
+    if (visibleEvidenceOnly.length > 0) {
+      sections.push(renderInsightChipGroup('Additional ATS evidence to keep visible', visibleEvidenceOnly, 'agent-chip-info'));
+    }
+
+    if (sections.length === 0) {
+      box.hidden = true;
+      box.textContent = '';
+      return;
+    }
+    box.innerHTML = `
+      <details class="agent-insights-details">
+        <summary class="agent-insights-summary">Details</summary>
+        ${sections.join('')}
+      </details>`;
+    box.hidden = false;
+  }
+
+  function renderInsightChipGroup(label, values, chipClass = '') {
+    return `
+      <div class="agent-insights-group">
+        <div class="agent-insights-label">${esc(label)}</div>
+        <div class="agent-insights-chips">
+          ${values.slice(0, 10).map(value => `<span class="agent-chip ${chipClass}">${esc(value)}</span>`).join('')}
+        </div>
+      </div>`;
+  }
+
+  function normaliseInsightValue(value) {
+    return String(value || '').toLowerCase().replace(/[^a-z0-9+#.]+/g, ' ').trim();
+  }
+
+  function normalizeMissingSkills(matchReport = {}) {
+    const source = Array.isArray(matchReport.unsupportedRequirements) && matchReport.unsupportedRequirements.length > 0
+      ? matchReport.unsupportedRequirements
+      : Array.isArray(matchReport.missingSkills)
+        ? matchReport.missingSkills
+        : [];
+
+    return source
+      .map(item => typeof item === 'string' ? item : item?.skill || item?.requirement || item?.name)
+      .map(item => String(item || '').trim())
+      // The checkbox is an attestation by the candidate. Only offer concise,
+      // atomic skills for confirmation; never ask a user to attest to a whole
+      // JD sentence or a bundled list of requirements.
+      .filter(item => item && item.length <= 64)
+      .filter(item => item.split(/\s+/).length <= 4)
+      .filter(item => !/[,;\n]|\s(?:\/|\||&)\s|\s\b(?:and|or)\b\s/i.test(item))
+      .filter(item => !/\b(?:years?\s+of\s+experience|experience\s+(?:with|in)|ability\s+to|production\s+experience|required|preferred)\b/i.test(item))
+      .filter(item => !/^(?:must|should|build|develop|manage|deliver|own|responsible|proven)\b/i.test(item));
+  }
+
+  function providerLabel(provider = '') {
+    if (provider === 'openrouter') return 'OpenRouter';
+    if (provider === 'groq') return 'Groq';
+    if (provider === 'local-openai') return 'Local';
+    if (provider === 'local-openai-embeddings') return 'Local embeddings';
+    return provider || 'Model';
+  }
+
+  function qualityModeLabel(mode = '') {
+    if (mode === 'hosted_primary') return 'Hosted primary';
+    if (mode === 'hosted_primary_with_openrouter_fallback') return 'Hosted primary + fallback';
+    if (mode === 'local_private') return 'Local private';
+    if (mode === 'configured_openrouter') return 'Configured OpenRouter';
+    if (mode === 'openrouter_fallback') return 'OpenRouter fallback';
+    if (mode === 'best_effort_free_fallback') return 'Best-effort free fallback';
+    if (mode === 'deterministic_local') return 'Deterministic local';
+    return mode || 'Quality mode';
+  }
+
+  function shortModelName(model = '') {
+    const raw = String(model || '').trim();
+    if (!raw) return '';
+    return raw
+      .replace(/^openrouter\//, '')
+      .replace(/:free$/, ' free')
+      .split('/')
+      .slice(-1)[0]
+      .replace(/-/g, ' ')
+      .slice(0, 34);
   }
 
   function getConfirmedMissingSkills() {
@@ -1094,12 +1295,21 @@ document.addEventListener('DOMContentLoaded', async () => {
       // stripped from the tailored text (e.g. writing "LinkedIn" without the URL).
       // These are stored as a fallback so cv-export.js can re-link profile labels.
       let contactUrls = {};
+      let linkAnnotations = [];
       try {
         const cvResp = await chrome.runtime.sendMessage({ type: 'GET_CV' });
-        contactUrls = extractCvContactUrls(cvResp?.cvText || '');
+        contactUrls = extractCvContactUrls(stripAutoLinksTrailer(cvResp?.cvText || ''));
+        linkAnnotations = Array.isArray(cvResp?.linkAnnotations) ? cvResp.linkAnnotations : [];
       } catch { /* non-fatal */ }
 
-      await chrome.storage.local.set({ tailoredCvExport: text, tailoredCvContactUrls: contactUrls });
+      const structuredForExport =
+        (lastStructuredCv && text === lastStructuredText) ? lastStructuredCv : null;
+      await chrome.storage.local.set({
+        tailoredCvExport: text,
+        tailoredCvContactUrls: contactUrls,
+        tailoredCvLinkAnnotations: linkAnnotations,
+        tailoredCvStructured: structuredForExport,
+      });
       await chrome.tabs.create({ url: chrome.runtime.getURL('cv-export.html') });
       await window.DraftApplyStats?.track?.('cvExports');
       await refreshStatsUI();
@@ -1108,12 +1318,30 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
+  // "Links:" is CV-upload's own trailer collecting every hyperlink
+  // annotation in the source file (including reference links inside body
+  // bullets - a blog post, a book, a conference page), not just the
+  // candidate's own profile links. Only stripped when every line after it
+  // is a bare URL, so a genuine human-authored "Links" section is untouched.
+  function stripAutoLinksTrailer(text) {
+    const raw = String(text || '');
+    const match = raw.match(/\n{1,3}Links:[ \t]*\n([\s\S]*)$/i);
+    if (!match) return raw;
+    const trailerLines = match[1].split('\n').map(line => line.trim()).filter(Boolean);
+    if (trailerLines.length === 0 || !trailerLines.every(line => /^https?:\/\/\S+$/i.test(line))) return raw;
+    return raw.slice(0, match.index).replace(/\s+$/, '');
+  }
+
   function extractCvContactUrls(text) {
     const ensure = (u) => u ? (u.startsWith('http') ? u : 'https://' + u) : '';
-    const li  = text.match(/(?:https?:\/\/)?(?:www\.)?linkedin\.com\/in\/[\w-]+\/?/i);
-    const gh  = text.match(/(?:https?:\/\/)?(?:www\.)?github\.com\/[\w-]+\/?/i);
-    const tw  = text.match(/(?:https?:\/\/)?(?:www\.)?(?:twitter|x)\.com\/[\w-]+\/?/i);
-    const web = text.match(
+    // Scoped to the header: a profile-link regex matched against the whole
+    // document can pick up an unrelated reference link from further down
+    // the CV and misreport it as the candidate's own LinkedIn/GitHub/site.
+    const headerText = text.split('\n').slice(0, 20).join('\n');
+    const li  = headerText.match(/(?:https?:\/\/)?(?:www\.)?linkedin\.com\/in\/[\w-]+\/?/i);
+    const gh  = headerText.match(/(?:https?:\/\/)?(?:www\.)?github\.com\/[\w-]+\/?/i);
+    const tw  = headerText.match(/(?:https?:\/\/)?(?:www\.)?(?:twitter|x)\.com\/[\w-]+\/?/i);
+    const web = headerText.match(
       /(?<!@)\b(?:(?:https?:\/\/|www\.)?(?!(?:www\.)?(?:linkedin|github|twitter|x)\.com\b)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(?:\/[a-z0-9\-._~:/?#[\]@!$&'()*+,;=%]*)?)/i
     );
     return {
@@ -1122,6 +1350,37 @@ document.addEventListener('DOMContentLoaded', async () => {
       twitter:   ensure(tw?.[0]),
       website:   ensure(web?.[0]),
     };
+  }
+
+  function extractLinkAnnotationsFromText(text) {
+    const urls = String(text || '').match(/https?:\/\/[^\s<>"')]+/gi) || [];
+    const seen = new Set();
+    return urls.map(url => {
+      const clean = url.replace(/[).,;:!?]+$/, '');
+      const label = linkLabelFromUrl(clean);
+      return { text: label, url: clean };
+    }).filter(item => {
+      const key = `${String(item.text || '').toLowerCase()}|${item.url}`;
+      if (!item.text || !item.url || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).slice(0, 100);
+  }
+
+  function linkLabelFromUrl(url = '') {
+    const raw = String(url || '').trim();
+    if (/linkedin\.com/i.test(raw)) return 'LinkedIn';
+    if (/github\.com/i.test(raw)) return 'GitHub';
+    if (/gitlab\.com/i.test(raw)) return 'GitLab';
+    if (/stackoverflow\.com/i.test(raw)) return 'Stack Overflow';
+    if (/behance\.net/i.test(raw)) return 'Behance';
+    if (/dribbble\.com/i.test(raw)) return 'Dribbble';
+    if (/kaggle\.com/i.test(raw)) return 'Kaggle';
+    try {
+      return new URL(raw).hostname.replace(/^www\./i, '');
+    } catch {
+      return raw;
+    }
   }
 
   function showTailorMessage(text, type = 'success') {

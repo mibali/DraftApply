@@ -4,7 +4,7 @@
  * Supports multiple FREE LLM providers:
  * 
  * CLOUD (free tiers):
- * - Groq (default — fast & generous)
+ * - Groq
  * - Google Gemini
  * - Mistral
  * - Together AI
@@ -45,9 +45,10 @@ const __dirname = dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const HOST = process.env.HOST || '127.0.0.1';
 
-// Get current provider configuration — default is Groq
-const PROVIDER_NAME = process.env.LLM_PROVIDER || 'groq';
+// Offline-first default. Select a cloud provider explicitly with LLM_PROVIDER.
+const PROVIDER_NAME = process.env.LLM_PROVIDER || 'ollama';
 const PROVIDER_CONFIG = getProviderConfig(PROVIDER_NAME, process.env);
 
 // Build fallback chain for reliability
@@ -135,6 +136,7 @@ app.post('/api/cv/upload', upload.single('cv'), async (req, res) => {
     }
 
     let text = '';
+    let linkAnnotations = [];
     const { mimetype, buffer } = req.file;
 
     switch (mimetype) {
@@ -144,8 +146,12 @@ app.post('/api/cv/upload', upload.single('cv'), async (req, res) => {
         break;
 
       case 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
-        const docxResult = await mammoth.extractRawText({ buffer });
+        const [docxResult, htmlResult] = await Promise.all([
+          mammoth.extractRawText({ buffer }),
+          mammoth.convertToHtml({ buffer })
+        ]);
         text = docxResult.value;
+        linkAnnotations = extractLinkAnnotationsFromHtml(htmlResult.value);
         break;
 
       case 'text/plain':
@@ -164,6 +170,7 @@ app.post('/api/cv/upload', upload.single('cv'), async (req, res) => {
     res.json({
       success: true,
       text,
+      linkAnnotations,
       filename: req.file.originalname,
       size: req.file.size
     });
@@ -173,6 +180,59 @@ app.post('/api/cv/upload', upload.single('cv'), async (req, res) => {
     res.status(500).json({ error: 'Failed to process CV file' });
   }
 });
+
+function extractLinkAnnotationsFromHtml(html = '') {
+  const annotations = [];
+  const seen = new Set();
+  const anchorRe = /<a\b[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  let match;
+  while ((match = anchorRe.exec(String(html || '')))) {
+    const url = normaliseAnnotationUrl(decodeHtmlEntities(match[1]));
+    const label = cleanAnnotationLabel(match[2]) || linkLabelFromUrl(url);
+    if (!url || !label) continue;
+    const key = `${label.toLowerCase()}|${url}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    annotations.push({ text: label, url });
+  }
+  return annotations.slice(0, 100);
+}
+
+function cleanAnnotationLabel(value = '') {
+  return decodeHtmlEntities(String(value || '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()).slice(0, 120);
+}
+
+function decodeHtmlEntities(value = '') {
+  return String(value || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+}
+
+function normaliseAnnotationUrl(url = '') {
+  const clean = String(url || '').trim();
+  if (!/^https?:\/\//i.test(clean)) return '';
+  return clean;
+}
+
+function linkLabelFromUrl(url = '') {
+  const raw = String(url || '').trim();
+  if (/linkedin\.com/i.test(raw)) return 'LinkedIn';
+  if (/github\.com/i.test(raw)) return 'GitHub';
+  if (/behance\.net/i.test(raw)) return 'Behance';
+  if (/dribbble\.com/i.test(raw)) return 'Dribbble';
+  if (/kaggle\.com/i.test(raw)) return 'Kaggle';
+  try {
+    return new URL(raw).hostname.replace(/^www\./i, '');
+  } catch {
+    return raw;
+  }
+}
 
 /**
  * Answer Generation endpoint
@@ -476,6 +536,61 @@ app.post('/api/cv/tailor', async (req, res) => {
     const tailor = new CVTailor();
     const matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
 
+    // Structured path (docs/structured-cv-generation.md), mirroring the
+    // production route in render-proxy/server.js: model returns only mutable
+    // JSON content against a locked skeleton; falls back to the legacy text
+    // path when the output is unsalvageable.
+    const structuredEnabled = !/^false$/i.test(process.env.STRUCTURED_CV_GENERATION || 'true');
+    let tailoredCvText = '';
+    let structuredCv = null;
+    let generationMode = 'legacy-text';
+    let auditSkipped = false;
+
+    if (structuredEnabled && Array.isArray(cvData.experience) && cvData.experience.length > 0) {
+      try {
+        const structuredPrompt = tailor.buildStructuredTailoringPrompt(cvData, jdData, matchMap, { confirmedSkills });
+        const structuredResult = await generateWithFallback(FALLBACK_CHAIN, [
+          { role: 'system', content: structuredPrompt.systemPrompt },
+          { role: 'user',   content: structuredPrompt.userPrompt   },
+        ], { temperature: structuredPrompt.temperature, max_tokens: 2500 });
+        let content = tailor.validateStructuredContent(
+          tailor.parseStructuredContent(structuredResult.answer),
+          structuredPrompt.skeleton,
+          { matchMap, confirmedSkills, cvData }
+        );
+        if (content) {
+          auditSkipped = true;
+          try {
+            const auditPrompt = tailor.buildStructuredAuditPrompt(structuredPrompt.skeleton, content, matchMap);
+            const auditResult = await generateWithFallback(FALLBACK_CHAIN, [
+              { role: 'system', content: auditPrompt.systemPrompt },
+              { role: 'user',   content: auditPrompt.userPrompt   },
+            ], { temperature: auditPrompt.temperature, max_tokens: 2500 });
+            const audited = tailor.validateStructuredContent(
+              tailor.parseStructuredContent(auditResult.answer),
+              structuredPrompt.skeleton,
+              { matchMap, confirmedSkills, cvData }
+            );
+            if (audited) {
+              content = audited;
+              auditSkipped = false;
+            }
+          } catch (auditError) {
+            console.warn('[Structured audit] skipped:', auditError.message);
+          }
+          structuredCv = { skeleton: structuredPrompt.skeleton, content };
+          tailoredCvText = tailor.renderTailoredCV(structuredPrompt.skeleton, content);
+          generationMode = 'structured';
+        } else {
+          console.warn('[Structured generation] output unsalvageable; falling back to legacy text path.');
+        }
+      } catch (e) {
+        console.warn('[Structured generation] failed; falling back to legacy text path:', e.message);
+      }
+    }
+
+    if (generationMode !== 'structured') {
+
     const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(cvData, jdData, matchMap);
 
     const messages = [
@@ -485,10 +600,13 @@ app.post('/api/cv/tailor', async (req, res) => {
 
     const result = await generateWithFallback(FALLBACK_CHAIN, messages, {
       temperature: 0.3,
-      max_tokens: 4000
+      // Kept in sync with render-proxy/server.js's production tailor route -
+      // CVs with many roles push the regenerated text close to the old 4000
+      // token cap, risking a mid-sentence cutoff that drops trailing content.
+      max_tokens: 6000
     });
 
-    let tailoredCvText = tailor.finalizeTailoredCV(result.answer, {
+    tailoredCvText = tailor.finalizeTailoredCV(result.answer, {
       cvData,
       jdData,
       matchMap,
@@ -498,14 +616,14 @@ app.post('/api/cv/tailor', async (req, res) => {
       return res.status(502).json({ error: 'No output from provider' });
     }
 
-    let auditSkipped = false;
+    auditSkipped = false;
     try {
       const { systemPrompt: auditSystemPrompt, userPrompt: auditUserPrompt, temperature: auditTemperature } =
         tailor.buildTailoredCvAuditPrompt(cvData, jdData, matchMap, tailoredCvText, confirmedSkills);
       const auditResult = await generateWithFallback(FALLBACK_CHAIN, [
         { role: 'system', content: auditSystemPrompt },
         { role: 'user',   content: auditUserPrompt },
-      ], { temperature: auditTemperature, max_tokens: 4500 });
+      ], { temperature: auditTemperature, max_tokens: 6500 });
       const auditedText = auditResult.answer;
       if (auditedText?.trim() && tailor.isValidCvOutput(auditedText)) {
         const finalizedAudit = tailor.finalizeTailoredCV(auditedText, {
@@ -527,6 +645,8 @@ app.post('/api/cv/tailor', async (req, res) => {
       console.warn('[Tailored CV audit] LLM verification failed, using deterministic cleanup only:', e.message);
     }
 
+    } // end legacy text path
+
     const warnings        = [
       ...tailor.validateTailoredCV(cvData, tailoredCvText),
       ...tailor.validateTailoringQuality(cvData, jdData, matchMap, tailoredCvText, confirmedSkills),
@@ -545,7 +665,7 @@ app.post('/api/cv/tailor', async (req, res) => {
     const { missingKeywords: atsKeywordGaps, coverage: atsKeywordCoverage } =
       tailor.checkAtsKeywordCoverage(tailoredCvText, jdData);
 
-    res.json({ tailoredCvText, matchReport, recruiterReview, warnings, changedSections, auditSkipped, jdAnalysisSource, atsKeywordGaps, atsKeywordCoverage });
+    res.json({ tailoredCvText, structuredCv, generationMode, matchReport, recruiterReview, warnings, changedSections, auditSkipped, jdAnalysisSource, atsKeywordGaps, atsKeywordCoverage });
   } catch (error) {
     console.error('CV tailor error:', error);
     res.status(500).json({ error: 'Failed to tailor CV', details: error.message });
@@ -570,8 +690,11 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: err.message || 'Internal server error' });
 });
 
-app.listen(PORT, () => {
-  console.log(`\nDraftApply server running on http://localhost:${PORT}`);
+app.listen(PORT, HOST, () => {
+  console.log(`\nDraftApply local web app running on http://${HOST}:${PORT}`);
+  if (HOST !== '127.0.0.1' && HOST !== 'localhost' && HOST !== '::1') {
+    console.warn('WARNING: This development server is not hardened for the public Internet.');
+  }
   console.log(`\nUsing: ${PROVIDER_CONFIG.name} (${PROVIDER_CONFIG.model})`);
   console.log(`Type: ${PROVIDERS[PROVIDER_NAME].type === 'local' ? 'Local (no API key)' : 'Cloud'}`);
   console.log(`\nAPI endpoints:`);

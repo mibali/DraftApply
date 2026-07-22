@@ -17,6 +17,7 @@
  *     jdData:          object?,
  *     matchMap:        object[]?,
  *     roleProfile:     object?,
+ *     domainRisk:      object?,
  *     jobTitle:        string?,
  *     company:         string?,
  *     jobDescription:  string?,
@@ -27,6 +28,8 @@
  */
 
 import { SalaryBenchmarkService } from '../../shared/salary-benchmark-service.js';
+import { withAgentPromptHeader } from '../model-router.js';
+import { classifyApplicationQuestion } from '../../shared/question-classifier.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -64,7 +67,12 @@ function getCvContext(rawText, maxChars) {
  * making evidence retrieval more reliable and reducing recency bias.
  * Falls back to getCvContext(rawText) when cvData is absent or empty.
  */
-function buildStructuredCvContext(cvData, rawText, maxRawChars = 40000) {
+function buildStructuredCvContext(cvData, rawText, maxRawChars = 60000) {
+  // The uploaded CV is the canonical record. Use it exactly once so parsing
+  // cannot hide unsupported sections and the prompt does not duplicate the
+  // same facts in structured and raw forms. Parsed data is used separately
+  // for evidence ranking and grounding.
+  if (String(rawText || '').trim()) return getCvContext(rawText, maxRawChars);
   if (!cvData || !cvData.experience?.length) {
     return getCvContext(rawText, maxRawChars);
   }
@@ -96,9 +104,7 @@ function buildStructuredCvContext(cvData, rawText, maxRawChars = 40000) {
       const header = [exp.title, exp.company, exp.dates]
         .filter(Boolean).join(' | ');
       lines.push(header);
-      // Cap bullets per role: more for recent, fewer for older
-      const cap = cvData.experience.indexOf(exp) < 2 ? 7 : 4;
-      for (const r of (exp.responsibilities || []).slice(0, cap)) {
+      for (const r of (exp.responsibilities || [])) {
         lines.push(`  • ${r}`);
       }
       lines.push('');
@@ -107,7 +113,7 @@ function buildStructuredCvContext(cvData, rawText, maxRawChars = 40000) {
 
   if (cvData.achievements?.length) {
     lines.push('**KEY EVIDENCE (quantified — use these as primary proof points)**');
-    for (const a of cvData.achievements.slice(0, 10)) {
+    for (const a of cvData.achievements) {
       lines.push(`  • ${a}`);
     }
     lines.push('');
@@ -129,6 +135,16 @@ function buildStructuredCvContext(cvData, rawText, maxRawChars = 40000) {
   if (cvData.certifications?.length) {
     lines.push(`**CERTIFICATIONS**\n${cvData.certifications.join(', ')}`);
     lines.push('');
+  }
+
+  if (cvData.projects?.length) {
+    lines.push('**PROJECTS**');
+    for (const project of cvData.projects) {
+      lines.push([project.name, project.url].filter(Boolean).join(' | ') || 'Project');
+      for (const bullet of (project.bullets || project.responsibilities || [])) lines.push(`  • ${bullet}`);
+      if (project.skills?.length) lines.push(`  • Technologies: ${project.skills.join(', ')}`);
+      lines.push('');
+    }
   }
 
   const structured = lines.join('\n').trim();
@@ -342,7 +358,15 @@ function detectQuestionType(question) {
     /deadline[s]?\s+or\s+timeline/.test(q) ||
     /timeline\s+consideration/.test(q) ||
     /any\s+(deadline|timeline|constraint|commitment)[s]?\s+(we|you|to)\s+/i.test(q) ||
-    /\bimmediately\s+available\b/.test(q)
+    /\bimmediately\s+available\b/.test(q) ||
+    // Location / residence / timezone form fields ("Where are you located?
+    // (State/Province & Country)") are one-line facts about the candidate's
+    // current situation, never career-history questions.
+    /where\s+(are|do)\s+you\s+(currently\s+)?(located|based|resid|liv)/.test(q) ||
+    /\b(current|your)\s+location\b/.test(q) ||
+    /\bstate\s*\/?\s*province\b/.test(q) ||
+    /\b(city|country)\s+of\s+residence\b/.test(q) ||
+    /\bwhat\s+time\s*zone\b/.test(q)
   ) return 'short_factual';
 
   // Yes / No questions
@@ -429,10 +453,12 @@ function isDataExtractionQuestion(question) {
     /^(personal\s*)?portfolio/i,
     /^portfolio\s*(url|link)?$/i,
     /^github/i,
+    /^gitlab/i,
     /^twitter/i,
     /^(x|x\.com)/i,
     /^(url|link|profile\s*(url|link))$/i,
     /^social\s*(media\s*)?(url|link|profile)/i,
+    /^(professional|developer|coding)\s*(profile|url|link)/i,
     /^blog\s*(url|link)?$/i,
     /^behance/i,
     /^dribbble/i,
@@ -473,7 +499,7 @@ RULES:
 // Per-type prompt builders
 // ---------------------------------------------------------------------------
 
-function buildShortFactualPrompt(cvText, question) {
+function buildShortFactualPrompt(cvText, question, confirmedFacts = []) {
   const systemPrompt = `You are answering a job application question about the candidate's CURRENT SITUATION or AVAILABILITY — not about their work history.
 
 Answer about the candidate's current status or constraints, NOT their career experience.
@@ -486,12 +512,21 @@ Good examples:
 
 Rules:
 - 1-2 sentences maximum
-- If the CV doesn't have this information, give a sensible professional default
+- Never infer a personal fact. If the requested fact is not explicitly present in the CV, return exactly: "Needs your input"
 - Do NOT mention past jobs or career history`;
 
   const cvContext = getCvContext(cvText, 8000);
-  const userPrompt = `CV:\n${cvContext}\n\nQuestion: ${question}\n\nAnswer in 1-2 sentences about the candidate's current situation.`;
+  const facts = (confirmedFacts || []).filter(Boolean).join('\n');
+  const userPrompt = `CV:\n${cvContext}${facts ? `\n\nUSER-CONFIRMED FACTS:\n${facts}` : ''}\n\nQuestion: ${question}\n\nAnswer in 1-2 sentences about the candidate's current situation.`;
   return { systemPrompt, userPrompt, temperature: 0.1, maxTokens: 120 };
+}
+
+function buildTechnicalPrompt(cvText, question, length, jobCtx, candidateName, tone, cvData = null) {
+  const result = buildGeneralPrompt(cvText, question, length, jobCtx, candidateName, tone, cvData);
+  return {
+    ...result,
+    systemPrompt: `${result.systemPrompt}\n\nTECHNICAL ANSWER CONTRACT:\n- Answer the technical question directly.\n- Name the relevant system, tool, architecture, or implementation from the CV.\n- Explain what you personally did, one important technical decision, and the outcome.\n- Do not claim a technology merely because it appears in the JD.`,
+  };
 }
 
 function buildSalaryPrompt(cvText, question, jobCtx, jobTitle, salaryBenchmarkHint = '', cvData = null) {
@@ -904,9 +939,77 @@ function significantWords(text) {
   )];
 }
 
-function overlapScore(words, text) {
+const EVIDENCE_CONCEPTS = [
+  ['leadership', 'led', 'managed', 'mentored', 'coached', 'owned', 'directed'],
+  ['influence', 'influenced', 'influencing', 'persuaded', 'aligned', 'buy-in', 'stakeholder', 'negotiated'],
+  ['collaboration', 'collaborated', 'partnered', 'cross-functional', 'stakeholder', 'team'],
+  ['troubleshooting', 'debugged', 'diagnosed', 'investigated', 'root cause', 'incident', 'resolved'],
+  ['reliability', 'availability', 'incident', 'outage', 'production', 'resilience', 'stability'],
+  ['customer', 'client', 'user', 'discovery', 'adoption', 'support', 'escalation'],
+  ['improved', 'increased', 'reduced', 'saved', 'grew', 'delivered', 'automated', 'optimised', 'optimized'],
+  ['pressure', 'deadline', 'urgent', 'critical', 'incident', 'escalation', 'recovered'],
+  ['ambiguity', 'ambiguous', 'unclear', 'undefined', 'discovery', 'requirements'],
+  ['communication', 'presented', 'explained', 'documented', 'workshop', 'trained', 'authored'],
+];
+
+function conceptKeys(text) {
   const haystack = String(text || '').toLowerCase();
-  return words.filter(w => haystack.includes(w)).length;
+  return EVIDENCE_CONCEPTS
+    .filter(group => group.some(term => haystack.includes(term)))
+    .map(group => group[0]);
+}
+
+function overlapScore(words, text, queryText = '') {
+  const haystack = String(text || '').toLowerCase();
+  const lexical = words.filter(w => haystack.includes(w)).length * 3;
+  const wantedConcepts = new Set(conceptKeys(queryText));
+  const semantic = conceptKeys(text).filter(key => wantedConcepts.has(key)).length * 2;
+  const metricBoost = /(?:[$£€]\s*\d|\b\d+(?:\.\d+)?\s*(?:%|x\b|users?|customers?|weeks?|months?|years?))/i.test(text) ? 1 : 0;
+  return lexical + semantic + metricBoost;
+}
+
+function evidenceCandidateKey(item) {
+  return `${String(item.label || '').toLowerCase()}|${String(item.text || '').toLowerCase().replace(/\s+/g, ' ').trim()}`;
+}
+
+function collectEvidenceCandidates(cvData = {}) {
+  const candidates = [];
+  const add = (item) => {
+    if (!String(item?.text || '').trim()) return;
+    candidates.push(item);
+  };
+
+  (cvData.experience || []).forEach(exp => {
+    const label = [exp.title, exp.company].filter(Boolean).join(' @ ') || 'Experience';
+    (exp.responsibilities || []).forEach(text => add({ text, label, sourceKey: exp.sourceId || label }));
+  });
+  (cvData.projects || []).forEach(project => {
+    const label = `Project: ${project.name || 'Unnamed project'}`;
+    const sourceKey = project.sourceId || label;
+    if (project.name || project.url) add({ text: [project.name, project.url].filter(Boolean).join(' | '), label, sourceKey });
+    (project.bullets || project.responsibilities || []).forEach(text => add({ text, label, sourceKey }));
+    (project.skills || []).forEach(text => add({ text, label: `${label} skill`, sourceKey }));
+  });
+  (cvData.achievements || []).forEach(text => add({ text, label: 'Achievement', sourceKey: `achievement:${text}` }));
+  (cvData.certifications || []).forEach(text => add({ text, label: 'Certification', sourceKey: `certification:${text}` }));
+  (cvData.skills || []).forEach(text => add({ text, label: 'Skill', sourceKey: `skill:${text}` }));
+  (cvData.education || []).forEach((item, index) => add({
+    text: typeof item === 'string' ? item : [item.degree, item.institution, item.dates].filter(Boolean).join(', '),
+    label: 'Education', sourceKey: `education:${index}`,
+  }));
+  if (cvData.summary) add({ text: cvData.summary, label: 'Professional Summary', sourceKey: 'summary' });
+  (cvData.evidenceIndex || []).forEach(item => add({
+    text: item.text, label: item.label || String(item.type || 'Additional CV evidence').replace(/_/g, ' '),
+    sourceKey: item.sourceId || `indexed:${item.text}`,
+  }));
+
+  const seen = new Set();
+  return candidates.filter(item => {
+    const key = evidenceCandidateKey(item);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 /**
@@ -915,52 +1018,56 @@ function overlapScore(words, text) {
  * the full CV as fallback context.
  * Returns '' if cvData is absent or no bullets score above zero.
  */
-function buildEvidenceHint(cvData, question) {
-  const experience = cvData?.experience;
-  if (!experience || experience.length === 0) return '';
+function buildEvidenceHint(cvData, question, jdData = null, semanticEvidence = []) {
+  if (!cvData) return '';
 
-  const qWords = significantWords(question);
-  if (qWords.length === 0) return '';
+  const jdFocus = [
+    ...(jdData?.responsibilities || []).slice(0, 6),
+    ...(jdData?.requiredSkills || []).slice(0, 10),
+    ...(jdData?.tools || []).slice(0, 10),
+  ].join(' ');
+  const questionWords = significantWords(question);
+  const jdWords = significantWords(jdFocus);
+  if (questionWords.length === 0 && jdWords.length === 0) return '';
 
-  const bulletsByRole = experience
-    .flatMap(exp =>
-      (exp.responsibilities || []).map(r => ({
-        text: r,
-        label: [exp.title, exp.company].filter(Boolean).join(' @ ') || 'Experience',
-        roleKey: [exp.title, exp.company].filter(Boolean).join('|') || 'Experience',
-        score: overlapScore(qWords, r),
-      }))
-    )
-    .filter(b => b.score > 0)
-    .sort((a, b) => b.score - a.score);
-
-  const achievements = (cvData.achievements || [])
-    .map(a => ({
-      text: a,
-      label: 'Achievement',
-      roleKey: `achievement:${a}`,
-      score: overlapScore(qWords, a),
-    }))
-    .filter(b => b.score > 0);
+  const semanticScores = new Map();
+  for (const item of (semanticEvidence || [])) {
+    const score = Number(item.semanticScore || 0);
+    if (item.sourceId) semanticScores.set(String(item.sourceId).toLowerCase(), score);
+    if (item.text) semanticScores.set(String(item.text).toLowerCase(), score);
+  }
+  const ranked = collectEvidenceCandidates(cvData)
+    .map(item => {
+      const questionScore = overlapScore(questionWords, item.text, question);
+      const jdScore = overlapScore(jdWords, item.text, jdFocus);
+      const semanticScore = semanticScores.get(String(item.sourceKey || '').toLowerCase())
+        || semanticScores.get(String(item.text || '').toLowerCase()) || 0;
+      return { ...item, questionScore, jdScore, semanticScore, score: questionScore * 3 + jdScore + semanticScore * 8 };
+    })
+    // For a specific question, JD relevance may break ties but cannot make
+    // unrelated evidence relevant by itself. Cover letters are intentionally
+    // broad and may use evidence selected primarily from the JD.
+    .filter(item => item.score > 0 && (questionWords.length === 0 || item.questionScore > 0 || item.semanticScore > 0 || /cover(?:ing)?\s+letter/i.test(question)))
+    .sort((a, b) => b.score - a.score || b.questionScore - a.questionScore);
 
   const selected = [];
   const usedRoles = new Set();
-  for (const bullet of bulletsByRole) {
-    if (selected.length >= 4) break;
-    if (usedRoles.has(bullet.roleKey)) continue;
+  for (const bullet of ranked) {
+    if (selected.length >= 6) break;
+    if (usedRoles.has(bullet.sourceKey)) continue;
     selected.push(bullet);
-    usedRoles.add(bullet.roleKey);
+    usedRoles.add(bullet.sourceKey);
   }
-  for (const bullet of [...bulletsByRole, ...achievements].sort((a, b) => b.score - a.score)) {
-    if (selected.length >= 4) break;
+  for (const bullet of ranked) {
+    if (selected.length >= 6) break;
     if (selected.includes(bullet)) continue;
     selected.push(bullet);
   }
 
   if (selected.length === 0) return '';
 
-  const lines = selected.map(b => `  • [${b.label}] ${b.text.slice(0, 130)}`);
-  return `MOST RELEVANT CV BULLETS FOR THIS QUESTION:\n${lines.join('\n')}\n\n`;
+  const lines = selected.map(b => `  • [${b.label}] ${b.text.slice(0, 220)}`);
+  return `MOST RELEVANT CV BULLETS AND EVIDENCE FOR THIS QUESTION AND ROLE:\n${lines.join('\n')}\n\n`;
 }
 
 function buildJdFocusBlock(jdData, qType) {
@@ -1045,6 +1152,27 @@ function buildUnsupportedBridge(matchMap, question, qType) {
   return `NOT CONFIRMED BY THE CV OR USER REVIEW:\n${lines.join('\n')}\nIf the question asks about one of these directly, do not claim it. Say "Not directly" and pivot to the closest truthful adjacent experience.\n\n`;
 }
 
+function buildDomainRiskBlock(domainRisk, qType) {
+  if (!domainRisk?.detected || ['salary', 'short_factual', 'data_extraction'].includes(qType)) return '';
+  const profile = domainRisk.primaryProfile?.label || 'Domain-sensitive role';
+  const warnings = Array.isArray(domainRisk.credentialWarnings) ? domainRisk.credentialWarnings : [];
+  const prompts = Array.isArray(domainRisk.reviewPrompts) ? domainRisk.reviewPrompts : [];
+  const missingCredentials = [...new Set(warnings.flatMap(item => item.missingCredentials || []))]
+    .map(item => String(item || '').trim())
+    .filter(Boolean)
+    .slice(0, 8);
+
+  let block = `DOMAIN REVIEW GUARD:\n  Detected profile: ${profile}.\n`;
+  if (missingCredentials.length > 0) {
+    block += `  Do not claim these credentials unless they are explicitly present in the CV or user-confirmed: ${missingCredentials.join(', ')}.\n`;
+  }
+  if (prompts.length > 0) {
+    block += `  Review prompts before strong claims: ${prompts.slice(0, 3).join(' | ')}\n`;
+  }
+  block += '  If a regulated credential, clearance, license, certification, publication, or portfolio proof is not supported, leave it out or frame the answer as adjacent/transferable experience.\n\n';
+  return block;
+}
+
 function buildRoleCredibilityBlock(jdData, qType) {
   const roleProfile = jdData?.roleProfile;
   if (!roleProfile || ['salary', 'short_factual'].includes(qType)) return '';
@@ -1101,7 +1229,7 @@ function buildRoleCredibilityBlock(jdData, qType) {
  * (role signals first, then matched proof points closest to the answer task).
  * If neither insertion point is found the prompt is returned unchanged.
  */
-function injectHints(userPrompt, evidenceHint, jdFocusBlock, roleCredibilityBlock, bridge, unsupportedBridge = '') {
+function injectHints(userPrompt, evidenceHint, jdFocusBlock, roleCredibilityBlock, bridge, unsupportedBridge = '', domainRiskBlock = '') {
   let p = userPrompt;
   if (evidenceHint) {
     p = p.replace(/^MY CV:/m, `${evidenceHint}MY CV:`);
@@ -1117,6 +1245,9 @@ function injectHints(userPrompt, evidenceHint, jdFocusBlock, roleCredibilityBloc
   }
   if (unsupportedBridge) {
     p = p.replace(/^(Question:|Write a cover letter)/m, `${unsupportedBridge}$1`);
+  }
+  if (domainRiskBlock) {
+    p = p.replace(/^(Question:|Write a cover letter)/m, `${domainRiskBlock}$1`);
   }
   return p;
 }
@@ -1135,11 +1266,14 @@ export function buildPrompts(input) {
     jdData,
     matchMap,
     roleProfile,
+    domainRisk,
     jobTitle,
     company,
     jobDescription,
     requirements,
     maxChars,
+    semanticEvidence = [],
+    confirmedFacts = [],
   } = input;
 
   // Plain field labels (name, email, LinkedIn, phone, etc.)
@@ -1157,7 +1291,8 @@ export function buildPrompts(input) {
       }
     : jdData;
   const candidateName = extractCandidateName(cvText);
-  const qType = detectQuestionType(question);
+  const classification = classifyApplicationQuestion(question);
+  const qType = classification.type;
   let salaryBenchmarkHint = '';
   if (qType === 'salary') {
     const salaryBenchmarks = new SalaryBenchmarkService();
@@ -1173,9 +1308,15 @@ export function buildPrompts(input) {
   switch (qType) {
     case 'salary':
       result = buildSalaryPrompt(cvText, question, jobCtx, jobTitle, salaryBenchmarkHint, cvData);
+      {
+        const salaryFacts = confirmedFacts.filter(value => /salary|compensation|pay/i.test(value));
+        if (salaryFacts.length) result.userPrompt += `\n\nUSER-CONFIRMED SALARY EXPECTATION (use this instead of estimating):\n${salaryFacts.join('\n')}`;
+      }
       break;
     case 'short_factual':
-      result = buildShortFactualPrompt(cvText, question);
+    case 'personal_factual':
+    case 'sensitive_voluntary':
+      result = buildShortFactualPrompt(cvText, question, confirmedFacts);
       break;
     case 'yes_no':
       result = buildYesNoPrompt(cvText, question, jobCtx, candidateName, tone, cvData);
@@ -1188,6 +1329,9 @@ export function buildPrompts(input) {
       break;
     case 'troubleshooting':
       result = buildTroubleshootingPrompt(cvText, question, length, jobCtx, candidateName, tone, cvData);
+      break;
+    case 'technical':
+      result = buildTechnicalPrompt(cvText, question, length, jobCtx, candidateName, tone, cvData);
       break;
     case 'strength_weakness': {
       const isWeakness = /weakness(es)?|areas?\s+(for|of|to)\s+improve(ment)?|development\s+area|improve\s+about\s+yourself/i.test(question);
@@ -1217,7 +1361,7 @@ export function buildPrompts(input) {
   // data extraction prompts where CV stories would be noise.
   const HINT_TYPES = new Set([
     'behavioral', 'troubleshooting', 'strength_weakness',
-    'motivation', 'why_company', 'cover_letter', 'general', 'yes_no', 'brief',
+    'motivation', 'why_company', 'cover_letter', 'general', 'technical', 'yes_no', 'brief',
   ]);
 
   // Inject confidence calibration into the system prompt so the model knows
@@ -1231,13 +1375,14 @@ export function buildPrompts(input) {
   }
 
   if (result && HINT_TYPES.has(qType)) {
-    const evidenceHint = buildEvidenceHint(cvData, question);
+    const evidenceHint = buildEvidenceHint(cvData, question, enrichedJdData, semanticEvidence);
     const jdFocusBlock = buildJdFocusBlock(enrichedJdData, qType);
     const roleCredibilityBlock = buildRoleCredibilityBlock(enrichedJdData, qType);
     const bridge = buildRequirementsBridge(matchMap, question, qType);
     const unsupportedBridge = buildUnsupportedBridge(matchMap, question, qType);
-    if (evidenceHint || jdFocusBlock || roleCredibilityBlock || bridge || unsupportedBridge) {
-      result = { ...result, userPrompt: injectHints(result.userPrompt, evidenceHint, jdFocusBlock, roleCredibilityBlock, bridge, unsupportedBridge) };
+    const domainRiskBlock = buildDomainRiskBlock(domainRisk, qType);
+    if (evidenceHint || jdFocusBlock || roleCredibilityBlock || bridge || unsupportedBridge || domainRiskBlock) {
+      result = { ...result, userPrompt: injectHints(result.userPrompt, evidenceHint, jdFocusBlock, roleCredibilityBlock, bridge, unsupportedBridge, domainRiskBlock) };
     }
   }
 
@@ -1248,5 +1393,10 @@ export function buildPrompts(input) {
     result.userPrompt += `\n\nHARD LIMIT: This form field accepts a maximum of ${maxChars} characters. Your entire answer must be ${maxChars} characters or fewer (including spaces). Write concisely to stay within this limit.`;
   }
 
-  return result ? { ...result, questionType: qType } : result;
+  if (classification.multiPart) {
+    result.userPrompt += '\n\nMULTI-PART QUESTION: Answer every part explicitly and in the order asked. Use a short paragraph or numbered structure when useful. Do not omit a part.';
+  }
+
+  const orchestrated = withAgentPromptHeader(result, 'applicationAnswer');
+  return orchestrated ? { ...orchestrated, questionType: qType } : orchestrated;
 }

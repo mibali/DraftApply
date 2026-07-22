@@ -31,7 +31,7 @@ A local web app (backend + frontend) exists for development and offline use with
 - **File parsing:** `pdf-parse`, `mammoth` (DOCX), plain text
 - **Security (proxy):** `helmet`, `express-rate-limit`, HMAC-signed install tokens
 - **No TypeScript.** The entire codebase is plain JavaScript.
-- **No test framework** is currently configured.
+- **Tests:** Vitest is configured at the repo root for unit/static contract tests; architecture syntax checks also run through `npm run verify:architecture`.
 
 ## Key conventions
 

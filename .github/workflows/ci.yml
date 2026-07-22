@@ -22,6 +22,18 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      # render-proxy/ is its own npm package (separate package.json and
+      # lockfile) - the root install above never touches it, but
+      # tests/proxy-routes.integration.test.js and
+      # tests/redis-safety.integration.test.js import render-proxy/server.js
+      # directly, which needs its own node_modules (express, redis, ...) at
+      # runtime.
+      - name: Install render-proxy dependencies
+        run: npm install --prefix render-proxy
+
+      - name: Install Redis for safety integration tests
+        run: sudo apt-get update && sudo apt-get install -y redis-server
+
       - name: Run unit tests
         run: npm test
 
@@ -57,3 +69,21 @@ jobs:
           node --input-type=module < cv-parser.js      && echo "cv-parser.js OK"
           node --input-type=module < prompt-builder.js && echo "prompt-builder.js OK"
           node --input-type=module < answer-generator.js && echo "answer-generator.js OK"
+
+  browser:
+    name: Browser smoke tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Node
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Playwright Chromium and system dependencies
+        run: npx playwright install --with-deps chromium
+      # MV3 extensions require headed Chromium; xvfb supplies the CI display.
+      - name: Run browser smoke tests
+        run: xvfb-run --auto-servernum npm run test:browser

@@ -1,0 +1,344 @@
+{
+  "credentialRules": [
+    {
+      "appliesToRiskLevels": [
+        "regulated"
+      ],
+      "description": "Do not claim licenses, registrations, clearances, certificates, union membership, right-to-work status, flight hours, clinical authority, or legal authority unless found in CV evidence or user-confirmed.",
+      "id": "never_claim_unverified_license",
+      "severity": "block"
+    },
+    {
+      "appliesToRiskLevels": [
+        "regulated"
+      ],
+      "description": "When a credential is location-specific, ask the user to confirm jurisdiction before using it in generated output.",
+      "id": "ask_jurisdiction_for_local_credentials",
+      "severity": "confirm"
+    },
+    {
+      "appliesToRiskLevels": [
+        "portfolio"
+      ],
+      "description": "For portfolio-led roles, prefer named project evidence or portfolio URLs over generic CV claims.",
+      "id": "portfolio_requires_project_evidence",
+      "severity": "confirm"
+    },
+    {
+      "appliesToRiskLevels": [
+        "specialized"
+      ],
+      "description": "For academic CVs, preserve publication, grant, and conference details exactly unless the user edits them.",
+      "id": "academic_preserve_publications",
+      "severity": "warn"
+    }
+  ],
+  "domainProfiles": [
+    {
+      "confirmationPrompts": [
+        "Which jurisdiction are you admitted or licensed to practise in?",
+        "Do you hold any current legal practising certificate or bar admission relevant to this role?"
+      ],
+      "credentialKeywords": [
+        "bar admission",
+        "law license",
+        "solicitor qualification",
+        "practising certificate",
+        "right of audience"
+      ],
+      "evidenceStrictness": "strict",
+      "id": "regulated_legal",
+      "keywords": [
+        "attorney",
+        "lawyer",
+        "solicitor",
+        "barrister",
+        "paralegal",
+        "legal counsel",
+        "bar admission",
+        "practising certificate",
+        "court filings",
+        "litigation"
+      ],
+      "label": "Legal / regulated legal services",
+      "riskLevel": "regulated"
+    },
+    {
+      "confirmationPrompts": [
+        "Which clinical licenses or registrations do you currently hold?",
+        "Which jurisdiction or state are those credentials valid in?"
+      ],
+      "credentialKeywords": [
+        "rn license",
+        "medical license",
+        "npi",
+        "board certification",
+        "bls",
+        "acls",
+        "gmc",
+        "nmc",
+        "hcpc",
+        "state license"
+      ],
+      "evidenceStrictness": "strict",
+      "id": "clinical_healthcare",
+      "keywords": [
+        "registered nurse",
+        "physician",
+        "doctor",
+        "clinical",
+        "patient care",
+        "nurse practitioner",
+        "pharmacist",
+        "paramedic",
+        "medical license",
+        "board certified"
+      ],
+      "label": "Clinical healthcare",
+      "riskLevel": "regulated"
+    },
+    {
+      "confirmationPrompts": [
+        "Which aviation certificates, ratings, or medical class do you currently hold?",
+        "What flight hours or aircraft type ratings are explicitly supported by your CV?"
+      ],
+      "credentialKeywords": [
+        "atp",
+        "commercial pilot certificate",
+        "private pilot certificate",
+        "instrument rating",
+        "type rating",
+        "a&p",
+        "airframe and powerplant",
+        "medical certificate"
+      ],
+      "evidenceStrictness": "strict",
+      "id": "aviation_safety",
+      "keywords": [
+        "pilot",
+        "aircraft mechanic",
+        "airframe",
+        "powerplant",
+        "flight instructor",
+        "faa",
+        "easa",
+        "air traffic",
+        "type rating",
+        "commercial pilot"
+      ],
+      "label": "Aviation safety-sensitive",
+      "riskLevel": "regulated"
+    },
+    {
+      "confirmationPrompts": [
+        "Do you currently hold an active clearance, and what level can you truthfully disclose?",
+        "Are there citizenship or right-to-work requirements that need confirmation?"
+      ],
+      "credentialKeywords": [
+        "active clearance",
+        "secret",
+        "top secret",
+        "ts/sci",
+        "public trust",
+        "sc cleared",
+        "dv cleared"
+      ],
+      "evidenceStrictness": "strict",
+      "id": "government_clearance",
+      "keywords": [
+        "security clearance",
+        "classified",
+        "top secret",
+        "secret clearance",
+        "public trust",
+        "sc clearance",
+        "dv clearance",
+        "government contract",
+        "defence",
+        "defense"
+      ],
+      "label": "Government / clearance-sensitive",
+      "riskLevel": "regulated"
+    },
+    {
+      "confirmationPrompts": [
+        "Do you want to add publications, grants, or conference talks that are missing from your CV?",
+        "Do you have an ORCID or publication list URL?"
+      ],
+      "credentialKeywords": [
+        "phd",
+        "publications",
+        "grants",
+        "orcid",
+        "doi",
+        "ethics approval",
+        "supervision"
+      ],
+      "evidenceStrictness": "academic",
+      "id": "academic_research",
+      "keywords": [
+        "postdoc",
+        "principal investigator",
+        "research fellow",
+        "lecturer",
+        "professor",
+        "publication",
+        "grant",
+        "h-index",
+        "conference",
+        "peer reviewed",
+        "laboratory"
+      ],
+      "label": "Academic / research",
+      "riskLevel": "specialized"
+    },
+    {
+      "confirmationPrompts": [
+        "What portfolio URL or selected projects should DraftApply reference?",
+        "Which 2-3 projects best prove fit for this role?"
+      ],
+      "credentialKeywords": [
+        "portfolio url",
+        "case study",
+        "showreel",
+        "published work",
+        "client work",
+        "awards"
+      ],
+      "evidenceStrictness": "portfolio",
+      "id": "creative_portfolio",
+      "keywords": [
+        "portfolio",
+        "showreel",
+        "designer",
+        "copywriter",
+        "art director",
+        "video editor",
+        "illustrator",
+        "ux case study",
+        "brand identity"
+      ],
+      "label": "Creative / portfolio-led",
+      "riskLevel": "portfolio"
+    },
+    {
+      "confirmationPrompts": [
+        "Which trade licenses, cards, or safety certifications do you currently hold?",
+        "Which jurisdiction, union, or site-access requirements apply?"
+      ],
+      "credentialKeywords": [
+        "license",
+        "journeyman",
+        "apprenticeship",
+        "osha",
+        "cscs",
+        "ecs",
+        "nvq",
+        "city & guilds",
+        "forklift certification"
+      ],
+      "evidenceStrictness": "strict",
+      "id": "licensed_trade",
+      "keywords": [
+        "electrician",
+        "plumber",
+        "welder",
+        "hvac",
+        "mechanic",
+        "journeyman",
+        "apprentice",
+        "osha",
+        "cscs",
+        "ecs card",
+        "forklift"
+      ],
+      "label": "Licensed trade / manual specialist",
+      "riskLevel": "regulated"
+    },
+    {
+      "confirmationPrompts": [
+        "Add 2-3 achievements relevant to this role.",
+        "Paste a fuller job description or list the top requirements if you have them."
+      ],
+      "credentialKeywords": [],
+      "evidenceStrictness": "sparse",
+      "id": "sparse_context",
+      "keywords": [
+        "various duties",
+        "fast paced environment",
+        "other duties as assigned"
+      ],
+      "label": "Sparse CV or vague job description",
+      "riskLevel": "insufficient_evidence"
+    }
+  ],
+  "generation": {
+    "notes": "Seed snapshot is intentionally compact. Official raw datasets are not committed by default; add source files under shared/domain-packs/raw/ and re-run the refresh script.",
+    "retrievedAt": "2026-07-08T15:07:55.440Z",
+    "tool": "scripts/refresh-domain-packs.js"
+  },
+  "schemaVersion": 1,
+  "sources": [
+    {
+      "attribution": "O*NET Resource Center by the U.S. Department of Labor, Employment and Training Administration (USDOL/ETA). O*NET is a trademark of USDOL/ETA.",
+      "cadence": "quarterly",
+      "id": "onet",
+      "license": "CC BY 4.0",
+      "name": "O*NET Database",
+      "retrievedAt": null,
+      "sha256": null,
+      "url": "https://www.onetcenter.org/database.html"
+    },
+    {
+      "attribution": "European Commission ESCO classification.",
+      "cadence": "quarterly",
+      "id": "esco",
+      "license": "European Commission open data terms; API software is EUPL 1.2 with Apache 2.0 components",
+      "name": "European Skills, Competences, Qualifications and Occupations",
+      "retrievedAt": null,
+      "sha256": null,
+      "url": "https://esco.ec.europa.eu/en/use-esco/download"
+    },
+    {
+      "attribution": "National Institute of Standards and Technology NICE Framework.",
+      "cadence": "quarterly",
+      "id": "nist-nice",
+      "license": "U.S. government public information; verify downloaded file notices",
+      "name": "NIST NICE Workforce Framework for Cybersecurity",
+      "retrievedAt": null,
+      "sha256": null,
+      "url": "https://www.nist.gov/itl/applied-cybersecurity/nice/nice-framework-resource-center/nice-framework-current-versions"
+    },
+    {
+      "attribution": "OpenAlex by OurResearch.",
+      "cadence": "quarterly",
+      "id": "openalex",
+      "license": "CC0 for complete dataset",
+      "name": "OpenAlex",
+      "retrievedAt": null,
+      "sha256": null,
+      "url": "https://developers.openalex.org/"
+    },
+    {
+      "attribution": "Federal Aviation Administration Airmen Certification data.",
+      "cadence": "monthly",
+      "id": "faa-airmen",
+      "license": "U.S. government public information; verify FAA file notices",
+      "name": "FAA Airmen Certification Downloadable Database",
+      "retrievedAt": null,
+      "sha256": null,
+      "url": "https://www.faa.gov/licenses_certificates/airmen_certification/releasable_airmen_download"
+    },
+    {
+      "attribution": "Centers for Medicare & Medicaid Services NPPES/NPI data.",
+      "cadence": "monthly",
+      "id": "cms-nppes",
+      "license": "U.S. government public information; verify CMS data dissemination terms",
+      "name": "CMS NPPES / NPI Registry",
+      "retrievedAt": null,
+      "sha256": null,
+      "url": "https://npiregistry.cms.hhs.gov/"
+    }
+  ],
+  "updatedAt": "2026-07-08"
+}

@@ -277,7 +277,45 @@ describe('buildMatchMap', () => {
     expect(() => tailor.buildMatchMap(CV, JD, null)).not.toThrow();
   });
 
-  it('treats controlled synonyms as partial evidence in the production match map', () => {
+  it('does not authorize bundled or sentence-shaped user confirmations', () => {
+    const map = tailor.buildMatchMap(CV, JD, [
+      'AWS / GCP / Azure',
+      'Build production ML platforms',
+      '3–5 years of experience in Machine Learning, Backend Engineering, or MLOps roles',
+      'Grafana',
+    ]);
+    expect(map.some(item => item.requirement === 'Grafana' && item.confirmedByUser)).toBe(true);
+    expect(map.some(item => /AWS \/ GCP|Build production|years of experience/i.test(item.requirement))).toBe(false);
+  });
+
+  it('does not let semantic-match model output self-authorize a requirement', () => {
+    const result = tailor.mergeSemanticMatchResult([
+      {
+        requirement: 'GraphQL',
+        type: 'preferred',
+        status: 'user_confirmed',
+        evidence: [],
+        allowedToMention: true,
+        confirmedByUser: true,
+      },
+      {
+        requirement: 'Fabricated Quantum Platform',
+        type: 'tool',
+        status: 'strong_match',
+        evidence: ['Invented evidence'],
+        allowedToMention: true,
+        confirmedByUser: false,
+      },
+    ], JD, []);
+    expect(result.find(item => item.requirement === 'GraphQL')).toMatchObject({
+      status: 'missing',
+      allowedToMention: false,
+      confirmedByUser: false,
+    });
+    expect(result.some(item => item.requirement === 'Fabricated Quantum Platform')).toBe(false);
+  });
+
+  it('keeps controlled synonyms as retrieval evidence without authorizing claims', () => {
     const cv = {
       rawText: 'Delivered client-facing presentations and stakeholder workshops for enterprise SaaS accounts.',
       summary: '',
@@ -301,16 +339,16 @@ describe('buildMatchMap', () => {
 
     const map = tailor.buildMatchMap(cv, jd);
     expect(map.find(m => m.requirement === 'Technical Demos')).toMatchObject({
-      status: 'partial_match',
-      allowedToMention: true,
+      status: 'missing',
+      allowedToMention: false,
     });
     expect(map.find(m => m.requirement === 'Technical Discovery')).toMatchObject({
-      status: 'partial_match',
-      allowedToMention: true,
+      status: 'missing',
+      allowedToMention: false,
     });
   });
 
-  it('normalises common tool aliases such as Postgres and PostgreSQL', () => {
+  it('does not let a tool alias authorize an exact named skill', () => {
     const cv = {
       rawText: 'Optimised Postgres schemas and reporting queries for customer dashboards.',
       summary: '',
@@ -327,8 +365,8 @@ describe('buildMatchMap', () => {
     };
 
     const postgres = tailor.buildMatchMap(cv, jd).find(m => m.requirement === 'PostgreSQL');
-    expect(postgres.status).toBe('partial_match');
-    expect(postgres.allowedToMention).toBe(true);
+    expect(postgres.status).toBe('missing');
+    expect(postgres.allowedToMention).toBe(false);
   });
 });
 
@@ -473,6 +511,165 @@ describe('validateTailoredCV', () => {
     };
     const warnings = tailor.validateTailoredCV(cvWithArtefact, faithfulTailoring());
     expect(warnings.every(w => !w.includes('communicating') && !w.includes('operational scalability'))).toBe(true);
+  });
+
+  it('skips location/date parser artefacts in the title loop', () => {
+    const cvWithArtefact = {
+      ...CV,
+      experience: [
+        { company: 'Acme Corp', title: 'Birmingham, UKSep', dates: '2021 - 2022', responsibilities: [] },
+        { company: 'Beta Corp', title: 'UKFeb', dates: '2020 - 2021', responsibilities: [] },
+      ],
+    };
+    const tailored = [
+      'Acme Corp',
+      '2021 - 2022',
+      'Platform Engineer',
+      '- Built deployment automation.',
+      '',
+      'Beta Corp',
+      '2020 - 2021',
+      'Support Engineer',
+      '- Supported cloud customers.',
+    ].join('\n');
+    const warnings = tailor.validateTailoredCV(cvWithArtefact, tailored);
+    expect(warnings.every(w => !w.includes('Birmingham') && !w.includes('UKFeb'))).toBe(true);
+  });
+});
+
+describe('ensureExperienceDepth', () => {
+  it('restores enough truthful source bullets to reach role depth when available', () => {
+    const cvData = {
+      experience: [{
+        company: 'Opay Financial Services | Nigeria',
+        title: 'DevOps Engineer',
+        responsibilities: [
+          'Improved deployment reliability by designing and managing containerized applications using Kubernetes and Docker.',
+          'Reduced manual infrastructure effort through Infrastructure as Code and deployment automation.',
+          'Built and maintained Azure DevOps CI/CD pipelines while supporting cloud resource configuration.',
+        ],
+      }],
+    };
+    const tailored = [
+      'Opay Financial Services | Nigeria',
+      'DevOps Engineer',
+      '- Improved deployment reliability by designing and managing containerized applications using Kubernetes and Docker.',
+    ].join('\n');
+
+    const output = tailor.ensureExperienceDepth(tailored, cvData, {
+      requiredSkills: ['Kubernetes', 'Docker', 'CI/CD', 'Infrastructure as Code'],
+    });
+    const bulletCount = output.split('\n').filter(line => /^-\s/.test(line)).length;
+    expect(bulletCount).toBeGreaterThanOrEqual(3);
+    expect(output).toContain('Reduced manual infrastructure effort');
+    expect(output).toContain('Azure DevOps CI/CD pipelines');
+  });
+
+  it('can split dense original bullets into separate supported bullets', () => {
+    const cvData = {
+      experience: [{
+        company: 'Microsoft',
+        title: 'Cloud Support Engineer',
+        responsibilities: [
+          'Provided advanced cloud and SaaS troubleshooting for corporate customers; managed critical escalations and stakeholder communication; documented action plans for expectation management.',
+        ],
+      }],
+    };
+    const tailored = [
+      'Microsoft',
+      'Cloud Support Engineer',
+      '- Provided advanced cloud and SaaS troubleshooting for corporate customers.',
+    ].join('\n');
+
+    const output = tailor.ensureExperienceDepth(tailored, cvData, {
+      requiredSkills: ['cloud troubleshooting', 'stakeholder communication'],
+    });
+    const bulletCount = output.split('\n').filter(line => /^-\s/.test(line)).length;
+    expect(bulletCount).toBeGreaterThanOrEqual(3);
+    expect(output).toContain('managed critical escalations');
+    expect(output).toContain('documented action plans');
+  });
+
+  it('splits dense comma-list evidence so single-bullet roles reach usable depth', () => {
+    const cvData = {
+      experience: [{
+        company: 'Microsoft (Tek-Experts) | Nigeria',
+        title: 'Cloud Support Engineer | Cloud Service SME',
+        responsibilities: [
+          'Provided advanced cloud and SaaS troubleshooting for corporate customers, including critical escalations, action plans, stakeholder communication, and expectation management.',
+        ],
+      }, {
+        company: 'Bincom ICT Solutions | Nigeria',
+        title: 'Python Developer',
+        responsibilities: [
+          'Developed reusable, testable Python code for production systems while contributing to incident response, post-mortem analysis, and cross-functional software delivery.',
+        ],
+      }],
+    };
+    const tailored = [
+      'Microsoft (Tek-Experts) | Nigeria',
+      'Cloud Support Engineer | Cloud Service SME',
+      '- Provided advanced cloud and SaaS troubleshooting for corporate customers.',
+      '',
+      'Bincom ICT Solutions | Nigeria',
+      'Python Developer',
+      '- Developed reusable, testable Python code for production systems.',
+    ].join('\n');
+
+    const output = tailor.ensureExperienceDepth(tailored, cvData, {
+      requiredSkills: ['cloud troubleshooting', 'incident response', 'stakeholder communication'],
+    });
+    const microsoftSection = output.split('Bincom ICT Solutions | Nigeria')[0];
+    const bincomSection = output.split('Bincom ICT Solutions | Nigeria')[1];
+
+    expect(microsoftSection.split('\n').filter(line => /^-\s/.test(line)).length).toBeGreaterThanOrEqual(3);
+    expect(microsoftSection).toContain('Supported critical escalations and action plans');
+    expect(microsoftSection).toContain('Supported stakeholder communication and expectation management');
+    expect(bincomSection.split('\n').filter(line => /^-\s/.test(line)).length).toBeGreaterThanOrEqual(3);
+    expect(bincomSection).toContain('Contributed to incident response and post-mortem analysis');
+    expect(bincomSection).toContain('Contributed to cross-functional software delivery');
+  });
+});
+
+describe('normaliseExperienceBulletDensity', () => {
+  it('caps bloated recent roles while keeping JD-aligned and metric bullets', () => {
+    const cvData = {
+      experience: [{
+        company: 'DualMind Tech Consulting Ltd',
+        title: 'MLOps / DevOps Engineer',
+        responsibilities: [],
+      }],
+    };
+    const tailored = [
+      'DualMind Tech Consulting Ltd | Birmingham, UK',
+      'Sep 2025 - Present',
+      'MLOps / DevOps Engineer',
+      '- Designed end-to-end MLOps workflows covering model training, artifact versioning, deployment, serving, scaling, monitoring, and lifecycle.',
+      '- Built reproducible ML project foundations using standardized repository structure, virtual environments, Makefile automation, installable Python packaging, and code quality tooling including pre-commit, Ruff, and Black.',
+      '- Implemented data and model lifecycle workflows using DVC and MLflow patterns for dataset tracking, experiment logging, model comparison, artifact storage, model registration, and promotion readiness.',
+      '- Containerized ML workloads using Docker and multi-stage build patterns, supporting reproducible training environments, immutable model artifacts, Docker Compose development workflows, and CI-driven image builds.',
+      '- Deployed ML inference services on Kubernetes using Deployments, Services, Ingress, KServe InferenceService patterns, storage-backed predictors, autoscaling behavior, and standardized request/response contracts.',
+      '- Designed production inference architectures using Flask, FastAPI, Gunicorn, BentoML-style packaging, Application Load Balancers, health checks, graceful shutdown, and horizontally scalable stateless serving.',
+      '- Integrated AWS SageMaker workflows for model training, deployment, managed inference endpoints, IAM execution roles, SageMaker Domain configuration, and RBAC separation across data science and platform teams.',
+      '- Applied data quality, model validation, and monitoring patterns using Great Expectations, Evidently AI, Prometheus, Grafana, drift detection, model performance reports, and retraining trigger concepts.',
+    ].join('\n');
+
+    const output = tailor.normaliseExperienceBulletDensity(tailored, cvData, {
+      requiredSkills: ['MLOps', 'Kubernetes', 'SageMaker', 'Docker', 'MLflow'],
+      tools: ['Kubernetes', 'Docker', 'AWS SageMaker', 'MLflow'],
+    }, [
+      { requirement: 'Kubernetes', allowedToMention: true },
+      { requirement: 'AWS SageMaker', allowedToMention: true },
+      { requirement: 'Docker', allowedToMention: true },
+      { requirement: 'MLflow', allowedToMention: true },
+    ]);
+
+    const bullets = output.split('\n').filter(line => /^-\s/.test(line));
+    expect(bullets).toHaveLength(5);
+    expect(output).toContain('Kubernetes');
+    expect(output).toContain('SageMaker');
+    expect(output).toContain('Docker');
+    expect(output).toContain('MLflow');
   });
 });
 
@@ -863,6 +1060,39 @@ Maintained CI pipelines`;
     expect(result).not.toContain('Jan 2021 -\nPresent');
     expect(result).not.toContain('Jun 2019 - Dec 2020');
   });
+
+  it('restores company/dates when the model reverses the order and mangles the date line (regression)', () => {
+    // Observed live: the model puts the title first, pushes the company line
+    // down after the bullets, and splits the locked date into two fragments
+    // where the company line should have been. Only searching forward from
+    // company (the original implementation) silently skipped restoration
+    // entirely for blocks shaped like this.
+    const tailored = `John Doe
+Senior Software Engineer
+
+PROFESSIONAL EXPERIENCE
+Jan 2021 -                    Present
+Senior Frontend Engineer
+Focus: React and platform reliability
+Built React dashboards
+TechCorp
+
+Jun 2019 -                    Dec 2020
+Junior Developer
+Maintained CI pipelines
+StartupXYZ`;
+
+    const result = tailor.restoreLockedExperienceDates(tailored, CV);
+
+    expect(result).toContain('TechCorp\nJan 2021 – Present\nSenior Frontend Engineer');
+    expect(result).toContain('StartupXYZ\nJun 2019 – Dec 2020\nJunior Developer');
+    expect(result).not.toMatch(/Jan 2021 -\s+Present/);
+    expect(result).not.toMatch(/Jun 2019 -\s+Dec 2020/);
+    // Company line must not be duplicated (once restored to the top, the
+    // original stray occurrence after the bullets must be gone).
+    expect((result.match(/TechCorp/g) || [])).toHaveLength(1);
+    expect((result.match(/StartupXYZ/g) || [])).toHaveLength(1);
+  });
 });
 
 
@@ -924,6 +1154,16 @@ React, Grafana`;
   it('creates a skills section when the tailored CV has none', () => {
     const result = tailor.ensureConfirmedSkillsIncluded('John Doe\n\nEXPERIENCE\nTechCorp', ['Prometheus']);
     expect(result).toContain('Technical Skills\nPrometheus');
+  });
+
+  it('does not insert bundled JD requirements into the legacy CV path', () => {
+    const result = tailor.ensureConfirmedSkillsIncluded('John Doe\n\nSKILLS\nReact', [
+      'AWS / GCP / Azure',
+      'production experience with ML platforms',
+      'Grafana',
+    ]);
+    expect(result).toContain('React, Grafana');
+    expect(result).not.toMatch(/AWS \/ GCP|production experience/i);
   });
 });
 
@@ -1366,6 +1606,21 @@ describe('buildTailoringPrompt', () => {
     expect(temperature).toBeLessThanOrEqual(1);
   });
 
+  it('adds domain review guidance when supplied', () => {
+    const map = tailor.buildMatchMap(CV, JD);
+    const { userPrompt } = tailor.buildTailoringPrompt(CV, JD, map, {
+      domainRisk: {
+        detected: true,
+        primaryProfile: { label: 'Clinical healthcare' },
+        credentialWarnings: [{ missingCredentials: ['rn license'], severity: 'block' }],
+        reviewPrompts: ['Which clinical licenses or registrations do you currently hold?'],
+      },
+    });
+
+    expect(userPrompt).toContain('DOMAIN REVIEW CHECK');
+    expect(userPrompt).toContain('rn license');
+  });
+
   it('builds a strict post-generation audit prompt for unsupported tailored CV claims', () => {
     const matchMap = [
       {
@@ -1408,10 +1663,25 @@ React, Track record of leading POCs and world-class demos`;
     expect(temperature).toBe(0.2);
   });
 
-  it('tailoring prompt instructs the model to preserve ALL original bullets per role', () => {
+  it('does not expose malformed confirmations as allowed audit evidence', () => {
+    const malformed = 'AWS / GCP / Azure';
+    const { userPrompt } = tailor.buildTailoredCvAuditPrompt(
+      CV,
+      JD,
+      [{ requirement: malformed, allowedToMention: true, confirmedByUser: true, evidence: [] }],
+      CV.rawText,
+      [malformed, 'Grafana']
+    );
+    expect(userPrompt).toContain('+ Grafana');
+    expect(userPrompt).not.toContain(malformed);
+  });
+
+  it('tailoring prompt instructs the model to keep role evidence concise and credible', () => {
     const map = tailor.buildMatchMap(CV, JD);
     const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(CV, JD, map);
-    expect(systemPrompt + userPrompt).toMatch(/preserve ALL original bullets/i);
+    expect(systemPrompt + userPrompt).toMatch(/3–5 bullets/i);
+    expect(systemPrompt + userPrompt).toMatch(/Do not include duplicate or low-signal bullets merely to preserve volume/i);
+    expect(systemPrompt + userPrompt).not.toMatch(/preserve ALL original bullets/i);
     expect(systemPrompt + userPrompt).not.toMatch(/rewrite relevant bullets/i);
   });
 
@@ -1420,5 +1690,82 @@ React, Track record of leading POCs and world-class demos`;
     const { systemPrompt } = tailor.buildTailoredCvAuditPrompt(CV, JD, map, CV.rawText, []);
     expect(systemPrompt).toMatch(/Every experience bullet.*must remain/i);
     expect(systemPrompt).toMatch(/only remove a bullet if it contains/i);
+  });
+});
+
+describe('OR-list requirement matching (regression: 14% score for a strong-fit MLOps CV)', () => {
+  const tailor = new CVTailor();
+  const cvData = {
+    summary: 'MLOps engineer with 7+ years across DevOps, Kubernetes, CI/CD, and ML deployment.',
+    skills: ['MLflow', 'DVC', 'Terraform', 'AWS', 'Azure', 'GCP', 'Kubernetes', 'experiment tracking', 'model registry'],
+    experience: [{
+      company: 'DualMind', title: 'MLOps / DevOps Engineer', dates: 'Sep 2025 - Present',
+      responsibilities: [
+        'Implemented data and model lifecycle workflows using DVC and MLflow patterns for experiment logging and model registration.',
+        'Owned Infrastructure as Code with Terraform across AWS, Azure, and GCP environments.',
+      ],
+    }],
+    certifications: [], achievements: [], rawText: '',
+  };
+  const jdData = {
+    requiredSkills: [
+      'Production experience with ML lifecycle management platforms such as MLFlow, Weights & Biases, Neptune.ai, Comet.ml or similar',
+      'Experience with IaC using Terraform, Pulumi, OpenTofu, Encore, Crossplane or similar',
+      'MLFlow', 'Weights & Biases', 'Neptune', 'Terraform', 'Pulumi', 'Crossplane',
+    ],
+    preferredSkills: [], tools: [], softSkills: [],
+  };
+  const matchMap = tailor.buildMatchMap(cvData, jdData, []);
+  const byReq = req => matchMap.find(m => m.requirement === req);
+
+  it('satisfies "such as A, B or similar" requirements via one evidenced alternative', () => {
+    expect(byReq('Production experience with ML lifecycle management platforms such as MLFlow, Weights & Biases, Neptune.ai, Comet.ml or similar').status).toBe('strong_match');
+    expect(byReq('Experience with IaC using Terraform, Pulumi, OpenTofu, Encore, Crossplane or similar').status).toBe('strong_match');
+  });
+
+  it('marks unmet OR-alternatives as covered, never claimable, and excluded from the score', () => {
+    for (const alt of ['Weights & Biases', 'Neptune', 'Pulumi', 'Crossplane']) {
+      const row = byReq(alt);
+      expect(row.status).toBe('covered_by_alternative');
+      expect(row.allowedToMention).toBe(false);
+    }
+    const summary = tailor.buildMatchSummary(matchMap);
+    expect(summary.unsupportedRequirements).toEqual([]);
+    expect(summary.score).toBeGreaterThanOrEqual(90);
+  });
+
+  it('extracts alternatives from such-as lists, using-lists, and parenthetical lists', () => {
+    expect(tailor._extractRequirementAlternatives(
+      'Production experience with ML lifecycle management platforms such as MLFlow, Weights & Biases, Neptune.ai, Comet.ml or similar'
+    )).toEqual(['MLFlow', 'Weights & Biases', 'Neptune.ai', 'Comet.ml']);
+    expect(tailor._extractRequirementAlternatives(
+      'Experience with IaC using Terraform, Pulumi, OpenTofu, Encore, Crossplane or similar'
+    )).toEqual(['Terraform', 'Pulumi', 'OpenTofu', 'Encore', 'Crossplane']);
+    expect(tailor._extractRequirementAlternatives(
+      'Deep experience with building systems-of-systems in AWS, GCP, or Azure, that span across multiple services'
+    )).toContain('AWS');
+    expect(tailor._extractRequirementAlternatives('cloud platforms (AWS, GCP, or Azure)')).toEqual(['AWS', 'GCP', 'Azure']);
+    expect(tailor._extractRequirementAlternatives('Strong communication and ownership')).toEqual([]);
+  });
+});
+
+describe('OR-list recovery from the raw JD (enrichment-stripped requirements)', () => {
+  it('recovers alternatives from the JD sentence when the requirement lost its such-as list', () => {
+    const tailor = new CVTailor();
+    const cvData = {
+      summary: '', certifications: [], achievements: [], rawText: '',
+      skills: ['MLflow', 'experiment tracking', 'model registry'],
+      experience: [{
+        company: 'DualMind', title: 'MLOps Engineer', dates: '2025 - Present',
+        responsibilities: ['Implemented lifecycle management with DVC and MLflow patterns.'],
+      }],
+    };
+    const jdData = {
+      requiredSkills: ['production experience with ML lifecycle management platforms'],
+      preferredSkills: [], tools: [], softSkills: [],
+      rawText: 'What we look for:\nProduction experience with ML lifecycle management platforms such as MLFlow, Weights & Biases, Neptune.ai, Comet.ml or similar\nOther requirements follow.',
+    };
+    const matchMap = tailor.buildMatchMap(cvData, jdData, []);
+    expect(matchMap[0].status).toBe('strong_match');
   });
 });

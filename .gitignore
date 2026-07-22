@@ -19,6 +19,12 @@ coverage/
 .parcel-cache/
 .vite/
 
+# Playwright
+test-results/
+playwright-report/
+blob-report/
+.last-run.json
+
 # Cursor / IDE
 .cursor/
 .vscode/

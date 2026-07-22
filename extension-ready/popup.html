@@ -645,6 +645,110 @@
       line-height: 1.35;
     }
 
+    .agent-insights {
+      margin-top: 10px;
+      padding: 11px 12px;
+      background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      color: #475569;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    }
+
+    .agent-insights-title {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+      color: #1e293b;
+      font-size: 12px;
+      font-weight: 700;
+      padding-bottom: 8px;
+      border-bottom: 1px solid #e8eef6;
+      margin-bottom: 9px;
+    }
+
+    .agent-insights-summary {
+      cursor: pointer;
+      font-size: 12px;
+      color: #64748b;
+      font-weight: 600;
+      user-select: none;
+      list-style: none;
+    }
+    .agent-insights-summary::before { content: '▸ '; }
+    details[open] > .agent-insights-summary::before { content: '▾ '; }
+    .agent-insights-summary::-webkit-details-marker { display: none; }
+    .tw-details { margin-top: 8px; }
+
+    .agent-insights-title small {
+      color: #8493aa;
+      font-size: 10px;
+      font-weight: 600;
+      line-height: 1.3;
+      text-align: right;
+    }
+
+    .agent-insights-group { margin-top: 9px; }
+
+    .agent-insights-label {
+      color: #8493aa;
+      font-size: 9.8px;
+      font-weight: 700;
+      letter-spacing: 0.55px;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+    }
+
+    .agent-insights-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .agent-chip {
+      max-width: 100%;
+      padding: 4px 8px;
+      background: white;
+      border: 1px solid #dbe3ee;
+      border-radius: 7px;
+      color: #334155;
+      font-size: 11px;
+      font-weight: 600;
+      line-height: 1.25;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .agent-chip-ok { background: #f0fdf4; border-color: #bbf7d0; color: #166534; }
+    .agent-chip-info { background: #eff6ff; border-color: #bfdbfe; color: #1e40af; }
+    .agent-chip-muted { background: white; border-color: #e2e8f0; color: #64748b; }
+    .agent-chip-warn { background: #fffbeb; border-color: #fde68a; color: #92400e; }
+
+    .agent-domain-review {
+      padding: 8px 9px;
+      background: #fffbeb;
+      border: 1px solid #fde68a;
+      border-radius: 8px;
+      color: #92400e;
+    }
+
+    .agent-domain-title {
+      color: #78350f;
+      font-size: 12px;
+      font-weight: 700;
+      margin-bottom: 7px;
+    }
+
+    .agent-domain-prompts {
+      margin: 7px 0 0 16px;
+      padding: 0;
+      color: #92400e;
+      line-height: 1.45;
+    }
+
+    .agent-domain-prompts li { margin: 3px 0; }
+
     .tailor-warning-box {
       margin-top: 10px;
       padding: 10px 12px;
@@ -731,6 +835,7 @@
 
     .tailor-action-secondary .btn-copy {
       flex: 1;
+      width: auto;
       background: #f1f5f9;
       color: #475569;
       border: 1px solid #dbe3ee;
@@ -739,7 +844,14 @@
     .tailor-action-secondary .btn-copy:hover { background: #e2e8f0; }
 
     .tailor-action-secondary .btn-redo {
+      /* .btn sets width:100% for full-width primary buttons. flex:0 0 auto's
+         "auto" basis falls back to that width when flex-basis is auto, and
+         flex-shrink:0 then refuses to shrink from it - so this button hogs
+         space it doesn't need and squeezes .btn-copy into wrapping onto two
+         lines. width:auto here makes it size to its own text instead. */
       flex: 0 0 auto;
+      width: auto;
+      white-space: nowrap;
       padding: 10px 14px;
       background: #f1f5f9;
       color: #475569;
@@ -931,6 +1043,17 @@
       </div>
       <div class="divider"><span>or paste text</span></div>
       <textarea id="cv-text" placeholder="Paste your CV text here…"></textarea>
+      <input id="profile-links" type="text" class="tailor-input" style="margin-top:8px; margin-bottom:8px; width:100%;"
+             placeholder="Profile URLs, comma-separated (LinkedIn, GitHub, portfolio) — optional"
+             title="Application forms often ask for these URLs. PDFs usually carry them as invisible link annotations (or not at all), so saving them here guarantees answers can use them.">
+      <details style="margin:8px 0 10px">
+        <summary style="cursor:pointer;font-size:12px;font-weight:600">Application facts (optional)</summary>
+        <input id="fact-notice" class="tailor-input" style="margin-top:8px;width:100%" placeholder="Notice period">
+        <input id="fact-availability" class="tailor-input" style="margin-top:6px;width:100%" placeholder="Availability / start date">
+        <input id="fact-work-auth" class="tailor-input" style="margin-top:6px;width:100%" placeholder="Work authorization / sponsorship">
+        <input id="fact-relocation" class="tailor-input" style="margin-top:6px;width:100%" placeholder="Relocation / travel preference">
+        <input id="fact-salary" class="tailor-input" style="margin-top:6px;width:100%" placeholder="Salary expectation, including currency and period">
+      </details>
       <button class="btn btn-primary" id="save-cv-btn">Save CV</button>
     </div>
 
@@ -1098,10 +1221,8 @@
             </div>
           </div>
           <div class="match-group" id="match-missing" hidden>
-            <div class="match-group-label match-label-gray">Not found in your CV</div>
-            <div class="missing-skill-help">Tick any skills you genuinely have — they'll be included in the tailored CV.</div>
+            <div class="match-group-label match-label-gray">Not in your CV</div>
             <div class="match-chips" id="match-missing-chips"></div>
-            <div class="trust-note">Only used for this tailored CV. Not saved for training.</div>
           </div>
           <div class="match-group" id="match-domain" hidden>
             <div class="match-group-label match-label-purple">Also common in this domain</div>
@@ -1109,6 +1230,8 @@
             <div class="match-chips" id="match-domain-chips"></div>
           </div>
         </div>
+
+        <div id="tailor-agent-insights" class="agent-insights" hidden></div>
 
         <div id="tailor-warnings-box" class="tailor-warning-box" hidden></div>
 

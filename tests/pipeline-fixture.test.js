@@ -154,11 +154,25 @@ describe('pipeline fixture — matchMap', () => {
     expect(matchMap.length).toBeGreaterThanOrEqual(5);
   });
 
-  it('marks AWS / cloud as supported (direct evidence in CV)', () => {
+  it('authorizes an OR-list cloud requirement via one evidenced alternative (AWS)', () => {
+    // "cloud platforms (AWS, GCP, or Azure)" is an OR-list: AWS in the CV
+    // legitimately satisfies it. Treating the list as a conjunction was the
+    // root cause of absurdly low match scores for well-qualified candidates.
     const { matchMap } = buildFixturePipeline();
     const awsEntry = matchMap.find(m => /aws|cloud/i.test(m.requirement));
     expect(awsEntry).toBeTruthy();
     expect(awsEntry.allowedToMention).toBe(true);
+  });
+
+  it('does not authorize an OR-list requirement when no alternative is evidenced', () => {
+    const tailor = new CVTailor();
+    const { cvData } = buildFixturePipeline();
+    const matchMap = tailor.buildMatchMap(cvData, {
+      requiredSkills: ['Production experience with data warehouses such as Snowflake, BigQuery, Redshift or similar'],
+      preferredSkills: [], tools: [], softSkills: [],
+    }, []);
+    expect(matchMap[0].status).toBe('missing');
+    expect(matchMap[0].allowedToMention).toBe(false);
   });
 
   it('marks Salesforce as supported (CV and JD both mention it)', () => {
@@ -168,12 +182,12 @@ describe('pipeline fixture — matchMap', () => {
     expect(sfEntry.allowedToMention).toBe(true);
   });
 
-  it('marks pre-sales / presales requirement as supported via semantic match', () => {
+  it('does not combine separate sources or semantic aliases to authorize a compound requirement', () => {
     const { matchMap } = buildFixturePipeline();
     // JD mentions "pre-sales or solutions engineering"; CV has "pre-sales cycles"
     const presalesEntry = matchMap.find(m => /pre.?sales|solution/i.test(m.requirement));
     expect(presalesEntry).toBeTruthy();
-    expect(presalesEntry.allowedToMention).toBe(true);
+    expect(presalesEntry.allowedToMention).toBe(false);
   });
 
   it('calcMatchStrength returns strong or moderate for a well-matched CV', () => {
@@ -256,9 +270,11 @@ describe('pipeline fixture — recipe buildPrompts', () => {
     expect(result.systemPrompt).toMatch(/MATCH LEVEL:/i);
   });
 
-  it('includes the requirements bridge (supported JD requirements) in the user prompt', () => {
+  it('injects a requirements bridge now that the OR-list cloud requirement is supported', () => {
+    // Under OR-list semantics the fixture's "cloud platforms (AWS, GCP, or
+    // Azure), REST APIs" requirement is directly supported via AWS, so the
+    // prompt legitimately surfaces it as a proof point.
     const result = buildAnswerPrompts('Tell me about a time you managed a complex technical implementation for an enterprise customer.');
-    // Requirements bridge starts with "JD REQUIREMENTS YOUR BACKGROUND COVERS"
     expect(result.userPrompt).toMatch(/JD REQUIREMENTS YOUR BACKGROUND COVERS/i);
   });
 

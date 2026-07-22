@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-07-08",
+  "sources": [
+    {
+      "id": "onet",
+      "name": "O*NET Database",
+      "country": "US",
+      "cadence": "quarterly",
+      "officialLandingUrl": "https://www.onetcenter.org/database.html",
+      "license": "CC BY 4.0",
+      "attribution": "O*NET Resource Center by the U.S. Department of Labor, Employment and Training Administration (USDOL/ETA). O*NET is a trademark of USDOL/ETA.",
+      "expectedRawFiles": [],
+      "refreshNotes": "Use O*NET downloadable tab-delimited or SQL files for occupation titles, skills, knowledge, education/training, work context, tasks, and tools. Keep derived data compact.",
+      "runtimeUse": "General occupation intelligence, sparse JD enrichment, expected skills/tasks/tools, and job-zone strictness hints."
+    },
+    {
+      "id": "esco",
+      "name": "European Skills, Competences, Qualifications and Occupations",
+      "country": "EU",
+      "cadence": "quarterly",
+      "officialLandingUrl": "https://esco.ec.europa.eu/en/use-esco/download",
+      "license": "European Commission open data terms; API software is EUPL 1.2 with Apache 2.0 components",
+      "attribution": "European Commission ESCO classification.",
+      "expectedRawFiles": [],
+      "refreshNotes": "Use selected CSV/JSON-LD exports for occupation and skill aliases. Do not ship full raw exports unless needed.",
+      "runtimeUse": "Multilingual occupation/skill aliases and non-US occupation matching."
+    },
+    {
+      "id": "nist-nice",
+      "name": "NIST NICE Workforce Framework for Cybersecurity",
+      "country": "US",
+      "cadence": "quarterly",
+      "officialLandingUrl": "https://www.nist.gov/itl/applied-cybersecurity/nice/nice-framework-resource-center/nice-framework-current-versions",
+      "license": "U.S. government public information; verify downloaded file notices",
+      "attribution": "National Institute of Standards and Technology NICE Framework.",
+      "expectedRawFiles": [],
+      "refreshNotes": "Use NICE component JSON/XLSX for work roles, task, knowledge, and skill statements.",
+      "runtimeUse": "Cybersecurity work-role mapping and strict handling for clearance/security-sensitive work."
+    },
+    {
+      "id": "openalex",
+      "name": "OpenAlex",
+      "country": "Global",
+      "cadence": "quarterly",
+      "officialLandingUrl": "https://developers.openalex.org/",
+      "license": "CC0 for complete dataset",
+      "attribution": "OpenAlex by OurResearch.",
+      "expectedRawFiles": [],
+      "refreshNotes": "Prefer small curated helpers or consented API lookup by ORCID/name. Do not ship large snapshots by default.",
+      "runtimeUse": "Academic/research CV mode: publications, venues, topics, institutions, funders, and author identifiers."
+    },
+    {
+      "id": "faa-airmen",
+      "name": "FAA Airmen Certification Downloadable Database",
+      "country": "US",
+      "cadence": "monthly",
+      "officialLandingUrl": "https://www.faa.gov/licenses_certificates/airmen_certification/releasable_airmen_download",
+      "license": "U.S. government public information; verify FAA file notices",
+      "attribution": "Federal Aviation Administration Airmen Certification data.",
+      "expectedRawFiles": [],
+      "refreshNotes": "Use certificate category references only unless a user explicitly consents to identifier lookup. Medical data is not authoritative.",
+      "runtimeUse": "Aviation certificate/rating detection and strict no-claim-without-evidence handling."
+    },
+    {
+      "id": "cms-nppes",
+      "name": "CMS NPPES / NPI Registry",
+      "country": "US",
+      "cadence": "monthly",
+      "officialLandingUrl": "https://npiregistry.cms.hhs.gov/",
+      "license": "U.S. government public information; verify CMS data dissemination terms",
+      "attribution": "Centers for Medicare & Medicaid Services NPPES/NPI data.",
+      "expectedRawFiles": [],
+      "refreshNotes": "Use provider taxonomy/category references by default. Do not treat taxonomy as professional license verification.",
+      "runtimeUse": "Healthcare role classification and strict credential confirmation prompts."
+    }
+  ]
+}

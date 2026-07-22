@@ -31,6 +31,10 @@ class DraftApplyExtension {
     this._contextRefreshTimer = null;
     this._pageContextKey = null;
     this._lastChunkTime = 0; // epoch ms; updated on each STREAM_CHUNK for watchdog
+    this.answerValidation = null;
+    this.answerValidationRequestId = null;
+    this.answerUserEdited = false;
+    this.reviewAcknowledged = false;
 
     this.init();
   }
@@ -282,6 +286,7 @@ class DraftApplyExtension {
           <img class="da-modal-logo" src="${chrome.runtime.getURL('icons/icon128.png')}" alt="">
           <span class="da-header-name">DraftApply</span>
           <span class="da-context-badge" id="da-context-badge">No context</span>
+          <span class="da-model-badge" id="da-model-badge" hidden></span>
           <button class="da-modal-close" type="button" aria-label="Close">&times;</button>
         </div>
         <div class="da-modal-body">
@@ -298,6 +303,8 @@ class DraftApplyExtension {
           <div class="da-answer-label">Generated Answer <span id="da-char-hint" class="da-char-hint"></span></div>
           <textarea class="da-answer-output" id="da-answer-output" placeholder="Your answer will appear here. You can edit it before inserting."></textarea>
           <div id="da-char-counter" class="da-char-counter" hidden></div>
+          <div id="da-verify-badge" class="da-verify-badge" hidden></div>
+          <div id="da-agent-insights" class="da-agent-insights" hidden></div>
           <input type="hidden" id="da-length-select" value="medium">
           <input type="hidden" id="da-tone-select" value="natural">
         </div>
@@ -323,7 +330,7 @@ class DraftApplyExtension {
           <div class="da-modal-actions-row">
             <button class="da-btn da-btn-regenerate" id="da-btn-regenerate">Regenerate</button>
             <button class="da-btn da-btn-copy" id="da-btn-copy">Copy</button>
-            <button class="da-btn da-btn-insert" id="da-btn-insert">Insert Answer</button>
+            <button class="da-btn da-btn-insert" id="da-btn-insert" disabled>Insert Answer</button>
           </div>
         </div>
         <div class="da-loading" id="da-loading" hidden role="status" aria-label="Generating answer">
@@ -376,8 +383,26 @@ class DraftApplyExtension {
       modal.querySelector('#da-tone-select').value = pill.dataset.value;
     };
 
-    // Live character counter — only active when field has a maxLength
+    // Live character counter — only active when field has a maxLength.
+    // A manual edit makes the answer the USER'S text: the grounding gate
+    // exists to stop the model fabricating on their behalf, not to stop a
+    // person typing their own answer. Edited answers are insertable (within
+    // the field's character limit); only unedited ungrounded model output
+    // stays blocked.
     modal.querySelector('#da-answer-output').addEventListener('input', () => {
+      this.answerUserEdited = true;
+      if (this.answerValidation) {
+        this.answerValidation = null;
+        this.reviewAcknowledged = false;
+        this.lastAnswer = null;
+      }
+      const text = String(this.modal?.querySelector?.('#da-answer-output')?.value || '').trim();
+      const overLimit = Boolean(this.currentFieldMaxLength && text.length > this.currentFieldMaxLength);
+      const insertButton = this.modal?.querySelector?.('#da-btn-insert');
+      if (insertButton) {
+        insertButton.disabled = !text || overLimit;
+        insertButton.textContent = overLimit ? 'Over Character Limit' : 'Insert (Your Edit)';
+      }
       this._updateCharCounter();
     });
     
@@ -420,38 +445,40 @@ class DraftApplyExtension {
     this.updateContextBadge();
   }
 
-  updateContextBadge() {
+  updateContextBadge(contextOverride = null) {
     if (!this.modal) return;
     const badge = this.modal.querySelector('#da-context-badge');
     const info = this.modal.querySelector('#da-context-info');
     
-    const quality = this.pageContext?.contextQuality;
-    const hasRealContext = quality === 'structured' || quality === 'heuristic';
+    const context = contextOverride || this.pageContext || {};
+    const quality = context.contextQuality;
+    const hasRealContext = quality === 'structured' || quality === 'heuristic' || quality === 'saved' || quality === 'user_provided';
     const hasNoisyContext = quality === 'fullpage';
 
     if (hasRealContext) {
-      badge.textContent = '✓ Job context detected';
+      badge.textContent = quality === 'saved'
+        ? '✓ Full JD (saved)'
+        : quality === 'user_provided'
+          ? '✓ Full JD (pasted)'
+          : '✓ Detected JD';
       badge.className = 'da-context-badge da-badge-success';
       info.className = 'da-context-info';
 
       // Avoid innerHTML: page content is untrusted
       info.replaceChildren();
       const strong = document.createElement('strong');
-      strong.textContent = this.pageContext.jobTitle || 'Job';
+      strong.textContent = context.jobTitle || 'Job';
       info.appendChild(strong);
 
-      if (this.pageContext.company) {
-        info.appendChild(document.createTextNode(' at ' + this.pageContext.company));
+      if (context.company) {
+        info.appendChild(document.createTextNode(' at ' + context.company));
       }
 
-      const meta = document.createElement('span');
-      meta.className = 'da-context-meta';
-      const reqCount = this.pageContext.requirements?.length ?? 0;
-      const jdLen = Math.round((this.pageContext.jobDescription?.length ?? 0) / 100) * 100;
-      meta.textContent = `${reqCount} requirements detected • ${jdLen}+ chars`;
-      info.appendChild(meta);
+      // One line is enough: the job title (and company) tells the user their
+      // answers are tailored. Requirement counts and character tallies are
+      // parser telemetry, not applicant-facing information.
     } else if (hasNoisyContext) {
-      badge.textContent = '⚠ Partial context';
+      badge.textContent = '⚠ Partial JD';
       badge.className = 'da-context-badge da-badge-warning';
       info.className = 'da-context-info da-context-warning';
       info.replaceChildren();
@@ -464,7 +491,7 @@ class DraftApplyExtension {
       pasteBtn.onclick = () => this._showJdPasteArea();
       info.append(warnMsg, document.createTextNode(' '), pasteBtn);
     } else {
-      badge.textContent = 'No context';
+      badge.textContent = 'No JD';
       badge.className = 'da-context-badge';
       info.className = 'da-context-info da-context-none';
       info.replaceChildren();
@@ -569,24 +596,22 @@ class DraftApplyExtension {
       }
 
       if (message.type === 'STREAM_CHUNK') {
-        if (this.currentRequestId === message.requestId) {
-          this._lastChunkTime = Date.now(); // keep watchdog alive
-          const output = this.modal?.querySelector?.('#da-answer-output');
-          if (output) {
-            // Hide loading overlay on first chunk so text is visible as it streams
-            const loading = this.modal?.querySelector?.('#da-loading');
-            if (loading && !loading.hidden) loading.hidden = true;
-            output.value += message.chunk;
-            output.scrollTop = output.scrollHeight;
-          }
-        }
+        // Capability-v2 providers never expose unvalidated answer deltas.
         return;
       }
 
       if (message.type === 'STREAM_META') {
         if (this.currentRequestId === message.requestId) {
+          this._lastChunkTime = Date.now();
+          this.renderModelBadge(message);
           this._showFallbackNotice(message);
+          this.renderAgentInsights(message.agentInsights || message);
         }
+        return;
+      }
+
+      if (message.type === 'STREAM_PROGRESS') {
+        if (this.currentRequestId === message.requestId) this._lastChunkTime = Date.now();
         return;
       }
 
@@ -596,6 +621,18 @@ class DraftApplyExtension {
           resolver.resolve();
           this._streamResolvers.delete(message.requestId);
         }
+        return;
+      }
+
+      if (message.type === 'STREAM_FINAL') {
+        if (this.currentRequestId !== message.requestId) return;
+        this._lastChunkTime = Date.now();
+        const output = this.modal?.querySelector?.('#da-answer-output');
+        if (output && typeof message.answer === 'string') output.value = message.answer;
+        this._setAnswerValidation(message.validation, message.requestId);
+        this.renderModelBadge(message);
+        this.renderAgentInsights(message.pipelineInsights || message.agentInsights || message);
+        this._updateCharCounter();
         return;
       }
 
@@ -686,14 +723,14 @@ class DraftApplyExtension {
           // fallback for React re-renders that replaced the DOM element.
           const cacheKey = this.answerCacheKey(question);
           const cached = this._prefetchCache.get(field);
-          const cachedAnswer = (cached?.status === 'ready' && cached.question === question && cached.cacheKey === cacheKey)
-            ? cached.answer
+          const cachedResult = (cached?.status === 'ready' && cached.question === question && cached.cacheKey === cacheKey)
+            ? cached.result
             : this._prefetchByQuestion.get(cacheKey);
-          if (cachedAnswer) {
+          if (cachedResult?.answer) {
             this.showModal(question);
             const output = this.modal.querySelector('#da-answer-output');
-            output.value = cachedAnswer;
-            this.lastAnswer = cachedAnswer;
+            output.value = cachedResult.answer;
+            this._setAnswerValidation(cachedResult.validation, null);
             this.lastQuestion = question;
             // Remove ready indicator from button
             btn.classList.remove('da-btn-ready');
@@ -1025,6 +1062,7 @@ class DraftApplyExtension {
         company: ctx.company || undefined,
         jobDescription,
         requirements: (ctx.requirements?.length > 0) ? ctx.requirements : undefined,
+        contextQuality: ctx.contextQuality,
       };
     }
 
@@ -1049,6 +1087,7 @@ class DraftApplyExtension {
         company: ctx.company || tailorCvDraft.company?.trim() || undefined,
         jobDescription: draftJobDescription,
         requirements: undefined,
+        contextQuality: 'saved',
       };
     } catch (_) {
       return {
@@ -1058,6 +1097,39 @@ class DraftApplyExtension {
         requirements: undefined,
       };
     }
+  }
+
+  _questionNeedsJobContext(question = '') {
+    const q = String(question || '').toLowerCase().trim();
+    return !(
+      /^(full\s*)?name\b|^(first|last|middle|preferred|legal)\s*name\b/.test(q) ||
+      /^(e-?mail|phone|mobile|cell|address|city|state|country|postal|zip|location)\b/.test(q) ||
+      /\b(linkedin|github|gitlab|portfolio|website|behance|dribbble|kaggle|stack\s*overflow|twitter|x\.com)\b/.test(q) ||
+      /\b(notice period|availability|start date|work authori[sz]ation|right to work|visa|sponsorship|salary|compensation|pay rate)\b/.test(q)
+    );
+  }
+
+  // The CV file's hyperlink annotations (a "LinkedIn" link whose URL lives in
+  // the PDF's annotation layer, not its text) are part of the CV's facts.
+  // Older saved CVs may lack the extracted "Links:" block in their text, so
+  // answers reported the LinkedIn URL as "not found" even though the
+  // annotation was in storage. Merge any URL the text doesn't already
+  // contain, near the header so context truncation can never drop it.
+  _cvTextWithLinks(cvResponse) {
+    const text = String(cvResponse?.cvText || '');
+    const annotations = Array.isArray(cvResponse?.linkAnnotations) ? cvResponse.linkAnnotations : [];
+    const missing = annotations.filter(a => a?.url && !text.includes(a.url));
+    if (missing.length === 0) return text;
+    const lines = text.split('\n');
+    lines.splice(Math.min(3, lines.length), 0, ...missing.map(a =>
+      (a.text && !/^https?:/i.test(a.text)) ? `${a.text}: ${a.url}` : a.url));
+    return lines.join('\n');
+  }
+
+  _confirmedFacts(cvResponse) {
+    return Object.entries(cvResponse?.applicationFacts || {})
+      .filter(([, value]) => String(value || '').trim())
+      .map(([key, value]) => `${key}: ${String(value).trim()}`);
   }
 
   async _startPrefetch(field) {
@@ -1075,20 +1147,24 @@ class DraftApplyExtension {
     const ctx = this.pageContext || {};
     const cacheKey = this.answerCacheKey(question, ctx);
     const jobContextForPayload = await this._jobContextForPayload(ctx);
+    this.updateContextBadge(jobContextForPayload);
+    if (!jobContextForPayload.jobDescription && this._questionNeedsJobContext(question)) return;
     const fieldMaxLen = (field.maxLength > 0) ? field.maxLength : null;
     const payload = {
       question,
       length: this._inferLengthFromField(field) || 'medium',
       tone:   'natural',
-      cvText:         cvResponse.cvText,
+      cvText:         this._cvTextWithLinks(cvResponse),
+      confirmedFacts: this._confirmedFacts(cvResponse),
       jobTitle:       jobContextForPayload.jobTitle,
       company:        jobContextForPayload.company,
       jobDescription: jobContextForPayload.jobDescription,
       requirements:   jobContextForPayload.requirements,
+      jdContextQuality: jobContextForPayload.contextQuality || 'none',
       maxChars:       fieldMaxLen || undefined,
     };
 
-    const cacheEntry = { status: 'loading', question, cacheKey, answer: null };
+    const cacheEntry = { status: 'loading', question, cacheKey, result: null };
     this._prefetchCache.set(field, cacheEntry);
     if (btn?.isConnected) btn.classList.add('da-btn-prefetching');
 
@@ -1099,12 +1175,13 @@ class DraftApplyExtension {
         if (btn?.isConnected) btn.classList.remove('da-btn-prefetching', 'da-btn-ready');
         return;
       }
-      cacheEntry.answer = result?.answer || result?.text || result?.content || null;
-      cacheEntry.status = cacheEntry.answer ? 'ready' : 'error';
+      const answer = result?.answer || result?.text || result?.content || null;
+      cacheEntry.result = answer ? { ...result, answer } : null;
+      cacheEntry.status = answer && ['pass', 'review'].includes(result?.validation?.status) ? 'ready' : 'error';
       // Also store by question string so re-rendered React fields can still hit the cache.
       // Cap at 20 entries (LRU-evict oldest) to prevent unbounded memory growth.
-      if (cacheEntry.answer) {
-        this._prefetchByQuestion.set(cacheKey, cacheEntry.answer);
+      if (cacheEntry.status === 'ready') {
+        this._prefetchByQuestion.set(cacheKey, cacheEntry.result);
         if (this._prefetchByQuestion.size > 20) {
           this._prefetchByQuestion.delete(this._prefetchByQuestion.keys().next().value);
         }
@@ -1210,6 +1287,9 @@ class DraftApplyExtension {
     loading.hidden = false;
     stopBtn.disabled = false;
     output.value = '';
+    this._setAnswerValidation(null, null);
+    this.renderAgentInsights(null);
+    this.renderModelBadge(null);
     if (statusEl) statusEl.textContent = 'Generating answer...';
 
     const startTime = Date.now();
@@ -1237,15 +1317,23 @@ class DraftApplyExtension {
       const ctx = this.pageContext || {};
       // Prefer reliable page context, then fall back to the user's saved Tailor JD.
       const jobContextForPayload = await this._jobContextForPayload(ctx);
+      this.updateContextBadge(jobContextForPayload);
+      if (!jobContextForPayload.jobDescription && this._questionNeedsJobContext(question)) {
+        output.value = 'A job description is required for a tailored answer. Paste the JD above, then generate again.';
+        this._showJdPasteArea();
+        return;
+      }
       const structuredPayload = {
         question,
         length,
         tone,
-        cvText:         cvResponse.cvText,
+        cvText:         this._cvTextWithLinks(cvResponse),
+        confirmedFacts: this._confirmedFacts(cvResponse),
         jobTitle:       jobContextForPayload.jobTitle,
         company:        jobContextForPayload.company,
         jobDescription: jobContextForPayload.jobDescription,
         requirements:   jobContextForPayload.requirements,
+        jdContextQuality: jobContextForPayload.contextQuality || 'none',
         pageUrl:        ctx.url || window.location.href,
         platform:       ctx.platform || undefined,
         maxChars:       this.currentFieldMaxLength || undefined,
@@ -1288,10 +1376,12 @@ class DraftApplyExtension {
         });
         if (this.currentRequestId !== requestId) return;
         if (fallback?.answer) {
-          output.value = this._applyCharLimit(fallback.answer);
-          this.lastAnswer = output.value;
+          output.value = fallback.answer;
+          this._setAnswerValidation(fallback.validation, requestId);
           this._updateCharCounter();
           this._showFallbackNotice(fallback);
+          this.renderModelBadge(fallback);
+          this.renderAgentInsights(fallback.agentInsights || fallback);
         } else if (fallback?.error) {
           output.value = `Error: ${fallback.error}`;
         } else {
@@ -1328,9 +1418,7 @@ class DraftApplyExtension {
       if (this.currentRequestId !== requestId) return; // Stale — newer request took over
 
       const answer = output.value.trim();
-      if (answer) {
-        output.value = this._applyCharLimit(answer);
-        this.lastAnswer = output.value;
+      if (answer && this.answerValidation) {
         this._updateCharCounter();
       } else {
         // No chunks received — proxy may not support SSE or buffered the response.
@@ -1344,10 +1432,12 @@ class DraftApplyExtension {
         if (this.currentRequestId !== requestId) return; // cancelled while falling back
 
         if (fallback?.answer) {
-          output.value = this._applyCharLimit(fallback.answer);
-          this.lastAnswer = output.value;
+          output.value = fallback.answer;
+          this._setAnswerValidation(fallback.validation, requestId);
           this._updateCharCounter();
           this._showFallbackNotice(fallback);
+          this.renderModelBadge(fallback);
+          this.renderAgentInsights(fallback.agentInsights || fallback);
         } else if (fallback?.error) {
           output.value = `Error: ${fallback.error}`;
         } else {
@@ -1386,11 +1476,123 @@ class DraftApplyExtension {
     await this.generateAnswer(question);
   }
 
-  _showFallbackNotice(result) {
-    if (result?.provider === 'openrouter' && result?.fallbackFrom === 'groq') {
-      const model = result.model ? `: ${result.model}` : '';
-      this.showNotification(`Groq is busy, so DraftApply used OpenRouter fallback${model}.`);
+  _showFallbackNotice() {
+    // Provider fallback is invisible to the user by design: which engine
+    // produced the answer is an internal concern, and the quality gates are
+    // identical on both paths.
+  }
+
+  // Provider/model names are pipeline internals, not applicant-facing
+  // information — the header stays clean. Details remain available in the
+  // background logs and API metadata.
+  renderModelBadge() {
+    const badge = this.modal?.querySelector('#da-model-badge');
+    if (!badge) return;
+    badge.hidden = true;
+    badge.textContent = '';
+    badge.className = 'da-model-badge';
+    badge.removeAttribute('title');
+  }
+
+  renderAgentInsights(insights) {
+    const box = this.modal?.querySelector('#da-agent-insights');
+    if (!box) return;
+
+    const evidence = Array.isArray(insights?.evidence) ? insights.evidence : [];
+    const matched = Array.isArray(insights?.matchedRequirements) ? insights.matchedRequirements : [];
+    const domainRisk = insights?.domainRisk || insights?.truthfulnessReport?.domainRisk;
+
+    if (evidence.length === 0 && matched.length === 0 && !domainRisk) {
+      box.hidden = true;
+      box.textContent = '';
+      return;
     }
+
+    // Everything below is supporting detail, not the primary path. It lives
+    // inside a collapsed disclosure; the always-visible surface is only the
+    // verification badge rendered by _setAnswerValidation. Internal
+    // vocabulary (workflow names, stage counts, grounding tallies) is not
+    // shown at all.
+    const parts = [];
+
+    const seenEvidence = new Set();
+    const uniqueEvidence = evidence.filter(item => {
+      const key = `${item.label || item.type || ''}|${item.text || ''}`.toLowerCase();
+      if (seenEvidence.has(key)) return false;
+      seenEvidence.add(key);
+      return true;
+    });
+    if (uniqueEvidence.length > 0) {
+      parts.push(`
+        <div class="da-agent-section">
+          <div class="da-agent-label">Based on</div>
+          <div class="da-agent-chips">
+            ${uniqueEvidence.map(item => `
+              <span class="da-agent-chip" title="${this.escapeHtml(item.text || '')}">
+                ${this.escapeHtml(item.label || item.type || 'Evidence')}
+              </span>
+            `).join('')}
+          </div>
+        </div>`);
+    }
+
+    const supportedMatches = matched.filter(item => item.supported);
+    if (supportedMatches.length > 0) {
+      parts.push(`
+        <div class="da-agent-section">
+          <div class="da-agent-label">Speaks to</div>
+          <div class="da-agent-chips">
+            ${supportedMatches.map(item => `
+              <span class="da-agent-chip da-agent-chip-ok">
+                ${this.escapeHtml(item.requirement || '')}
+              </span>
+            `).join('')}
+          </div>
+        </div>`);
+    }
+
+    if (domainRisk?.detected) {
+      const profile = domainRisk.primaryProfile?.label || 'Domain review';
+      const prompts = Array.isArray(domainRisk.reviewPrompts) ? domainRisk.reviewPrompts : [];
+      const warnings = Array.isArray(domainRisk.credentialWarnings) ? domainRisk.credentialWarnings : [];
+      parts.push(`
+        <div class="da-agent-section da-agent-domain">
+          <div class="da-agent-label">Domain review</div>
+          <div class="da-agent-domain-line">
+            <strong>${this.escapeHtml(profile)}</strong>${domainRisk.primaryProfile?.riskLevel ? ` · ${this.escapeHtml(domainRisk.primaryProfile.riskLevel)}` : ''}
+          </div>
+          ${warnings.length > 0 ? `
+            <div class="da-agent-chips">
+              ${warnings.flatMap(item => item.missingCredentials || []).slice(0, 4).map(item => `
+                <span class="da-agent-chip da-agent-chip-warn">${this.escapeHtml(item)}</span>
+              `).join('')}
+            </div>` : ''}
+          ${prompts.length > 0 ? `
+            <ul class="da-agent-domain-prompts">
+              ${prompts.slice(0, 3).map(item => `<li>${this.escapeHtml(item)}</li>`).join('')}
+            </ul>` : ''}
+        </div>`);
+    }
+
+    if (parts.length === 0) {
+      box.hidden = true;
+      box.textContent = '';
+      return;
+    }
+    box.innerHTML = `
+      <details class="da-agent-details">
+        <summary class="da-agent-summary">Details</summary>
+        ${parts.join('')}
+      </details>`;
+    box.hidden = false;
+  }
+
+  escapeHtml(value) {
+    return String(value || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
   }
 
   async copyAnswer() {
@@ -1612,8 +1814,27 @@ class DraftApplyExtension {
     const answerToInsert = current || this.lastAnswer;
     const insertBtn = this.modal?.querySelector?.('#da-btn-insert');
 
+    // Text the user edited is their own answer — insertable as-is (within
+    // the field's character limit). For model output, grounded ('pass') and
+    // review-state answers insert directly; only an answer the validator
+    // found unsupported by the CV is stopped, with a plain explanation
+    // instead of a persistent blocked state.
+    const isUserEdit = this.answerUserEdited && Boolean(current);
+    const modelStatus = this.answerValidation?.status;
+    if (!isUserEdit
+        && (!this.answerValidation || answerToInsert !== this.validatedAnswer
+          || (modelStatus !== 'pass' && modelStatus !== 'review'))) {
+      this.showNotification('This answer includes things DraftApply could not verify from your CV. Edit it into your own words, or regenerate.', 'error');
+      return;
+    }
+
     if (!answerToInsert) {
       this.showNotification('No answer to insert yet.', 'error');
+      return;
+    }
+
+    if (isUserEdit && this.currentFieldMaxLength && answerToInsert.length > this.currentFieldMaxLength) {
+      this.showNotification(`Your answer is ${answerToInsert.length} characters; the field allows ${this.currentFieldMaxLength}. Shorten it to insert.`, 'error');
       return;
     }
 
@@ -1673,6 +1894,47 @@ class DraftApplyExtension {
     }
   }
 
+  _setAnswerValidation(validation, requestId) {
+    if (requestId && this.currentRequestId && requestId !== this.currentRequestId) return;
+    this.answerValidation = validation || null;
+    this.validatedAnswer = validation
+      ? String(this.modal?.querySelector?.('#da-answer-output')?.value || '').trim()
+      : null;
+    this.answerValidationRequestId = requestId;
+    this.answerUserEdited = false;
+    const button = this.modal?.querySelector?.('#da-btn-insert');
+    if (!button) return;
+    const status = validation?.status;
+    const hasAnswer = Boolean(this.modal?.querySelector?.('#da-answer-output')?.value?.trim());
+    // The button stays a plain "Insert Answer" in every state — validation
+    // state lives in the compact badge, not in alarming button labels.
+    // Grounded and review-state answers insert directly (the user is looking
+    // at the text); only an ungrounded answer is stopped, at click time.
+    button.disabled = !hasAnswer;
+    button.textContent = 'Insert Answer';
+    this._renderVerifyBadge(status);
+    this.lastAnswer = status === 'pass' || status === 'review'
+      ? String(this.modal?.querySelector?.('#da-answer-output')?.value || '')
+      : null;
+  }
+
+  _renderVerifyBadge(status) {
+    const badge = this.modal?.querySelector?.('#da-verify-badge');
+    if (!badge) return;
+    if (status === 'pass') {
+      badge.textContent = '✓ Checked against your CV';
+      badge.className = 'da-verify-badge da-verify-ok';
+      badge.hidden = false;
+    } else if (status === 'review' || status === 'block') {
+      badge.textContent = '⚠ Read this one before inserting';
+      badge.className = 'da-verify-badge da-verify-warn';
+      badge.hidden = false;
+    } else {
+      badge.hidden = true;
+      badge.textContent = '';
+    }
+  }
+
   async copyToClipboard() {
     const output = this.modal?.querySelector?.('#da-answer-output');
     const text = output?.value?.trim() || this.lastAnswer;
@@ -1713,7 +1975,7 @@ class DraftApplyExtension {
         'heuristic'
       );
     }
-    nextContext.contextQuality = 'heuristic';
+    nextContext.contextQuality = 'user_provided';
     this.setPageContext(nextContext);
     area.hidden = true;
     this.updateContextBadge();

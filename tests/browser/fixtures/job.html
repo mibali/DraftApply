@@ -1,0 +1,22 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Senior Engineer at Acme</title></head>
+<body>
+  <main>
+    <h1>Senior Software Engineer</h1><h2>Acme Corporation</h2>
+    <!-- class="job-description" and >200 chars of body copy match
+         page-extractor.js's real selector/length heuristics, so this
+         resolves to contextQuality "heuristic" like an actual ATS page -
+         a short, unclassed snippet only reaches the low-confidence
+         "fullpage" tier, which content.js now deliberately treats as not
+         reliable enough to answer JD-dependent questions without prompting
+         the user to paste the JD themselves. -->
+    <section class="job-description">
+      <h2>Job description</h2>
+      <p>Build deterministic browser tooling using JavaScript and distributed systems. You will own reliable
+      automation for high-traffic browser extensions, working closely with the platform team to keep
+      end-to-end tests fast and trustworthy across every supported job board.</p>
+    </section>
+    <label for="application-answer">Why are you a good fit?</label>
+    <textarea id="application-answer" name="applicationAnswer" style="width:500px;height:120px"></textarea>
+  </main>
+</body></html>

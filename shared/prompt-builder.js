@@ -1,3 +1,5 @@
+import { classifyApplicationQuestion } from './question-classifier.js';
+
 /**
  * Prompt Builder Module
  *
@@ -184,6 +186,14 @@ export class PromptBuilder {
    * Detect the type of question being asked
    */
   detectQuestionType(question) {
+    const shared = classifyApplicationQuestion(question).type;
+    if (shared === 'data_extraction' && /linkedin|github|gitlab|portfolio|website|behance|dribbble|kaggle|stack\s*overflow|twitter|x\.com/i.test(question)) return 'profile_url';
+    if (shared === 'personal_factual' || shared === 'sensitive_voluntary' || shared === 'short_factual') return 'short_factual';
+    if (shared === 'technical') return 'technical';
+    return shared;
+    /* Legacy patterns retained temporarily for source compatibility; runtime
+       classification above is authoritative. */
+    /* c8 ignore start */
     const lowerQuestion = question.toLowerCase().trim();
 
     // Short standalone platform labels on application forms (e.g. "LinkedIn", "GitHub")
@@ -207,6 +217,7 @@ export class PromptBuilder {
     }
 
     return 'general';
+    /* c8 ignore stop */
   }
 
   /**

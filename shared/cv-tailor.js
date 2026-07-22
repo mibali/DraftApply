@@ -1,10 +1,28 @@
 import { createRequire } from 'module';
 import { RoleProfileService } from './role-profile-service.js';
+import { buildGroundingContext, isTextSupported } from './grounding-harness.js';
 
 const _require = createRequire(import.meta.url);
 const _semanticConceptGroups = _require('./data-sources/semantic-concepts.json');
 
 export class CVTailor {
+  // Application-owned vocabulary for competency category labels. Model
+  // output outside this list is coerced to 'Relevant Skills' so a model can
+  // never smuggle an employer, credential, or instruction into a heading.
+  static COMPETENCY_LABELS = [
+    'Relevant Skills', 'Technical Skills', 'Professional Skills', 'Core Skills', 'Additional Tools & Skills',
+    'Cloud', 'Cloud Platforms', 'Cloud & Infrastructure', 'Infrastructure as Code', 'DevOps & Delivery',
+    'Programming', 'Programming & Automation', 'Software Engineering', 'Backend & APIs', 'Integration & APIs',
+    'Data & Analytics', 'Databases & Data', 'Data Quality & Validation', 'AI & Machine Learning', 'Research & Methods',
+    'Observability & Monitoring', 'Security', 'Customer Support', 'Customer Success', 'Stakeholder Engagement',
+    'Pre-Sales Execution', 'Solution Architecture', 'Project Delivery', 'Leadership', 'Communication',
+    'MLOps & ML Lifecycle', 'Model Serving & Infrastructure', 'ML Infrastructure', 'Machine Learning',
+    'CI/CD & Automation', 'Orchestration & GitOps', 'Containers & Kubernetes', 'Platform Engineering',
+    'Data Engineering', 'Reliability & Operations', 'Incident Management', 'Networking',
+    'Testing & Quality', 'Automation & Tooling', 'Monitoring & Observability', 'Tools & Platforms',
+    'AI Enablement', 'GenAI & LLM Tooling', 'Knowledge Management', 'Documentation & Enablement',
+  ];
+
   constructor(roleProfiles = new RoleProfileService()) {
     this.roleProfiles = roleProfiles;
   }
@@ -16,9 +34,7 @@ export class CVTailor {
   buildMatchMap(cvData, jdData, confirmedSkills = []) {
     const cvText = cvData.rawText || '';
     const cvLower = cvText.toLowerCase();
-    const confirmedEntries = (Array.isArray(confirmedSkills) ? confirmedSkills : [])
-      .map(skill => String(skill || '').trim())
-      .filter(Boolean);
+    const confirmedEntries = this._normaliseConfirmedSkills(confirmedSkills);
     const confirmedByKey = new Map();
     for (const skill of confirmedEntries) {
       const key = this._normaliseText(skill);
@@ -62,9 +78,32 @@ export class CVTailor {
       }
     }
 
-    return deduped.map(({ req, type }) => {
+    const rows = deduped.map(({ req, type }) => {
       const confirmedByUser = confirmedSet.has(this._normaliseText(req));
-      const directEvidence = this._findEvidence(req, cvSources);
+      let directEvidence = this._findEvidence(req, cvSources);
+      // OR-list requirements ("platforms such as MLFlow, W&B, Neptune.ai or
+      // similar", "IaC using Terraform, Pulumi, OpenTofu or similar") are
+      // satisfied by ANY listed alternative. Whole-sentence token matching
+      // treats the list as a conjunction and reports "missing" for candidates
+      // who clearly qualify via one alternative. LLM enrichment often strips
+      // the list ("Production experience with ML lifecycle management
+      // platforms"), so fall back to the raw JD sentence that carries it.
+      let alternatives = this._extractRequirementAlternatives(req);
+      if (alternatives.length < 2) {
+        const jdSentence = this._findJdSentenceForRequirement(req, jdData?.rawText);
+        if (jdSentence) alternatives = this._extractRequirementAlternatives(jdSentence);
+      }
+      const matchedAlternatives = [];
+      if (alternatives.length >= 2) {
+        for (const alt of alternatives) {
+          const altEvidence = this._findEvidence(alt, cvSources);
+          if (altEvidence.length > 0) {
+            matchedAlternatives.push(alt);
+            if (directEvidence.length === 0) directEvidence = altEvidence;
+            else directEvidence = [...new Set([...directEvidence, ...altEvidence])];
+          }
+        }
+      }
       // Always run semantic matching — direct evidence and semantic aliases are
       // complementary. Direct matching catches exact/token overlap; semantic
       // matching catches outcome equivalences (e.g. "cut onboarding time" matches
@@ -80,13 +119,22 @@ export class CVTailor {
         ))
       );
       const semanticSupported = semanticEvidence.length > 0;
-      const fullySupported = semanticSupported || coreTokens.length === 0 || supportedCoreTokens.length === coreTokens.length;
+      // Semantic aliases are useful transferable evidence, but they do not
+      // authorize claiming an exact named skill. Authorization requires direct
+      // CV evidence or explicit user confirmation.
+      const directlySupported = directEvidence.length > 0;
       const isAtomicRequirement = coreTokens.length <= 1;
+      // Long prose requirements ("Ability to collaborate closely with Data
+      // Scientists, Engineers, and Product...") rarely match as a whole
+      // sentence; when the CV independently evidences at least 70% of the
+      // core tokens, that is honest partial support, not a gap.
+      const tokenCoverageSupported = coreTokens.length >= 5 &&
+        supportedCoreTokens.length >= Math.ceil(coreTokens.length * 0.7);
       let status;
       if (confirmedByUser) {
         status = 'user_confirmed';
-      } else if (!fullySupported) {
-        status = 'missing';
+      } else if (!directlySupported) {
+        status = tokenCoverageSupported ? 'partial_match' : 'missing';
       } else if (evidence.length >= 2) {
         status = 'strong_match';
       } else if (evidence.length === 1 || semanticSupported || (isAtomicRequirement && this._hasAdjacentTech(req, cvLower))) {
@@ -101,8 +149,93 @@ export class CVTailor {
         evidence: confirmedByUser ? ['Confirmed by user during missing skills review'] : evidence,
         allowedToMention: status !== 'missing',
         confirmedByUser,
+        alternatives,
+        matchedAlternatives,
       };
     });
+
+    return this._applyAlternativeCoverage(rows);
+  }
+
+  // JD extractors emit each OR-alternative as its own atomic requirement
+  // ("Weights & Biases", "Pulumi") alongside the compound sentence. When a
+  // sibling alternative is supported (the candidate has MLflow), the unmet
+  // alternatives are not gaps: they must not drag the match score, be listed
+  // as missing skills, or be offered for user confirmation.
+  _applyAlternativeCoverage(rows) {
+    const coveredKeys = new Map();
+    for (const row of rows) {
+      if (!row.matchedAlternatives?.length) continue;
+      for (const alt of row.alternatives) {
+        if (row.matchedAlternatives.includes(alt)) continue;
+        coveredKeys.set(this._normaliseText(alt), row.matchedAlternatives[0]);
+      }
+    }
+    return rows.map(({ alternatives, matchedAlternatives, ...row }) => {
+      if (row.status !== 'missing') return row;
+      const key = this._normaliseText(row.requirement);
+      const coveredBy = coveredKeys.get(key)
+        ?? [...coveredKeys.entries()].find(([alt]) =>
+          (alt.length >= 4 && key.length >= 4) && (alt.startsWith(key) || key.startsWith(alt)))?.[1];
+      if (!coveredBy) return row;
+      return {
+        ...row,
+        status: 'covered_by_alternative',
+        evidence: [`Requirement accepts alternatives; candidate has ${coveredBy}`],
+      };
+    });
+  }
+
+  // Locate the raw JD sentence a (possibly enrichment-shortened) requirement
+  // came from, so its OR-alternatives can be recovered.
+  _findJdSentenceForRequirement(requirement, jdRawText) {
+    const jdRaw = String(jdRawText || '');
+    if (!jdRaw) return '';
+    const reqTokens = this._normaliseText(requirement).split(/\s+/)
+      .filter(token => token.length >= 3).slice(0, 6);
+    if (reqTokens.length < 3) return '';
+    const sentences = jdRaw.split(/(?<=[.!?])\s+|\n+/).map(s => s.trim()).filter(s => s.length >= 20);
+    return sentences.find(sentence => {
+      const norm = this._normaliseText(sentence);
+      return reqTokens.every(token => norm.includes(token));
+    }) || '';
+  }
+
+  // Extract the alternatives of an OR-enumeration inside a requirement:
+  // "such as MLFlow, Weights & Biases, Neptune.ai, Comet.ml or similar",
+  // "using Terraform, Pulumi, OpenTofu or similar", "in AWS, GCP, or Azure".
+  // Returns [] when the requirement has no OR-list.
+  _extractRequirementAlternatives(requirement) {
+    const text = String(requirement || '');
+    if (!/\bor\b/i.test(text) || !/,/.test(text)) return [];
+    // List-specific introducers first: "experience with X platforms such as
+    // A, B or C" must anchor at "such as", not at the earlier generic "with".
+    // C matches list content: any char except a sentence stop, where a dot
+    // only stops the segment when NOT part of a token (Neptune.ai, Comet.ml).
+    const C = String.raw`(?:[^.;]|\.(?=\w))`;
+    const segment_ = introducer => new RegExp(`${introducer}(${C}*?,${C}*?\\bor\\b${C}*)`, 'i');
+    const segmentMatch =
+      text.match(/\(([^)]*?,[^)]*?\bor\b[^)]*)\)/i) ||
+      text.match(segment_(String.raw`\b(?:such as|including|like)\s+`)) ||
+      text.match(segment_(String.raw`\busing\s+`)) ||
+      text.match(segment_(String.raw`\bin\s+`)) ||
+      text.match(segment_(String.raw`\bwith\s+`)) ||
+      text.match(segment_(''));
+    if (!segmentMatch) return [];
+    const segment = segmentMatch[1].replace(/\bor similar\b[\s\S]*$/i, '');
+    const parts = segment
+      .split(/,|\bor\b/i)
+      .map(part => part.trim()
+        .replace(/^[(\[]+/, '')
+        .replace(/^(?:the|a|an)\s+/i, '')
+        .replace(/\broles?\b[\s\S]*$/i, '')
+        .replace(/[)\]]+$/, '')
+        .trim())
+      .filter(part => part
+        && part.length >= 2 && part.length <= 60
+        && part.split(/\s+/).length <= 4
+        && !/^(?:that|which|who|and|to|for|its?|their|similar|equivalent)\b/i.test(part));
+    return [...new Set(parts)].length >= 2 ? [...new Set(parts)] : [];
   }
 
   /**
@@ -111,8 +244,7 @@ export class CVTailor {
    * not just lexical overlap. Falls back to buildMatchMap() on any failure.
    */
   buildSemanticMatchPrompt(cvData, jdData, confirmedSkills = []) {
-    const confirmed = (Array.isArray(confirmedSkills) ? confirmedSkills : [])
-      .map(s => String(s || '').trim()).filter(Boolean);
+    const confirmed = this._normaliseConfirmedSkills(confirmedSkills);
 
     const reqs = [
       ...(jdData.requiredSkills  || []).slice(0, 20).map(r => ({ req: r, type: 'required' })),
@@ -176,9 +308,15 @@ Also append one item per user-confirmed skill: status "user_confirmed", allowedT
   mergeSemanticMatchResult(llmJson, jdData, confirmedSkills = []) {
     if (!Array.isArray(llmJson) || llmJson.length === 0) return null;
 
-    const confirmed = (Array.isArray(confirmedSkills) ? confirmedSkills : [])
-      .map(s => String(s || '').trim()).filter(Boolean);
+    const confirmed = this._normaliseConfirmedSkills(confirmedSkills);
     const confirmedKeys = new Set(confirmed.map(s => this._normaliseText(s)));
+    const canonicalKeys = new Set([
+      ...(jdData?.requiredSkills || []),
+      ...(jdData?.preferredSkills || []),
+      ...(jdData?.tools || []),
+      ...(jdData?.softSkills || []),
+      ...confirmed,
+    ].map(value => this._normaliseText(value)).filter(Boolean));
     const VALID_STATUSES = new Set(['strong_match', 'partial_match', 'missing', 'user_confirmed']);
 
     const result = [];
@@ -187,12 +325,16 @@ Also append one item per user-confirmed skill: status "user_confirmed", allowedT
     for (const item of llmJson) {
       if (!item || typeof item.requirement !== 'string' || !item.requirement.trim()) continue;
       const key = this._normaliseText(item.requirement);
-      if (seenReqs.has(key)) continue;
+      if (!canonicalKeys.has(key) || seenReqs.has(key)) continue;
       seenReqs.add(key);
 
-      const confirmedByUser = Boolean(item.confirmedByUser) || confirmedKeys.has(key);
+      // The model reports evidence; it cannot grant itself user-confirmed
+      // authority or create a requirement absent from the canonical JD.
+      const confirmedByUser = confirmedKeys.has(key);
       const rawStatus = VALID_STATUSES.has(item.status) ? item.status : 'missing';
-      const status = confirmedByUser ? 'user_confirmed' : rawStatus;
+      const status = confirmedByUser
+        ? 'user_confirmed'
+        : rawStatus === 'user_confirmed' ? 'missing' : rawStatus;
       const allowedToMention = status !== 'missing';
       const evidence = confirmedByUser
         ? ['Confirmed by user during missing skills review']
@@ -231,16 +373,20 @@ Also append one item per user-confirmed skill: status "user_confirmed", allowedT
 
   /** Returns a summary score and categorised lists. */
   buildMatchSummary(matchMap) {
-    const required = matchMap.filter(m => m.type === 'required');
-    const strong   = matchMap.filter(m => m.status === 'strong_match');
-    const partial  = matchMap.filter(m => m.status === 'partial_match');
-    const confirmed = matchMap.filter(m => m.status === 'user_confirmed');
-    const missing  = matchMap.filter(m => m.status === 'missing');
+    // Unmet OR-alternatives of a satisfied requirement (has MLflow, so W&B /
+    // Neptune / Comet don't count) are neither matches nor gaps: they leave
+    // the score entirely.
+    const scoreable = matchMap.filter(m => m.status !== 'covered_by_alternative');
+    const required = scoreable.filter(m => m.type === 'required');
+    const strong   = scoreable.filter(m => m.status === 'strong_match');
+    const partial  = scoreable.filter(m => m.status === 'partial_match');
+    const confirmed = scoreable.filter(m => m.status === 'user_confirmed');
+    const missing  = scoreable.filter(m => m.status === 'missing');
 
     // Score: weight required matches more heavily
     const reqTotal    = required.length || 1;
     const reqMatched  = required.filter(m => m.status !== 'missing').length;
-    const allTotal    = matchMap.length || 1;
+    const allTotal    = scoreable.length || 1;
     const allMatched  = strong.length + confirmed.length + partial.length * 0.5;
 
     const score = Math.round(
@@ -260,7 +406,7 @@ Also append one item per user-confirmed skill: status "user_confirmed", allowedT
    * Build system + user prompts for the LLM tailoring call.
    * @returns {{ systemPrompt: string, userPrompt: string, temperature: number }}
    */
-  buildTailoringPrompt(cvData, jdData, matchMap) {
+  buildTailoringPrompt(cvData, jdData, matchMap, { domainRisk = null } = {}) {
     const contactFields = this._getLockedContactFields(cvData.contactInfo);
     const lockedFields = [
       ...contactFields,
@@ -317,6 +463,7 @@ A credible 30-second screen means:
     const topKeywords = (jdData.atsKeywords || []).slice(0, 20);
     const tailoringPlan = this.buildTailoringPlan(cvData, jdData, matchMap);
     const roleCredibilityGuidance = this._buildRoleCredibilityGuidance(jdData);
+    const domainRiskGuidance = this._buildDomainRiskGuidance(domainRisk);
     const matchStrength = this.calcMatchStrength(matchMap);
     const confidenceInstruction = {
       strong:  'MATCH LEVEL: STRONG — the CV covers most requirements. Write with confidence. Use assertive, achievement-led language for supported claims.',
@@ -372,6 +519,7 @@ RECRUITER SCREENING QUESTION
     • If the candidate lacks direct evidence for a requirement, do not fake it. Show adjacent transferable evidence or omit it.
     • If the CV would only pass an ATS keyword scan but fail a human recruiter read, rewrite it before final output.
 ${roleCredibilityGuidance ? `\nROLE CREDIBILITY CHECK\n${roleCredibilityGuidance}` : ''}
+${domainRiskGuidance ? `\nDOMAIN REVIEW CHECK\n${domainRiskGuidance}` : ''}
 
 ORIGINAL CV
 ${cvData.rawText}
@@ -399,16 +547,17 @@ HARVARD FORMAT — apply this structure exactly:
   • Bullet one (most relevant to target role — lead with impact or scale)
   • Bullet two
   • Bullet three
-  • Bullet four (ALL original bullets preserved — none dropped)
+  • Bullet four (optional — include only if it adds distinct supported proof)
   [blank line]
   EDUCATION / CERTIFICATIONS (as in original CV)
 
 INSTRUCTION
 1. HEADER: Job title on line 2 immediately below the candidate name, before any contact lines.
 2. Rewrite the professional summary so it clearly positions the candidate for this exact role and domain without saying it was tailored for a company or application. It must mention only supported evidence from the CV.
-3. CORE COMPETENCIES: MANDATORY — output exactly 5–7 named categories (never fewer than 5 for senior roles). Each category on its own line, NO bullet prefix, NO dash, format exactly: "Category Label: Skill A, Skill B, Skill C, Skill D" — aim for 3–6 skills per category. Cover both technical and business domains appropriate to the role (e.g. for a Solution Architect: Pre-Sales Execution, Cloud & Architecture, Integration & APIs, DevOps & Delivery, Sales Methodology, Stakeholder Engagement, Programming & Scripting). Do NOT use an "Additional Relevant Skills" or "Additional Skills" section. No duplicate skills across categories.
-4. For each relevant role: preserve the official job title exactly, then add one short "Focus:" line below it when the original responsibilities support the target role.
-5. For each role: preserve ALL original bullets — do not drop any. Rewrite each bullet using JD vocabulary (same meaning, aligned language) and reorder them so the strongest target-role evidence comes first. A senior role with only 1–2 bullets will fail a recruiter screen; include every bullet the original CV has for that role.
+3. CORE COMPETENCIES: MANDATORY — output exactly 5–7 named categories (never fewer than 5 for senior roles). Each category on its own line, NO bullet prefix, NO dash, format exactly: "Category Label: Skill A, Skill B, Skill C, Skill D" — aim for 3–6 skills per category. Cover both technical and business domains appropriate to the role (e.g. for a Solution Architect: Pre-Sales Execution, Cloud & Architecture, Integration & APIs, DevOps & Delivery, Sales Methodology, Stakeholder Engagement, Programming & Scripting). Every category label must be UNIQUE and descriptive — never repeat a label, and never use catch-all labels such as "Additional Technical Skills", "Additional Relevant Skills", "Additional Skills", "Other Skills", or "Miscellaneous". If skills do not fit an existing category, name a specific new category for them (e.g. "Data Quality & Validation", "Observability & Monitoring"). No duplicate skills across categories.
+4. For each relevant role: preserve the official job title exactly, then add one short "Focus:" line when the original responsibilities support the target role. The "Focus:" line must sit IMMEDIATELY below the job title line, ABOVE the first bullet — never after or between bullets.
+5. For each role: output a concise evidence set, usually 3–5 bullets for the three most recent or most relevant roles and 2–3 bullets for older roles. Do not remove any role entry. Rewrite each selected bullet using JD vocabulary (same meaning, aligned language) and reorder them so the strongest target-role evidence comes first. A senior/relevant role with only 1–2 bullets will fail a recruiter screen; if a role has fewer than 3 useful bullets, split its densest original bullet into separate bullets — one fact per bullet, same facts, no invented claims — wherever the original content honestly supports it. Do not include duplicate or low-signal bullets merely to preserve volume.
+5b. LINE DISCIPLINE: every bullet, competency category, and summary sentence must be output on ONE single line — never hard-wrap, never split a sentence or hyphenated word across lines (the renderer handles wrapping).
 6. Include every user-confirmed addition in the skills/core competencies section as concise skill names. You may also use them in the summary when natural, but do not attach them to a specific employer, project, metric, certification, or achievement unless that context exists in the original CV.
 7. Preserve all locked fields exactly — same spelling, capitalisation, and punctuation.
 8. The final CV must read like a polished CV for "${jdData.jobTitle || 'the target role'}", not like a generic CV and not like generated marketing copy.
@@ -420,9 +569,33 @@ Output the complete tailored CV text with no preamble, no commentary, and no mar
     return { systemPrompt, userPrompt, temperature: 0.3 };
   }
 
+  _buildDomainRiskGuidance(domainRisk = null) {
+    if (!domainRisk?.detected) return '';
+    const profile = domainRisk.primaryProfile?.label || 'Domain-sensitive role';
+    const credentialWarnings = Array.isArray(domainRisk.credentialWarnings) ? domainRisk.credentialWarnings : [];
+    const reviewPrompts = Array.isArray(domainRisk.reviewPrompts) ? domainRisk.reviewPrompts : [];
+    const missingCredentials = [...new Set(credentialWarnings.flatMap(item => item.missingCredentials || []))]
+      .map(item => String(item || '').trim())
+      .filter(Boolean)
+      .slice(0, 8);
+
+    const lines = [`Profile: ${profile}.`];
+    if (missingCredentials.length > 0) {
+      lines.push(`Do not add or imply these credentials unless present in the original CV or user-confirmed: ${missingCredentials.join(', ')}.`);
+    }
+    if (reviewPrompts.length > 0) {
+      lines.push(`Review prompts: ${reviewPrompts.slice(0, 3).join(' | ')}`);
+    }
+    lines.push('For regulated licenses, clearances, clinical authority, flight ratings, trade cards, publications, grants, or portfolio proof, preserve only supported facts and omit unsupported claims.');
+    return lines.join('\n');
+  }
+
   buildTailoredCvAuditPrompt(cvData, jdData, matchMap = [], tailoredText = '', confirmedSkills = []) {
+    const safeConfirmedSkills = this._normaliseConfirmedSkills(confirmedSkills);
+    const confirmedKeys = new Set(safeConfirmedSkills.map(skill => this._normaliseText(skill)));
     const supported = (matchMap || [])
       .filter(m => m.allowedToMention)
+      .filter(m => !m.confirmedByUser || confirmedKeys.has(this._normaliseText(m.requirement)))
       .map(m => ({
         requirement: m.requirement,
         evidence: Array.isArray(m.evidence) ? m.evidence.slice(0, 3) : [],
@@ -450,6 +623,11 @@ ALWAYS PRESERVE:
 - Every experience bullet from the ORIGINAL CV must remain. Do not remove a bullet because it was reworded; only remove a bullet if it contains a specific metric, tool, or claim that does not exist anywhere in the ORIGINAL CV and is not in the SUPPORTED REQUIREMENTS list.
 - Skills sections must contain short skill phrases only — not sentences, years-of-experience requirements, location requirements, education requirements, or prose like "track record of...".
 
+FORMATTING (preserve exactly while auditing):
+- Every bullet, competency category, and sentence stays on ONE line — never hard-wrap or split a sentence or word across lines.
+- "Focus:" lines stay immediately below their job title line, above the first bullet.
+- Competency category labels stay unique — never emit two categories with the same label and never use catch-all labels like "Additional Technical Skills".
+
 Return the complete corrected CV text only.`;
 
     const supportedLines = supported.map(item => {
@@ -469,7 +647,7 @@ SUPPORTED REQUIREMENTS / CLAIMS ALLOWED IN THE CV
 ${supportedLines.length ? supportedLines.join('\n') : '  (none)'}
 
 USER-CONFIRMED ADDITIONS
-${this._uniqueDisplaySkills(confirmedSkills).length ? this._uniqueDisplaySkills(confirmedSkills).map(s => `  + ${s}`).join('\n') : '  (none)'}
+${safeConfirmedSkills.length ? safeConfirmedSkills.map(s => `  + ${s}`).join('\n') : '  (none)'}
 
 UNSUPPORTED JD REQUIREMENTS / CLAIMS TO REMOVE IF PRESENT
 ${unsupported.length ? unsupported.map(s => `  ✗ ${s}`).join('\n') : '  (none)'}
@@ -566,7 +744,7 @@ Do not add anything new. Return the complete corrected CV.`;
     if (!matchMap || matchMap.length === 0) {
       return { level: 'unknown', score: 0, supportedCount: 0, totalCount: 0 };
     }
-    const scoreable = matchMap.filter(m => m.type !== 'user_confirmed');
+    const scoreable = matchMap.filter(m => m.type !== 'user_confirmed' && m.status !== 'covered_by_alternative');
     const total = scoreable.length;
     if (total === 0) return { level: 'unknown', score: 0, supportedCount: 0, totalCount: 0 };
 
@@ -612,7 +790,7 @@ Do not add anything new. Return the complete corrected CV.`;
     const lines = [];
     if (tools.length > 0)      lines.push(`Technical Tools: ${tools.join(', ')}`);
     if (coreSkills.length > 0) lines.push(`Core Skills: ${coreSkills.join(', ')}`);
-    if (confirmed.length > 0)  lines.push(`Confirmed Skills: ${confirmed.join(', ')}`);
+    if (confirmed.length > 0)  lines.push(`Additional Tools & Skills: ${confirmed.join(', ')}`);
     if (softSkills.length > 0) lines.push(`Professional Skills: ${softSkills.join(', ')}`);
 
     if (lines.length < 2) return text;
@@ -629,7 +807,13 @@ Do not add anything new. Return the complete corrected CV.`;
   }
 
   finalizeTailoredCV(rawText, { cvData, jdData, matchMap = [], confirmedSkills = [] } = {}) {
-    const withCoreCompetencies = this._ensureCoreCompetencies(rawText, matchMap, confirmedSkills, jdData);
+    const safeConfirmedSkills = this._normaliseConfirmedSkills(confirmedSkills);
+    // Repair hard-wrapped lines first: LLMs copy the original CV's PDF-extracted
+    // line wrapping ("cloud-\nnative"), which every downstream step would
+    // otherwise treat as separate lines. Then rejoin split date ranges so every
+    // later pass sees date lines as single units.
+    const unwrapped = this._joinSplitDateRanges(this.repairHardWrappedLines(rawText));
+    const withCoreCompetencies = this._ensureCoreCompetencies(unwrapped, matchMap, safeConfirmedSkills, jdData);
     const cleaned = this.cleanSkillsSection(
       this.ensureRoleFocusLines(
         this.ensureConfirmedSkillsIncluded(
@@ -637,26 +821,283 @@ Do not add anything new. Return the complete corrected CV.`;
             this.enforceTargetHeadline(withCoreCompetencies, jdData?.jobTitle),
             jdData?.company
           ),
-          confirmedSkills
+          safeConfirmedSkills
         ),
         cvData,
         jdData,
         matchMap
       ),
       matchMap,
-      confirmedSkills,
+      safeConfirmedSkills,
       jdData
     );
     const normalised = this.normaliseRoleFocusPlacement(
       this.restoreLockedExperienceDates(cleaned, cvData),
       cvData
     );
-    return this.ensureExperienceDepth(
+    const deepened = this.ensureExperienceDepth(
       this.consolidateSkillsSections(normalised),
       cvData,
       jdData,
       matchMap
     );
+    const dedupedBullets = this.dedupeNearDuplicateExperienceBullets(deepened, cvData);
+    const densityNormalised = this.normaliseExperienceBulletDensity(
+      dedupedBullets,
+      cvData,
+      jdData,
+      matchMap
+    );
+    // Parser-independent catch-alls: normaliseRoleFocusPlacement above is
+    // anchored to parsed cvData titles, which can miss composite pipe titles
+    // ("Cloud Support Engineer | Cloud Service SME"); this pass fixes any
+    // Focus: line still stranded below its bullet run, then merges duplicate
+    // "Label: skill, skill" category lines the LLM emitted despite the prompt.
+    return this.mergeDuplicateSkillCategoryLines(
+      this.repairDanglingBulletEndings(
+        this.repositionOrphanFocusLines(densityNormalised)
+      )
+    );
+  }
+
+  /**
+   * Join lines that were hard-wrapped mid-sentence or mid-word. PDF extraction
+   * wraps the original CV text at a fixed width, and the tailoring LLM often
+   * preserves those breaks verbatim ("cloud-\nnative model serving").
+   * Conservative by design: only joins when the current line is long enough to
+   * look wrapped, ends mid-word/mid-clause, and the next line is a lowercase
+   * continuation that is not a bullet, header, date, label, or contact line.
+   */
+  repairHardWrappedLines(text) {
+    if (!text) return text;
+
+    const lines = String(text).split('\n');
+    const output = [];
+    const BULLET_RE = /^[-•*●▪◦–—]\s/;
+    const LABEL_RE = /^[A-Za-z][A-Za-z0-9 &/+.\-]{0,48}:\s/;
+
+    const isContinuation = (line) => {
+      const trimmed = String(line || '').trim();
+      if (!trimmed) return false;
+      if (BULLET_RE.test(trimmed)) return false;
+      if (LABEL_RE.test(trimmed)) return false;
+      if (this._isLikelySectionHeader(trimmed)) return false;
+      if (this._looksLikeDateLine(trimmed)) return false;
+      if (this._isHeaderContactLine(trimmed)) return false;
+      return /^[a-z]/.test(trimmed);
+    };
+
+    for (const line of lines) {
+      const prev = output.length ? output[output.length - 1] : '';
+      const prevTrimmed = String(prev || '').trimEnd();
+
+      // Word broken across lines with a hyphen: "cloud-" + "native" —
+      // rejoin with no space even when the wrapped fragment is short.
+      if (prevTrimmed.length >= 8 && /[a-z]-$/.test(prevTrimmed) && isContinuation(line)) {
+        output[output.length - 1] = `${prevTrimmed}${String(line).trim()}`;
+        continue;
+      }
+
+      if (prevTrimmed.length >= 40 && isContinuation(line)) {
+        // Sentence wrapped mid-clause: ends in a letter or comma with no
+        // terminal punctuation — rejoin with a single space.
+        if (/[a-z,]$/i.test(prevTrimmed) && !/[.!?:;]$/.test(prevTrimmed)) {
+          output[output.length - 1] = `${prevTrimmed} ${String(line).trim()}`;
+          continue;
+        }
+      }
+      output.push(line);
+    }
+
+    return output.join('\n');
+  }
+
+  /**
+   * Rejoin a date range the model (or two-column PDF extraction) split across
+   * lines ("Feb 2024 -" / "Jun 2025") or flattened with a column gap
+   * ("Feb 2024 -    Jun 2025", "Feb 2024 - | Jun 2025") into one clean
+   * "Feb 2024 - Jun 2025" line. Runs before any entry-structure repair and
+   * needs no parsed cvData, so it fixes malformed date lines even for entries
+   * the parser failed to match. Both halves must be pure date fragments -
+   * ordinary sentences containing years never qualify.
+   */
+  _joinSplitDateRanges(text) {
+    if (!text) return text;
+
+    const MONTH = '(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)';
+    const RANGE_START_RE = new RegExp(`^(?:${MONTH}\\.?\\s+)?(?:19|20)\\d{2}\\s*(?:-|–|—|to)$`, 'i');
+    const RANGE_END_RE = new RegExp(`^(?:(?:${MONTH}\\.?\\s+)?(?:19|20)\\d{2}|present|current)$`, 'i');
+
+    const lines = String(text).split('\n');
+    const output = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      const trimmed = String(lines[i] || '').trim();
+
+      // Same-line column flatten: "Feb 2024 -   Jun 2025" / "Feb 2024 - | Jun 2025".
+      const flattened = trimmed.match(/^(.+?)\s*(?:\||\t+|\s{2,})\s*(.+)$/);
+      if (flattened && RANGE_START_RE.test(flattened[1].trim()) && RANGE_END_RE.test(flattened[2].trim())) {
+        output.push(`${flattened[1].trim()} ${flattened[2].trim()}`);
+        continue;
+      }
+
+      if (RANGE_START_RE.test(trimmed)) {
+        let next = i + 1;
+        while (next < lines.length && !String(lines[next] || '').trim()) next++;
+        const nextTrimmed = next < lines.length ? String(lines[next]).trim() : '';
+        if (RANGE_END_RE.test(nextTrimmed)) {
+          output.push(`${trimmed} ${nextTrimmed}`);
+          i = next;
+          continue;
+        }
+      }
+
+      output.push(lines[i]);
+    }
+
+    return output.join('\n');
+  }
+
+  /**
+   * Move any "Focus:" line that ended up below a bullet run to just above that
+   * run. Unlike normaliseRoleFocusPlacement this needs no parsed cvData, so it
+   * still works when composite pipe titles defeat title matching.
+   *
+   * A Focus line is only ever meaningful directly under a role title - if it
+   * isn't sitting above a bullet run (the case handled above) and the nearest
+   * preceding content is a section header instead, it has drifted into an
+   * unrelated section (e.g. stranded under "EDUCATION, CERTIFICATIONS &
+   * RECOGNITION" because the role it was generated for never matched during
+   * entry-boundary detection). There is no reliable way to know which role it
+   * belonged to, so drop it rather than render positioning text under the
+   * wrong heading.
+   */
+  repositionOrphanFocusLines(text) {
+    if (!text) return text;
+
+    const lines = String(text).split('\n');
+    const BULLET_RE = /^[-•*●▪◦–—]\s/;
+
+    for (let i = 0; i < lines.length; i++) {
+      if (!/^focus\s*:/i.test(String(lines[i] || '').trim())) continue;
+
+      // Walk back over the bullet run above this line, tolerating blank lines
+      // the model sometimes inserts between the final bullet and Focus line.
+      let cursor = i - 1;
+      while (cursor >= 0 && !String(lines[cursor] || '').trim()) cursor--;
+
+      if (cursor >= 0 && this._isLikelySectionHeader(String(lines[cursor] || '').trim())) {
+        lines.splice(i, 1);
+        i--;
+        continue;
+      }
+
+      if (cursor < 0 || !BULLET_RE.test(String(lines[cursor] || '').trim())) continue;
+
+      let runStart = cursor;
+      while (runStart > 0 && BULLET_RE.test(String(lines[runStart - 1] || '').trim())) {
+        runStart--;
+      }
+
+      const [focusLine] = lines.splice(i, 1);
+      lines.splice(runStart, 0, focusLine);
+    }
+
+    return lines.join('\n');
+  }
+
+  repairDanglingBulletEndings(text) {
+    if (!text) return text;
+
+    return String(text).split('\n').map(line => {
+      const match = String(line || '').match(/^(\s*[-•*●▪◦–—]\s+)(.+)$/);
+      if (!match) return line;
+
+      const [, prefix, body] = match;
+      // Trim repeatedly until stable: a token-limit truncation can cut a
+      // bullet mid-word ("...resilience across production-"), and stripping
+      // the hyphenated fragment then exposes a dangling conjunction that
+      // needs a second pass ("...resilience across" -> "...resilience").
+      let repaired = body;
+      let previous;
+      do {
+        previous = repaired;
+        repaired = repaired
+          .replace(/\s+\S*[a-z]-$/, '')
+          .replace(/\s+\b(?:and|or|with|including|across|for|to|by)\s*$/i, '')
+          .replace(/[,\s]+$/, '');
+      } while (repaired !== previous);
+
+      if (repaired === body) return line;
+      return `${prefix}${repaired}.`;
+    }).join('\n');
+  }
+
+  /**
+   * Merge duplicate "Label: skill, skill, ..." category lines within a
+   * skills/competencies section (e.g. two "Additional Technical Skills:"
+   * lines) into one line with the union of their items. Scoped to
+   * skills-like sections only (never PROFESSIONAL EXPERIENCE etc.) - an
+   * experience bullet like "Key results: reduced costs..." matches the same
+   * "Label: comma, list" shape as a skill category, and without this scoping
+   * two different jobs sharing a generic bullet label would get merged,
+   * silently deleting one job's real achievement bullet.
+   */
+  mergeDuplicateSkillCategoryLines(text) {
+    if (!text) return text;
+
+    const lines = String(text).split('\n');
+    const CATEGORY_RE = /^([-•*●▪◦–—]\s*)?([A-Za-z][A-Za-z0-9 &/+.\-]{2,48}):\s*(.+)$/;
+    const seen = new Map(); // normalised label -> line index of first occurrence
+    const removals = [];
+    let inSkillsSection = false;
+
+    for (let i = 0; i < lines.length; i++) {
+      const trimmed = String(lines[i] || '').trim();
+      if (this._isSkillsSectionHeader(trimmed)) {
+        inSkillsSection = true;
+        seen.clear();
+        continue;
+      }
+      if (this._isLikelySectionHeader(trimmed)) {
+        inSkillsSection = false;
+        seen.clear();
+        continue;
+      }
+      if (!inSkillsSection) continue;
+
+      const match = trimmed.match(CATEGORY_RE);
+      if (!match) continue;
+      const [, , label, value] = match;
+      if (/^focus$/i.test(label.trim())) continue;
+      if (!value.includes(',')) continue; // not a skill list — leave alone
+
+      const key = this._normaliseText(label);
+      if (!seen.has(key)) {
+        seen.set(key, i);
+        continue;
+      }
+
+      // Duplicate label in the same section: merge unique items into the first.
+      const firstIdx = seen.get(key);
+      const firstMatch = String(lines[firstIdx] || '').trim().match(CATEGORY_RE);
+      if (!firstMatch) continue;
+      const existingItems = firstMatch[3].split(',').map(s => s.trim()).filter(Boolean);
+      const existingKeys = new Set(existingItems.map(s => this._normaliseText(s)));
+      const newItems = value.split(',').map(s => s.trim()).filter(Boolean)
+        .filter(item => !existingKeys.has(this._normaliseText(item)));
+
+      if (newItems.length > 0) {
+        lines[firstIdx] = `${firstMatch[1] || ''}${firstMatch[2]}: ${[...existingItems, ...newItems].join(', ')}`;
+      }
+      removals.push(i);
+    }
+
+    for (const idx of removals.reverse()) {
+      lines.splice(idx, 1);
+    }
+
+    return lines.join('\n');
   }
 
   restoreLockedExperienceDates(tailoredText, cvData = {}) {
@@ -672,31 +1113,100 @@ Do not add anything new. Return the complete corrected CV.`;
       if (!company || !title || !dates) continue;
 
       const companyIdx = this._findLineIndexContaining(lines, company, searchFrom);
-      if (companyIdx === -1) continue;
+      const titleIdxForward = companyIdx !== -1
+        ? this._findLineIndexContaining(lines, title, companyIdx + 1, companyIdx + 8)
+        : -1;
 
-      const titleIdx = this._findLineIndexContaining(lines, title, companyIdx + 1, companyIdx + 8);
-      if (titleIdx === -1) {
-        searchFrom = companyIdx + 1;
+      if (companyIdx !== -1 && titleIdxForward !== -1) {
+        // Keep model output in the parser/exporter's expected Harvard shape:
+        // company line, exact original dates on the next line, exact job title below.
+        const between = lines.slice(companyIdx + 1, titleIdxForward);
+        const cleanedBetween = between.filter(line => {
+          const trimmed = String(line || '').trim();
+          return trimmed && !this._looksLikeDateLine(trimmed);
+        });
+        lines.splice(companyIdx, titleIdxForward - companyIdx + 1, company, dates, title, ...cleanedBetween);
+        // Advance past this entry's ENTIRE rebuilt block (not just its
+        // 3-line header) so the next entry's search - and its preNoise
+        // safety check below - never sees this entry's own Focus/bullet
+        // content as "unsafe to drop" leftover noise.
+        searchFrom = companyIdx + 3 + cleanedBetween.length;
         continue;
       }
 
-      // Keep model output in the parser/exporter's expected Harvard shape:
-      // company line, exact original dates on the next line, exact job title below.
-      const between = lines.slice(companyIdx + 1, titleIdx);
-      const cleanedBetween = between.filter(line => {
-        const trimmed = String(line || '').trim();
-        return trimmed && !this._looksLikeDateLine(trimmed);
-      });
+      // The LLM sometimes reverses the order (title first, company pushed
+      // down after the bullets) instead of dropping the header entirely.
+      // Only searching forward from company (above) silently skips
+      // restoration for these blocks, leaving the reversed structure - and
+      // whatever malformed date fragment the LLM put in company's place -
+      // in the final output. Search for title first and look for company
+      // afterward to catch this case too.
+      const titleIdx = this._findLineIndexContaining(lines, title, searchFrom, searchFrom + 8);
+      const companyIdxBackward = titleIdx !== -1
+        ? this._findLineIndexContaining(lines, company, titleIdx + 1, titleIdx + 12)
+        : -1;
 
-      lines.splice(
-        companyIdx,
-        titleIdx - companyIdx + 1,
-        company,
-        dates,
-        title,
-        ...cleanedBetween
-      );
-      searchFrom = companyIdx + 3;
+      if (titleIdx !== -1 && companyIdxBackward !== -1) {
+        const between = lines.slice(titleIdx + 1, companyIdxBackward);
+        const cleanedBetween = between.filter(line => {
+          const trimmed = String(line || '').trim();
+          return trimmed && !this._looksLikeDateLine(trimmed);
+        });
+        // Walk backward from the title, dropping only a small bounded run of
+        // blank/date-fragment lines immediately above it (e.g. a malformed
+        // or split date fragment standing in where the company line should
+        // have been), stopping at the first line that isn't droppable. A
+        // fixed small lookback - not the full distance back to searchFrom -
+        // avoids eating unrelated content further back, like the CV's own
+        // name/headline sitting before the first experience entry.
+        const LOOKBACK = 3;
+        const lookbackFloor = Math.max(searchFrom, titleIdx - LOOKBACK);
+        let spliceStart = titleIdx;
+        for (let i = titleIdx - 1; i >= lookbackFloor; i--) {
+          const trimmed = String(lines[i] || '').trim();
+          if (!trimmed || this._looksLikeDateLine(trimmed)) {
+            spliceStart = i;
+          } else {
+            break;
+          }
+        }
+        lines.splice(spliceStart, companyIdxBackward - spliceStart + 1, company, dates, title, ...cleanedBetween);
+        searchFrom = spliceStart + 3 + cleanedBetween.length;
+        continue;
+      }
+
+      // Neither direction found a company line at all - common when this
+      // entry is a second (or later) stint at the same employer as the
+      // previous entry, and the model wrote the company name only once,
+      // above the first stint. Harvard-format multi-stint blocks are safest
+      // to restore as separate company+dates+title triplets (matching every
+      // other entry's shape, which the exporter's rendering depends on)
+      // rather than teaching the renderer a "title-only, shared company"
+      // sub-entry format. If the title itself can still be located, insert
+      // this entry's own canonical company/dates in front of it, dropping
+      // any adjacent malformed date fragment the model left in its place.
+      if (titleIdx !== -1) {
+        const LOOKBACK = 3;
+        const lookbackFloor = Math.max(searchFrom, titleIdx - LOOKBACK);
+        let spliceStart = titleIdx;
+        for (let i = titleIdx - 1; i >= lookbackFloor; i--) {
+          const trimmed = String(lines[i] || '').trim();
+          if (!trimmed || this._looksLikeDateLine(trimmed)) {
+            spliceStart = i;
+          } else {
+            break;
+          }
+        }
+        let spliceEnd = titleIdx + 1;
+        if (this._looksLikeDateLine(String(lines[titleIdx + 1] || '').trim())) {
+          spliceEnd = titleIdx + 2;
+        }
+        lines.splice(spliceStart, spliceEnd - spliceStart, company, dates, title);
+        searchFrom = spliceStart + 3;
+        continue;
+      }
+
+      if (companyIdx !== -1) searchFrom = companyIdx + 1;
     }
 
     return lines.join('\n');
@@ -713,6 +1223,11 @@ Do not add anything new. Return the complete corrected CV.`;
         .map(exp => this._normaliseText(exp.title))
         .filter(Boolean)
     );
+    const companyKeys = new Set(
+      (cvData.experience || [])
+        .map(exp => this._normaliseText(exp.company))
+        .filter(Boolean)
+    );
     let searchFrom = 0;
 
     for (const exp of (cvData.experience || [])) {
@@ -722,7 +1237,7 @@ Do not add anything new. Return the complete corrected CV.`;
       const titleIdx = this._findTitleLineIndex(lines, title, searchFrom);
       if (titleIdx === -1) continue;
 
-      const entryEnd = this._findRoleEntryEnd(lines, titleIdx, titleKeys);
+      const entryEnd = this._findRoleEntryEnd(lines, titleIdx, titleKeys, companyKeys, this._normaliseText(exp.company));
       const focusIndices = [];
       for (let i = titleIdx + 1; i < entryEnd; i++) {
         if (/^focus\s*:/i.test(String(lines[i] || '').trim())) {
@@ -804,7 +1319,7 @@ Do not add anything new. Return the complete corrected CV.`;
   ensureConfirmedSkillsIncluded(tailoredText, confirmedSkills = []) {
     if (!tailoredText) return tailoredText;
 
-    const skills = this._uniqueDisplaySkills(confirmedSkills);
+    const skills = this._normaliseConfirmedSkills(confirmedSkills);
     if (skills.length === 0) return tailoredText;
 
     const existingText = this._normaliseText(tailoredText);
@@ -959,39 +1474,182 @@ Do not add anything new. Return the complete corrected CV.`;
       const sourceBullets = (exp.responsibilities || [])
         .map(item => String(item || '').trim())
         .filter(Boolean)
-        .filter(item => !this._isParserArtefact(item));
+        .filter(item => !this._isParserArtefact(item) || this._looksLikeExperienceResponsibility(item));
       if (!title || sourceBullets.length === 0) continue;
 
       const titleIdx = this._findTitleLineIndex(lines, title, searchFrom);
       if (titleIdx === -1) continue;
 
       const entryEnd = this._findExperienceEntryEnd(lines, exp, titleIdx, companyKeys);
+      const entryBulletLines = lines.slice(titleIdx + 1, entryEnd)
+        .map(line => String(line || '').trim())
+        .filter(line => /^[-•*●▪◦–—]\s/.test(line));
       const existingBulletKeys = new Set(
-        lines.slice(titleIdx + 1, entryEnd)
-          .map(line => String(line || '').trim())
-          .filter(line => /^[-•*●▪◦–—]\s/.test(line))
-          .map(line => this._normaliseText(line.replace(/^[-•*●▪◦–—]\s*/, '')))
+        entryBulletLines
+          .map(line => this._normaliseBulletForSimilarity(line.replace(/^[-•*●▪◦–—]\s*/, '')))
           .filter(Boolean)
       );
+      // Match the bullet character already used in this entry (the template
+      // uses "•") instead of hardcoding "-", which would otherwise mix
+      // bullet styles within the same generated CV.
+      const bulletChar = entryBulletLines[0]?.match(/^([-•*●▪◦–—])/)?.[1] || '•';
 
+      const sourceCandidates = this._uniqueDisplaySkills([
+        ...sourceBullets,
+        ...this._deriveExperienceDepthBullets(sourceBullets),
+      ]);
       const currentCount = existingBulletKeys.size;
-      const minimum = Math.min(sourceBullets.length, expIndex < 3 ? 4 : 3);
+      const minimum = Math.min(sourceCandidates.length, expIndex < 3 ? 4 : 3);
       if (currentCount >= minimum) {
         searchFrom = titleIdx + 1;
         continue;
       }
 
       const needed = minimum - currentCount;
-      const additions = this._rankExperienceBulletsForRole(sourceBullets, jdData, matchMap)
-        .filter(item => !existingBulletKeys.has(this._normaliseText(item)))
+      const additions = this._rankExperienceBulletsForRole(sourceCandidates, jdData, matchMap)
+        .filter(item => {
+          const key = this._normaliseBulletForSimilarity(item);
+          if (!key || existingBulletKeys.has(key)) return false;
+          for (const existing of existingBulletKeys) {
+            if ((existing.length >= 32 && key.includes(existing)) || (key.length >= 32 && existing.includes(key))) {
+              return false;
+            }
+          }
+          return true;
+        })
         .slice(0, needed);
 
       if (additions.length > 0) {
-        lines.splice(entryEnd, 0, ...additions.map(item => `- ${item}`));
+        lines.splice(entryEnd, 0, ...additions.map(item => `${bulletChar} ${item}`));
         searchFrom = entryEnd + additions.length;
       } else {
         searchFrom = titleIdx + 1;
       }
+    }
+
+    return lines.join('\n');
+  }
+
+  /**
+   * Removes bullets within the same experience entry that are near-identical
+   * or truncated duplicates of another bullet in that entry - an observed
+   * generation artifact where the LLM repeats a bullet, sometimes cut short
+   * at a different point, rather than writing a genuinely new one. Nothing
+   * else in the pipeline catches this: ensureExperienceDepth only guards
+   * against *adding* a duplicate when padding bullet count, it doesn't clean
+   * up duplicates the model wrote natively. Keeps the longer/more complete
+   * of any two near-duplicate bullets.
+   */
+  dedupeNearDuplicateExperienceBullets(tailoredText, cvData = {}) {
+    if (!tailoredText || !Array.isArray(cvData?.experience) || cvData.experience.length === 0) {
+      return tailoredText;
+    }
+
+    const lines = String(tailoredText).split('\n');
+    const companyKeys = new Set(
+      cvData.experience.map(exp => this._normaliseText(exp.company)).filter(Boolean)
+    );
+    let searchFrom = 0;
+
+    for (const exp of cvData.experience) {
+      const title = String(exp.title || '').trim();
+      if (!title) continue;
+
+      const titleIdx = this._findTitleLineIndex(lines, title, searchFrom);
+      if (titleIdx === -1) continue;
+
+      const entryEnd = this._findExperienceEntryEnd(lines, exp, titleIdx, companyKeys);
+      const bulletRows = [];
+      for (let i = titleIdx + 1; i < entryEnd; i++) {
+        const raw = String(lines[i] || '').trim();
+        if (!/^[-•*●▪◦–—]\s/.test(raw)) continue;
+        const body = raw.replace(/^[-•*●▪◦–—]\s*/, '').trim();
+        bulletRows.push({ index: i, key: this._normaliseBulletForSimilarity(body) });
+      }
+
+      const toRemove = new Set();
+      for (let i = 0; i < bulletRows.length; i++) {
+        if (toRemove.has(bulletRows[i].index)) continue;
+        for (let j = i + 1; j < bulletRows.length; j++) {
+          if (toRemove.has(bulletRows[j].index)) continue;
+          const a = bulletRows[i].key;
+          const b = bulletRows[j].key;
+          if (!a || !b) continue;
+          const isDuplicate = a === b
+            || (a.length >= 32 && b.length >= 32 && (a.includes(b) || b.includes(a)));
+          if (!isDuplicate) continue;
+          const dropIndex = b.length >= a.length ? bulletRows[i].index : bulletRows[j].index;
+          toRemove.add(dropIndex);
+        }
+      }
+
+      for (let i = bulletRows.length - 1; i >= 0; i--) {
+        if (toRemove.has(bulletRows[i].index)) lines.splice(bulletRows[i].index, 1);
+      }
+
+      searchFrom = titleIdx + 1;
+    }
+
+    return lines.join('\n');
+  }
+
+  normaliseExperienceBulletDensity(tailoredText, cvData = {}, jdData = {}, matchMap = []) {
+    if (!tailoredText || !Array.isArray(cvData?.experience) || cvData.experience.length === 0) {
+      return tailoredText;
+    }
+
+    const lines = String(tailoredText).split('\n');
+    const companyKeys = new Set(
+      cvData.experience
+        .map(exp => this._normaliseText(exp.company))
+        .filter(Boolean)
+    );
+    let searchFrom = 0;
+
+    for (let expIndex = 0; expIndex < cvData.experience.length; expIndex++) {
+      const exp = cvData.experience[expIndex];
+      const title = String(exp.title || '').trim();
+      if (!title) continue;
+
+      const titleIdx = this._findTitleLineIndex(lines, title, searchFrom);
+      if (titleIdx === -1) continue;
+
+      const entryEnd = this._findExperienceEntryEnd(lines, exp, titleIdx, companyKeys);
+      const bulletRows = [];
+      for (let i = titleIdx + 1; i < entryEnd; i++) {
+        const line = String(lines[i] || '').trim();
+        if (/^[-•*●▪◦–—]\s/.test(line)) {
+          bulletRows.push({
+            index: i,
+            body: line.replace(/^[-•*●▪◦–—]\s*/, '').trim(),
+          });
+        }
+      }
+
+      const maxBullets = expIndex < 3 ? 5 : 3;
+      if (bulletRows.length <= maxBullets) {
+        searchFrom = titleIdx + 1;
+        continue;
+      }
+
+      const keep = new Set(
+        bulletRows
+          .map(row => ({
+            ...row,
+            score: this._scoreExperienceBulletForTarget(row.body, jdData, matchMap),
+          }))
+          .sort((a, b) => b.score - a.score || a.index - b.index)
+          .slice(0, maxBullets)
+          .map(row => row.index)
+      );
+
+      for (let i = bulletRows.length - 1; i >= 0; i--) {
+        if (!keep.has(bulletRows[i].index)) {
+          lines.splice(bulletRows[i].index, 1);
+        }
+      }
+
+      searchFrom = titleIdx + 1;
     }
 
     return lines.join('\n');
@@ -1085,7 +1743,11 @@ Do not add anything new. Return the complete corrected CV.`;
       }
     }
 
-    for (const exp of (originalCvData?.experience || [])) {
+    // Sanitised roles only: raw parses of corrupted sources (duplicated PDF
+    // text layers) contain ghost entries whose "title" is a location, which
+    // produced warnings like 'Role focus line may be missing under
+    // "Birmingham, UK"'.
+    for (const exp of this._sanitiseSkeletonRoles(originalCvData?.experience || [])) {
       const focus = this._buildRoleFocus(exp, jdData, matchMap);
       if (!focus || !exp.title) continue;
       const titleIdx = this._findTitleLineIndex(String(tailoredText).split('\n'), exp.title, 0);
@@ -1683,6 +2345,947 @@ Do not add anything new. Return the complete corrected CV.`;
     return collected;
   }
 
+  // ══════════════════════════════════════════════════════════════════════
+  // Structured CV generation: locked skeleton + mutable JSON content.
+  // Design: docs/structured-cv-generation.md.
+  //
+  // The model only ever produces the content it is allowed to change
+  // (summary, competency lists, per-role focus/bullets); companies, dates,
+  // titles, education, and contact details come verbatim from the parsed CV
+  // and are rendered by renderTailoredCV's template. The malformed-structure
+  // class of bugs (split dates, duplicated company lines, misplaced Focus
+  // lines, scrambled education) cannot occur because that structure never
+  // round-trips through model output.
+  // ══════════════════════════════════════════════════════════════════════
+
+  buildCvSkeleton(cvData = {}, jdData = {}) {
+    const contactInfo = cvData?.contactInfo || {};
+    const roles = this._sanitiseSkeletonRoles(cvData?.experience || [])
+      .map((role, i) => ({
+        ...role,
+        id: `role_${i}`,
+        sourceId: role.sourceId || `experience:${i}`,
+        originalBulletEvidence: role.originalBullets.map((text, bulletIndex) => ({
+          text,
+          sourceIds: role.originalBulletEvidence?.[bulletIndex]?.sourceIds?.length
+            ? role.originalBulletEvidence[bulletIndex].sourceIds
+            : [role.originalBulletEvidence?.[bulletIndex]?.sourceId || `${role.sourceId || `experience:${i}`}:responsibility:${bulletIndex}`],
+        })),
+        allowedSourceIds: [...new Set(role.originalBullets.flatMap((_, bulletIndex) =>
+          role.originalBulletEvidence?.[bulletIndex]?.sourceIds?.length
+            ? role.originalBulletEvidence[bulletIndex].sourceIds
+            : [role.originalBulletEvidence?.[bulletIndex]?.sourceId || `${role.sourceId || `experience:${i}`}:responsibility:${bulletIndex}`]
+        ))],
+      }));
+
+    return {
+      name: String(contactInfo.name || '').trim(),
+      headline: String(jdData?.jobTitle || '').trim(),
+      contacts: this._extractHeaderContactLines(cvData),
+      roles,
+      projects: this._sanitiseSkeletonProjects(cvData?.projects || []),
+      skillCategories: this._sanitiseSkeletonSkillCategories(cvData?.skillCategories || []),
+      extraSections: this._extractExtraSections(cvData),
+      educationLines: this._extractEducationLines(cvData),
+    };
+  }
+
+  _sanitiseSkeletonSkillCategories(skillCategories = []) {
+    const seen = new Set();
+    return skillCategories.flatMap(category => {
+      const label = this._clampInline(category?.label, 48);
+      const key = this._normaliseText(label);
+      if (!label || !key || seen.has(key)) return [];
+      const items = (Array.isArray(category?.items) ? category.items : [])
+        .map(item => this._clampInline(item, 48))
+        .filter(item => item && item.split(/\s+/).length <= 5);
+      if (items.length < 2) return [];
+      seen.add(key);
+      return [{ label, items: items.slice(0, 10) }];
+    }).slice(0, 8);
+  }
+
+  // Auxiliary ALL-CAPS sections the user wrote ("TECHNICAL LEADERSHIP &
+  // PROJECTS", "SELECTED ... ACHIEVEMENTS", publications, awards) are part of
+  // their CV's structure. Preserve them verbatim in the locked skeleton so
+  // the tailored CV keeps the source document's shape instead of silently
+  // dropping whole sections. Education/skills/experience have their own slots
+  // and are excluded here.
+  _extractExtraSections(cvData = {}) {
+    const raw = String(cvData?.rawText || '');
+    if (!raw) return [];
+    const INCLUDE = /\b(LEADERSHIP|PROJECTS?|ACHIEVEMENTS?|ACCOMPLISHMENTS?|PUBLICATIONS?|AWARDS?|VOLUNTEER(?:ING)?|STRATEGY)\b/;
+    const EXCLUDE = /\b(EDUCATION|CERTIFICATIONS?|SKILLS?|EXPERIENCE|SUMMARY|COMPETENC)\w*\b/;
+    // A plain PROJECTS section already renders through the structured
+    // projects slot; capturing it here too would render its bullets twice.
+    // It is only preserved here when structured project parsing found
+    // nothing (e.g. entries without URLs), so content is never lost.
+    const hasStructuredProjects = (cvData?.projects || []).length > 0;
+    const lines = raw.split('\n');
+    const sections = [];
+    const seenHeadings = new Set();
+    let current = null;
+
+    const isBoundary = line => {
+      const trimmed = String(line || '').trim();
+      return this._isLikelySectionHeader?.(trimmed)
+        || /^[A-Z][A-Z &,/'()\-]{5,69}$/.test(trimmed);
+    };
+
+    for (const rawLine of lines) {
+      const line = String(rawLine || '').trim();
+      const heading = /^[A-Z][A-Z &,/'()\-]{5,69}$/.test(line) && !/\d/.test(line);
+      if (heading && INCLUDE.test(line) && !EXCLUDE.test(line)
+          && !(hasStructuredProjects && /^PROJECTS?$/.test(line))) {
+        const key = this._normaliseText(line);
+        if (current) sections.push(current);
+        // Duplicated PDF text layers repeat whole sections; keep the first.
+        current = seenHeadings.has(key) ? null : { heading: line, items: [] };
+        seenHeadings.add(key);
+        continue;
+      }
+      if (!current) continue;
+      if (!line) continue;
+      if (heading || isBoundary(line)) { sections.push(current); current = null; continue; }
+      const isBullet = /^[•\-*●▪◦–—]\s+/.test(line);
+      const text = line.replace(/^[•\-*●▪◦–—]\s+/, '').trim();
+      if (!text) continue;
+      const previous = current.items.at(-1);
+      if (!isBullet && previous && !/[.!?:;]$/.test(previous)) {
+        current.items[current.items.length - 1] = `${previous} ${text}`;
+      } else if (text.length >= 8 && text.length <= 320) {
+        current.items.push(text);
+      }
+    }
+    if (current) sections.push(current);
+    return sections
+      .map(section => ({ ...section, items: this._dedupeSimilarBullets(section.items).slice(0, 10) }))
+      .filter(section => section.items.length > 0)
+      .slice(0, 4);
+  }
+
+  _sanitiseSkeletonProjects(projects = []) {
+    const seen = new Set();
+    return projects.flatMap((project, index) => {
+      const name = String(project?.name || '').trim();
+      const url = String(project?.url || '').trim();
+      if (!name || name.length > 120 || url.length > 500 || !/^https?:\/\/[^\s]+$/i.test(url)) return [];
+      const key = `${name.toLowerCase()}|${url}`;
+      if (seen.has(key)) return [];
+      seen.add(key);
+      const bulletItems = (project.bullets || []).map((value, i) => ({
+        text: String(value || '').trim(),
+        sourceIds: [project.bulletEvidence?.[i]?.sourceId || `project:${index}:bullet:${i}`],
+      })).filter(item => item.text.length >= 8 && item.text.length <= 320);
+      const skillItems = (project.skills || []).map((value, i) => ({
+        text: String(value || '').trim(),
+        sourceIds: [project.skillEvidence?.[i]?.sourceId || `project:${index}:skill:${i}`],
+      })).filter(item => item.text && item.text.length <= 64);
+      const originalBullets = bulletItems.map(item => item.text);
+      const originalBulletEvidence = bulletItems.map(item => ({ text: item.text, sourceIds: item.sourceIds }));
+      const skills = skillItems.map(item => item.text);
+      const skillEvidence = skillItems.map(item => ({ text: item.text, sourceIds: item.sourceIds }));
+      return [{
+        id: `project_${index}`,
+        sourceId: project.sourceId || `project:${index}`,
+        name,
+        url,
+        originalBullets,
+        originalBulletEvidence,
+        skills,
+        skillEvidence,
+      }];
+    });
+  }
+
+  // The locked skeleton is only as trustworthy as the CV parse, and real
+  // source documents (multi-column PDFs, or a previously exported CV
+  // re-uploaded as the source) produce corrupted parses: the same role
+  // parsed twice (once with the location in the title field), company and
+  // dates swapped into each other's fields, and hard-wrapped bullet
+  // fragments split into separate "responsibilities". Sanitise all of that
+  // deterministically before locking the skeleton.
+  _sanitiseSkeletonRoles(experience = []) {
+    const isDateRange = (value) => {
+      const text = String(value || '').trim();
+      return text.length <= 60 &&
+        /\b(?:19|20)\d{2}\b\s*(?:-|–|—|to)\s*(?:.*\b(?:19|20)\d{2}\b|\s*(?:present|current)\b)/i.test(text);
+    };
+    const isLocationLike = (value) => {
+      const text = String(value || '').trim();
+      if (!text || text.length > 45) return false;
+      if (/\b(engineer|developer|manager|architect|analyst|designer|consultant|lead|director|specialist|administrator|scientist)\b/i.test(text)) return false;
+      return /,/.test(text) || /^(remote|hybrid|onsite)$/i.test(text)
+        || /\b(uk|usa|united kingdom|united states|nigeria|remote)\b/i.test(text);
+    };
+
+    const cleaned = [];
+    for (const exp of experience) {
+      let company = String(exp?.company || '').trim();
+      let dates = String(exp?.dates || '').trim();
+      let title = String(exp?.title || '').trim();
+      if (!company && !title) continue;
+
+      // Swapped fields: "Feb 2019 - May 2020" parsed as the company while
+      // the real company sits in the dates field.
+      if (isDateRange(company) && !isDateRange(dates)) {
+        [company, dates] = [dates, company];
+      }
+      if (isDateRange(title) && !dates) {
+        dates = title;
+        title = '';
+      }
+      // Location parsed as the job title ("Birmingham, UK").
+      if (isLocationLike(title)) title = '';
+
+      const bulletPairs = this._joinWrappedBulletEvidence(
+        (exp?.responsibilities || []).map((text, index) => ({
+          text: String(text || '').trim(),
+          sourceIds: [exp?.responsibilityEvidence?.[index]?.sourceId].filter(Boolean),
+        })).filter(item => item.text)
+      );
+      cleaned.push({
+        company,
+        dates,
+        title,
+        sourceId: exp?.sourceId,
+        roleSourceIds: [exp?.sourceId].filter(Boolean),
+        originalBulletEvidence: bulletPairs.map(item => ({ text: item.text, sourceIds: item.sourceIds })),
+        originalBullets: bulletPairs.map(item => item.text),
+      });
+    }
+
+    // Merge duplicate parses of the same role: same primary company segment
+    // + same dates. Keep the copy with a real title first so its (usually
+    // complete) bullets win the near-duplicate dedupe over truncated ones.
+    const merged = [];
+    const indexByKey = new Map();
+    for (const role of cleaned) {
+      const primaryCompany = this._normaliseText(String(role.company).split(/\s*\|\s*|\s+[—–]\s+/)[0]);
+      const key = `${primaryCompany}::${this._normaliseText(role.dates)}`;
+      if (!primaryCompany || !indexByKey.has(key)) {
+        if (primaryCompany) indexByKey.set(key, merged.length);
+        merged.push(role);
+        continue;
+      }
+      const existing = merged[indexByKey.get(key)];
+      if (existing.title && role.title && this._normaliseText(existing.title) !== this._normaliseText(role.title)) {
+        merged.push(role);
+        continue;
+      }
+      const primary = existing.title ? existing : (role.title ? role : existing);
+      const secondary = primary === existing ? role : existing;
+      const originalBullets = this._dedupeSimilarBullets([
+        ...primary.originalBullets,
+        ...secondary.originalBullets,
+      ]);
+      const evidenceByText = [...(primary.originalBulletEvidence || []), ...(secondary.originalBulletEvidence || [])];
+      merged[indexByKey.get(key)] = {
+        company: primary.company.length >= secondary.company.length ? primary.company : secondary.company,
+        dates: primary.dates || secondary.dates,
+        title: primary.title || secondary.title,
+        sourceId: primary.sourceId,
+        roleSourceIds: [...new Set([...(primary.roleSourceIds || []), ...(secondary.roleSourceIds || [])])],
+        originalBulletEvidence: originalBullets.map(text => evidenceByText.find(record =>
+          this._normaliseBulletForSimilarity(record?.text) === this._normaliseBulletForSimilarity(text)
+        ) || { text, sourceIds: [] }),
+        originalBullets,
+      };
+    }
+
+    return merged;
+  }
+
+  // Hard-wrapped PDF extraction can leave a bullet's continuation as its own
+  // "responsibility" ("...enterprise-scale" / "integrations."). Rejoin a
+  // fragment that starts lowercase onto a previous bullet that ends without
+  // terminal punctuation.
+  _joinWrappedBulletFragments(bullets = []) {
+    const output = [];
+    for (const bullet of bullets) {
+      const previous = output.length ? output[output.length - 1] : '';
+      if (
+        previous &&
+        /[a-z0-9,\-]$/i.test(previous) && !/[.!?:;]$/.test(previous) &&
+        /^[a-z]/.test(bullet)
+      ) {
+        output[output.length - 1] = `${previous} ${bullet}`;
+        continue;
+      }
+      output.push(bullet);
+    }
+    return output;
+  }
+
+  _joinWrappedBulletEvidence(items = []) {
+    const output = [];
+    for (const item of items) {
+      const previous = output.at(-1);
+      if (previous && /[a-z0-9,\-]$/i.test(previous.text) && !/[.!?:;]$/.test(previous.text) && /^[a-z]/.test(item.text)) {
+        previous.text = `${previous.text} ${item.text}`;
+        previous.sourceIds = [...new Set([...(previous.sourceIds || []), ...(item.sourceIds || [])])];
+      } else {
+        output.push({ ...item });
+      }
+    }
+    return output.map(item => ({ ...item, text: this._trimIncompleteTrailingSentence(item.text) }));
+  }
+
+  _trimIncompleteTrailingSentence(value) {
+    const text = String(value || '').trim();
+    if (!text || /[.!?]$/.test(text)) return text;
+    const completeEnd = Math.max(text.lastIndexOf('. '), text.lastIndexOf('! '), text.lastIndexOf('? '));
+    if (completeEnd < 40) return text;
+    const trailing = text.slice(completeEnd + 2).trim();
+    // Preserve ordinary punctuation-free bullets. Only remove a trailing
+    // extraction fragment when a complete sentence precedes it and the
+    // fragment visibly ends mid-clause or on an unfinished participle.
+    if (!trailing || !/(?:\b(?:and|or|to|with|including|such as)|[a-z]{5,}ing)$/i.test(trailing)) return text;
+    return text.slice(0, completeEnd + 1).trim();
+  }
+
+  // Header contact lines verbatim from the original CV (location, phone,
+  // email, profile URLs) - the parser's contactInfo has no location field,
+  // and verbatim lines preserve the user's own formatting. Falls back to
+  // composing from parsed contactInfo when the raw header yields nothing.
+  _extractHeaderContactLines(cvData = {}) {
+    const raw = String(cvData?.rawText || '');
+    const collected = [];
+    if (raw) {
+      const lines = raw.split('\n');
+      let passedHeading = false;
+      for (let i = 1; i < Math.min(lines.length, 12); i++) {
+        const trimmed = String(lines[i] || '').trim();
+        if (!trimmed) continue;
+        if (this._isLikelySectionHeader(trimmed)) { passedHeading = true; continue; }
+        const contactish =
+          /[\w.+-]+@[\w-]+\.\w+/.test(trimmed) ||
+          /https?:\/\//i.test(trimmed) ||
+          /(?:linkedin|github)\.com/i.test(trimmed) ||
+          (/(?:\+?\d[\d\s\-.()]{6,})/.test(trimmed) && !/\b(?:19|20)\d{2}\b/.test(trimmed)) ||
+          (!passedHeading && trimmed.length <= 60 && /,/.test(trimmed)
+            && /\b(?:UK|USA|United Kingdom|United States|Canada|Nigeria|Ghana|Ireland|Remote)\b/i.test(trimmed)
+            && !/\b(engineer|developer|manager|architect|analyst|designer|consultant)\b/i.test(trimmed));
+        if (contactish) collected.push(trimmed);
+      }
+    }
+    const contactInfo = cvData?.contactInfo || {};
+    // Parsed fields already present inside a collected raw header line
+    // ("Birmingham, UK | email | phone | LinkedIn") must not be appended
+    // again as standalone lines - that renders the email/phone twice.
+    const collectedText = collected.join(' | ').toLowerCase();
+    const emailPhoneFallback = [contactInfo.email, contactInfo.phone]
+      .map(v => String(v || '').trim()).filter(Boolean)
+      .filter(value => !collectedText.includes(value.toLowerCase()));
+    // Profile-link fields (LinkedIn/GitHub/Twitter) are skipped when the
+    // header already presents that platform as a labelled word (e.g. "...|
+    // LinkedIn") - adding the URL again would just duplicate a link already
+    // shown. A field with no matching word in the header (or no header
+    // lines at all) is genuinely new information and is rendered as
+    // "Label: url" so it stays tidy even without hyperlinking support.
+    const collectedHasWord = (word) => new RegExp(`\\b${word}\\b`, 'i').test(collectedText);
+    const profileLinkFallback = [
+      ['LinkedIn', contactInfo.linkedin, collectedHasWord('linkedin')],
+      ['GitHub', contactInfo.github, collectedHasWord('github')],
+      ['Portfolio', contactInfo.portfolio, false],
+      ['Website', contactInfo.website, false],
+      ['Twitter', contactInfo.twitter, collectedHasWord('twitter') || collectedHasWord('x\\.com')],
+    ]
+      .filter(([, url]) => String(url || '').trim())
+      .filter(([, url, alreadyLabelled]) => !alreadyLabelled && !collectedText.includes(String(url).trim().toLowerCase()))
+      .map(([label, url]) => `${label}: ${String(url).trim()}`);
+    const merged = [...collected, ...emailPhoneFallback, ...profileLinkFallback];
+    const seen = new Set();
+    return merged.filter(value => {
+      if (value.length > 500 || /[.!?]\s/.test(value)) return false;
+      const key = value.toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '');
+      if (seen.has(key)) return false; seen.add(key); return true;
+    }).slice(0, 8);
+  }
+
+  // Education/certifications section verbatim from the original CV text.
+  // The model never rewrites this section, so the safest source is the
+  // user's own lines - including compound headers ("EDUCATION,
+  // CERTIFICATIONS & RECOGNITION") the parser's field extraction misses.
+  _extractEducationLines(cvData = {}) {
+    const raw = String(cvData?.rawText || '');
+    if (raw) {
+      const lines = raw.split('\n');
+      const OTHER_HEADER = /^(professional\s+summary|summary|profile|about|objective|core\s+competenc(?:y|ies)|(?:professional\s+)?experience|employment(?:\s+history)?|work\s+history|technical\s+skills?|skills|technologies|projects?|achievements?|languages?|interests?|references?|links?)\s*[:\-]?\s*$/i;
+      let start = -1;
+      for (let i = 0; i < lines.length; i++) {
+        const trimmed = String(lines[i] || '').trim();
+        if (!trimmed || trimmed.length > 70) continue;
+        if (!/\b(education|certifications?|qualifications|academic)\b/i.test(trimmed)) continue;
+        if (OTHER_HEADER.test(trimmed)) continue;
+        const headerish = trimmed === trimmed.toUpperCase()
+          || /^(education|certifications?|academic|qualifications)\b/i.test(trimmed);
+        if (headerish) { start = i; break; }
+      }
+      if (start !== -1) {
+        // Raw CV text (especially multi-page PDF extraction, or a previously
+        // exported CV re-uploaded as the source) can continue with EXPERIENCE
+        // content after the education header without any section header in
+        // between. Stop collecting the moment a line matches a known
+        // experience company/title from cvData, or looks like an experience
+        // entry header (short line carrying a full date RANGE - education
+        // lines carry single years like "..., 2018", never ranges).
+        const experienceMarkers = (cvData?.experience || [])
+          .flatMap(exp => [exp?.company, exp?.title])
+          .map(v => this._normaliseText(v))
+          .filter(marker => marker && marker.length >= 6);
+        const looksLikeExperienceContent = (trimmed) => {
+          const norm = this._normaliseText(trimmed);
+          if (norm && experienceMarkers.some(marker => norm === marker || norm.includes(marker))) {
+            return true;
+          }
+          return trimmed.length <= 80 &&
+            /\b(?:19|20)\d{2}\b\s*(?:-|–|—|to)\s*(?:.*\b(?:19|20)\d{2}\b|\s*(?:present|current)\b)/i.test(trimmed);
+        };
+
+        const collected = [];
+        for (let i = start + 1; i < lines.length; i++) {
+          const trimmed = String(lines[i] || '').trim();
+          if (OTHER_HEADER.test(trimmed)) break;
+          if (looksLikeExperienceContent(trimmed)) break;
+          if (!trimmed) continue;
+          if (trimmed.length >= 3 && !/\w/.test(trimmed)) continue;
+          collected.push(trimmed.replace(/^[•\-*●▪◦–—]\s*/, ''));
+        }
+        if (collected.length > 0) return collected.slice(0, 20);
+      }
+    }
+
+    const out = [];
+    for (const edu of (cvData?.education || [])) {
+      const line = [edu.degree, edu.institution, edu.dates]
+        .map(v => String(v || '').trim()).filter(Boolean).join(', ');
+      if (line) out.push(line);
+    }
+    for (const cert of (cvData?.certifications || [])) {
+      const line = String(cert || '').trim();
+      if (line) out.push(line);
+    }
+    return out;
+  }
+
+  buildStructuredTailoringPrompt(cvData, jdData, matchMap = [], { domainRisk = null, confirmedSkills = [] } = {}) {
+    const skeleton = this.buildCvSkeleton(cvData, jdData);
+    const supported = matchMap.filter(m => m.allowedToMention).map(m => m.requirement);
+    const unsupported = matchMap.filter(m => !m.allowedToMention).map(m => m.requirement);
+    const confirmed = this._normaliseConfirmedSkills(confirmedSkills);
+    const topKeywords = (jdData?.atsKeywords || []).slice(0, 15);
+    const tailoringPlan = this.buildTailoringPlan(cvData, jdData, matchMap);
+    const roleCredibilityGuidance = this._buildRoleCredibilityGuidance(jdData);
+    const domainRiskGuidance = this._buildDomainRiskGuidance(domainRisk);
+    const matchStrength = this.calcMatchStrength(matchMap);
+    const confidenceInstruction = {
+      strong:  'MATCH LEVEL: STRONG — the CV covers most requirements. Write with confidence, achievement-led language for supported claims.',
+      moderate:'MATCH LEVEL: MODERATE — write confidently where supported; frame unsupported areas honestly as transferable experience.',
+      weak:    'MATCH LEVEL: WEAK — focus on genuine transferable evidence. Do not overstate.',
+      unknown: '',
+    }[matchStrength.level] || '';
+
+    const systemPrompt = `You are a professional CV tailoring engine. You return ONLY a single JSON object — no prose, no explanations, no markdown fences.
+
+The candidate's CV structure (name, contact details, companies, employment dates, job titles, education, certifications) is LOCKED and rendered separately by the application. You never output any of it. You write only the mutable content.
+
+OUTPUT SCHEMA — return exactly this shape:
+{
+  "summary": {"text":"3-4 sentence professional summary tailored to the target role (rule 11)","sourceIds":["..."]},
+  "competencies": [ { "label": "Category name", "items": [{"text":"Skill or Tool","sourceIds":["..."]}] } ],
+  "roles": [ { "id": "role_0", "focus": {"text":"one-line positioning","sourceIds":["..."]} or null, "bullets": [{"text":"...","sourceIds":["..."]}] } ]
+}
+
+STRICT RULES:
+1. "roles" must contain exactly one entry per role id listed under ROLES, in the same order.
+2. Summary, competency items, bullets, and focus must cite supporting SOURCE IDs. Competency items cite CANDIDATE SKILLS ids (or an ORIGINAL BULLET id that mentions the tool). Bullets must be grounded in that role's ORIGINAL BULLETS — rephrase with JD vocabulary, reorder for relevance, tighten — but never invent achievements, metrics, employers, tools, or credentials. Uncited strings are rejected.
+3. Never claim any UNSUPPORTED requirement.
+4. Include every USER-CONFIRMED skill somewhere in competencies.
+5. Competency items are short skill or tool names of 1-4 words ("Terraform", "Model registry"). NEVER requirement sentences or phrases like "IaC using Terraform", "deep experience building systems", or "X years of experience". Never list the same tool twice in different phrasings.
+6. Use 3-6 competency categories with 3-8 items each. No item may repeat across categories. Prefer the candidate's own CV skill categories when present${skeleton.skillCategories?.length ? ` (${skeleton.skillCategories.map(c => c.label).join('; ')})` : ''}; otherwise choose each category label from this list (labels outside it are replaced with "Relevant Skills"): ${CVTailor.COMPETENCY_LABELS.filter(l => !/^(?:Relevant Skills|Additional Tools & Skills)$/.test(l)).join('; ')}.
+7. "focus" is a single line (max 120 characters) positioning that role for the target job, or null for roles with no meaningful connection to it.
+8. Keep each role's bullet count close to its original count (minimum 1, maximum 6). Never leave a role empty.
+9. No section headers, dates, company names, or contact details anywhere in your output.
+10. The output must be valid JSON: double quotes, no trailing commas, no comments.
+11. Write the summary as 3-4 flowing sentences that read as one coherent paragraph, in this arc: (1) professional identity — discipline and years of experience phrased for the target role; (2) the hands-on strengths and technologies from the CV that answer the job's most important requirements; (3) how the candidate works or delivers impact; (4) an optional differentiator or recognition. Rephrase the candidate's own summary and strongest evidence with the target role's vocabulary — do not copy the original summary verbatim, and do not stitch together disconnected fragments. Every sentence must stay fully supported by the cited sources.`;
+
+    const rolesBlock = skeleton.roles.map(role => {
+      const bullets = role.originalBullets.length
+        ? role.originalBullets.map((b, i) => `    - [${(role.originalBulletEvidence[i]?.sourceIds || []).join(', ')}] ${b}`).join('\n')
+        : '    (no bullets in original)';
+      return `${role.id}: ${role.title || '(untitled)'} @ ${role.company || '(no company)'} (${role.dates || 'no dates'})\n  ORIGINAL BULLETS:\n${bullets}`;
+    }).join('\n\n');
+
+    const userPrompt = `TARGET ROLE
+  Job title:  ${jdData?.jobTitle || 'Not specified'}
+  Company:    ${jdData?.company || 'Not specified'}
+  Seniority:  ${jdData?.seniority || 'Not specified'}
+${confidenceInstruction ? `\n${confidenceInstruction}\n` : ''}
+MATCH REPORT (${matchStrength.supportedCount}/${matchStrength.totalCount} requirements supported)
+  Supported requirements (you MAY reference these):
+${supported.length ? supported.map(s => `    ✓ ${s}`).join('\n') : '    (none)'}
+
+  User-confirmed skills (include in competencies):
+${confirmed.length ? confirmed.map(s => `    + ${s}`).join('\n') : '    (none)'}
+
+  Unsupported requirements (do NOT claim these):
+${unsupported.length ? unsupported.map(s => `    ✗ ${s}`).join('\n') : '    (none)'}
+${topKeywords.length ? `\nATS KEYWORDS (weave into bullets only where truthful):\n${topKeywords.map(s => `  • ${s}`).join('\n')}\n` : ''}
+TAILORING BLUEPRINT
+  Target positioning: ${tailoringPlan.targetPositioning}
+${roleCredibilityGuidance ? `\nROLE CREDIBILITY CHECK\n${roleCredibilityGuidance}\n` : ''}${domainRiskGuidance ? `\nDOMAIN REVIEW CHECK\n${domainRiskGuidance}\n` : ''}
+ORIGINAL PROFESSIONAL SUMMARY (source id: summary:0 — grounding for the new summary)
+${String(cvData?.summary || '').trim() || '  (none)'}
+
+CANDIDATE SKILLS (grounding for competency items — cite these source ids)
+${(cvData?.skills || []).slice(0, 40).map((s, i) => `  [skill:${i}] ${s}`).join('\n') || '  (none)'}
+
+ROLES (locked context — shown so you can ground bullets; never output these fields)
+${rolesBlock}
+
+Return the JSON object now.`;
+
+    return { systemPrompt, userPrompt, temperature: 0.3, skeleton };
+  }
+
+  buildStructuredAuditPrompt(skeleton, content, matchMap = []) {
+    const supported = matchMap.filter(m => m.allowedToMention).map(m => m.requirement);
+    const unsupported = matchMap.filter(m => !m.allowedToMention).map(m => m.requirement);
+
+    const systemPrompt = `You are a CV truthfulness auditor. You receive the candidate's original role bullets and a tailored-content JSON document. Remove or reword any claim that is not supported by the original bullets or the supported requirements. Do not add new claims, roles, or skills. Keep the exact same JSON shape and the same role ids. Return ONLY the corrected JSON object — no prose, no markdown fences.`;
+
+    const rolesBlock = skeleton.roles.map(role => {
+      const bullets = role.originalBullets.length
+        ? role.originalBullets.map(b => `    - ${b}`).join('\n')
+        : '    (no bullets in original)';
+      return `${role.id}: ${role.title}\n  ORIGINAL BULLETS:\n${bullets}`;
+    }).join('\n\n');
+
+    const userPrompt = `SUPPORTED REQUIREMENTS (claims referencing these are allowed):
+${supported.length ? supported.map(s => `  ✓ ${s}`).join('\n') : '  (none)'}
+
+UNSUPPORTED REQUIREMENTS (claims referencing these must be removed):
+${unsupported.length ? unsupported.map(s => `  ✗ ${s}`).join('\n') : '  (none)'}
+
+ORIGINAL ROLE BULLETS (ground truth):
+${rolesBlock}
+
+TAILORED CONTENT TO AUDIT:
+${JSON.stringify(content)}
+
+Return the corrected JSON object now.`;
+
+    return { systemPrompt, userPrompt, temperature: 0.1 };
+  }
+
+  // Defensive JSON extraction: models wrap JSON in fences or prose despite
+  // instructions. Never trusted - the result always goes through
+  // validateStructuredContent.
+  parseStructuredContent(rawText) {
+    const text = String(rawText || '').trim();
+    if (!text) return null;
+    const unfenced = text
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/```\s*$/m, '');
+    const start = unfenced.indexOf('{');
+    const end = unfenced.lastIndexOf('}');
+    if (start === -1 || end <= start) return null;
+    try {
+      const parsed = JSON.parse(unfenced.slice(start, end + 1));
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Deterministic validation of model-returned mutable content against the
+  // locked skeleton. Returns a normalised content object, or null when the
+  // output is unsalvageable (caller falls back to the legacy text path).
+  validateStructuredContent(content, skeleton, { matchMap = [], confirmedSkills = [], cvData = {} } = {}) {
+    if (!content || typeof content !== 'object' || Array.isArray(content)) return null;
+    if (!skeleton || !Array.isArray(skeleton.roles) || skeleton.roles.length === 0) return null;
+
+    const safeConfirmedSkills = this._normaliseConfirmedSkills(confirmedSkills);
+    const groundingContext = buildGroundingContext(cvData, { confirmedFacts: safeConfirmedSkills });
+    const summaryClaim = typeof content.summary === 'object' && !Array.isArray(content.summary) ? content.summary : null;
+    const summarySourceIds = Array.isArray(summaryClaim?.sourceIds) ? summaryClaim.sourceIds.filter(id => typeof id === 'string') : [];
+    const summaryEvidenceIds = new Set(summarySourceIds.filter(id => groundingContext.sourceIndex[id]));
+    const suppliedSummarySentences = String(summaryClaim?.text || '').split(/(?<=[.!?])\s+/)
+      .map(sentence => this._clampInline(sentence, 600))
+      .filter(Boolean);
+    // A model citation slip must not gut a truthful tailored summary: a
+    // sentence whose citations fail gets a second chance against every CV
+    // record at the same evidence bar, and the supporting records join the
+    // summary's evidence trail.
+    const groundedSummarySentences = suppliedSummarySentences.filter(sentence => {
+      if (isTextSupported(sentence, groundingContext, {
+        sourceIds: summarySourceIds,
+        requireSourceIds: true,
+      }).supported) return true;
+      const fallbackRecords = (groundingContext.records || []).filter(record =>
+        isTextSupported(sentence, groundingContext, {
+          sourceIds: [record.sourceId],
+          requireSourceIds: true,
+        }).supported);
+      if (fallbackRecords.length === 0) return false;
+      for (const record of fallbackRecords.slice(0, 3)) summaryEvidenceIds.add(record.sourceId);
+      return true;
+    });
+    const acceptedSummary = groundedSummarySentences.join(' ');
+    const originalSummarySentences = String(cvData?.summary || '').split(/(?<=[.!?])\s+/).map(sentence => this._clampInline(sentence, 600)).filter(Boolean).slice(0, 4);
+    // A summary that lost most of its sentences to grounding reads as
+    // disconnected fragments; the user's own coherent summary is better than
+    // a choppy tailored one.
+    const summaryFellBelowSourceShape = originalSummarySentences.length > 1
+      && (groundedSummarySentences.length < 2
+        || groundedSummarySentences.length < suppliedSummarySentences.length / 2);
+    const summary = summaryFellBelowSourceShape
+      ? this._clampInline(originalSummarySentences.join(' '), 1200)
+      : acceptedSummary;
+    const summaryEvidence = summary
+      ? summaryFellBelowSourceShape
+        ? ['summary:0'].filter(id => groundingContext.sourceIndex[id])
+        : [...summaryEvidenceIds]
+      : [];
+    const competencies = this._normaliseStructuredCompetencies(content.competencies, {
+      matchMap,
+      confirmedSkills: safeConfirmedSkills,
+      cvData,
+      groundingContext,
+      skillCategories: skeleton.skillCategories || [],
+    });
+
+    const suppliedById = new Map();
+    for (const role of (Array.isArray(content.roles) ? content.roles : [])) {
+      if (role && typeof role === 'object' && typeof role.id === 'string') {
+        suppliedById.set(role.id, role);
+      }
+    }
+
+    const roles = skeleton.roles.map(skel => {
+      const supplied = suppliedById.get(skel.id);
+      const acceptedBullets = (Array.isArray(supplied?.bullets) ? supplied.bullets : [])
+        .map(b => ({
+          text: this._cleanStructuredBullet(typeof b === 'string' ? b : b?.text),
+          sourceIds: Array.isArray(b?.sourceIds) ? b.sourceIds.filter(id => typeof id === 'string') : [],
+        }))
+        .map(item => ({
+          ...item,
+          support: isTextSupported(item.text, groundingContext, {
+            allowedSourceIds: skel.allowedSourceIds,
+            sourceIds: item.sourceIds,
+            requireSourceIds: true,
+          }),
+        }))
+        .filter(item => item.text && item.support.supported
+          && item.support.validProposedSourceIds.length === item.sourceIds.length)
+        .map(({ support, ...item }) => ({ ...item, sourceIds: support.validProposedSourceIds }))
+        .filter(Boolean);
+      let bullets = acceptedBullets.map(item => item.text);
+      let bulletEvidence = acceptedBullets.map(item => ({ text: item.text, sourceIds: item.sourceIds }));
+      bullets = this._dedupeSimilarBullets(bullets);
+      bulletEvidence = bullets.map(text => bulletEvidence.find(item => item.text === text));
+      // A role and its substantive evidence can never disappear. Models tend
+      // to over-compress older or less relevant roles, so retain a
+      // deterministic minimum based on the amount of source evidence while
+      // still allowing the tailored bullets to lead.
+      const minimumBulletCount = Math.min(6,
+        skel.originalBullets.length >= 8 ? 5
+          : skel.originalBullets.length >= 5 ? 4
+            : skel.originalBullets.length >= 3 ? 3
+              : skel.originalBullets.length
+      );
+      if (bullets.length < minimumBulletCount) {
+        for (const original of skel.originalBullets) {
+          if (bullets.length >= minimumBulletCount) break;
+          // Skip originals the model already covers - including rephrased
+          // variants where one normalised form is a prefix of the other.
+          const key = this._normaliseBulletForSimilarity(original);
+          const covered = bullets.some(b => {
+            const existing = this._normaliseBulletForSimilarity(b);
+            return existing === key ||
+              ((existing.startsWith(key) || key.startsWith(existing)) &&
+               Math.min(existing.length, key.length) >= 25);
+          });
+          if (!covered) bullets.push(original);
+        }
+        bulletEvidence = bullets.map(text => bulletEvidence.find(item => item.text === text) || {
+          text,
+          sourceIds: skel.originalBulletEvidence?.[skel.originalBullets.indexOf(text)]?.sourceIds || [],
+        });
+      }
+      bullets = bullets.slice(0, 6);
+      bulletEvidence = bulletEvidence.slice(0, 6);
+
+      const focusClaim = typeof supplied?.focus === 'string' ? { text: supplied.focus, sourceIds: [] } : supplied?.focus;
+      let focus = this._clampInline(focusClaim?.text, 140);
+      focus = focus ? focus.replace(/^focus\s*:\s*/i, '').trim() : '';
+      const focusSourceIds = Array.isArray(focusClaim?.sourceIds) ? focusClaim.sourceIds.filter(id => typeof id === 'string') : [];
+      const focusSupport = isTextSupported(focus, groundingContext, {
+        allowedSourceIds: skel.allowedSourceIds,
+        sourceIds: focusSourceIds,
+        requireSourceIds: true,
+      });
+      if (focus && (!focusSupport.supported
+        || focusSupport.validProposedSourceIds.length !== focusSourceIds.length)) focus = '';
+
+      const focusEvidence = focus ? focusSupport.validProposedSourceIds : [];
+      return { id: skel.id, focus: focus || null, focusEvidence, bullets, bulletEvidence };
+    });
+
+    if (!summary && roles.every(r => r.bullets.length === 0)) return null;
+    const competencyEvidence = competencies.map(category => ({
+      label: category.label,
+      items: category.items.map(item => ({
+        text: item,
+        sourceIds: (groundingContext.records || [])
+          .filter(record => !/\b(?:no|not|never|without|lack(?:s|ed|ing)?|cannot|\w+n[’']t|(?:ca|wo|do|does|did|is|was|are|were|has|have|had|could|should|would|ai)nt)\b/i.test(record.text)
+            && this._normaliseText(record.text).includes(this._normaliseText(item)))
+          .map(record => record.sourceId)
+          .slice(0, 5),
+      })),
+    }));
+    return { summary, summaryEvidence, competencies, competencyEvidence, roles };
+  }
+
+  _clampInline(value, maxLen) {
+    if (value === null || value === undefined) return '';
+    const text = String(value)
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/__([^_]+)__/g, '$1')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (text.length <= maxLen) return text;
+    const cut = text.slice(0, maxLen);
+    const lastSpace = cut.lastIndexOf(' ');
+    return (lastSpace > maxLen * 0.6 ? cut.slice(0, lastSpace) : cut).replace(/[,;:\s]+$/, '');
+  }
+
+  _cleanStructuredBullet(bullet) {
+    const text = this._clampInline(String(bullet || '').replace(/^[•\-*●▪◦–—]\s*/, ''), 320);
+    if (!text || text.length < 8) return '';
+    return text.replace(/[,\s]+$/, '');
+  }
+
+  _dedupeSimilarBullets(bullets = []) {
+    const seen = new Set();
+    const result = [];
+    for (const bullet of bullets) {
+      const key = this._normaliseBulletForSimilarity(bullet);
+      if (!key || seen.has(key)) continue;
+      const truncatedDuplicate = [...seen].some(existing =>
+        (existing.startsWith(key) || key.startsWith(existing)) &&
+        Math.min(existing.length, key.length) >= 30
+      );
+      if (truncatedDuplicate) continue;
+      seen.add(key);
+      result.push(bullet);
+    }
+    return result;
+  }
+
+  // A competency item is grounded when a non-negated CV record contains it
+  // verbatim (normalised) AND that evidence passes the same isTextSupported
+  // bar the quality evaluator applies. This is the deterministic check the
+  // app itself can make - unlike model-cited sourceIds, which small models
+  // routinely omit or garble. Dropping every uncited item was the failure
+  // mode where a CV full of real skills rendered with a single
+  // confirmed-skills catch-all line.
+  _groundCompetencyItem(item, groundingContext) {
+    const key = this._normaliseText(item);
+    if (!key) return { supported: false, sourceIds: [] };
+    const sourceIds = (groundingContext?.records || [])
+      .filter(record => !/\b(?:no|not|never|without|lack(?:s|ed|ing)?|\w+n['’]?t)\b/i.test(record.text)
+        && this._normaliseText(record.text).includes(key))
+      .map(record => record.sourceId)
+      .slice(0, 5);
+    if (sourceIds.length === 0) return { supported: false, sourceIds: [] };
+    const supported = isTextSupported(item, groundingContext, { sourceIds, requireSourceIds: true }).supported;
+    return { supported, sourceIds };
+  }
+
+  _normaliseStructuredCompetencies(raw, { confirmedSkills = [], groundingContext, skillCategories = [] } = {}) {
+    const PROSE_RE = /\b(using|with|within|experience|experienced|deep|strong|proficien\w*|expertise|knowledge|ability|abilities|years?|including|such as|hands.on)\b/i;
+    const safeLabels = new Map(CVTailor.COMPETENCY_LABELS.map(label => [this._normaliseText(label), label]));
+    // The user's own category labels are trusted display text - the model may
+    // reuse them even though they are outside the app vocabulary.
+    for (const category of skillCategories) {
+      const label = this._clampInline(category?.label, 48);
+      if (label) safeLabels.set(this._normaliseText(label), label);
+    }
+    const confirmed = this._normaliseConfirmedSkills(confirmedSkills);
+    const confirmedKeys = new Set(confirmed.map(s => this._normaliseText(s)));
+
+    const categories = [];
+    const globalKeys = new Set();
+    const addCategory = (label, deduped) => {
+      if (deduped.length < 1) return;
+      const existing = categories.find(category => category.label === label);
+      if (existing) existing.items = this._dedupeContainedSkillItems([...existing.items, ...deduped]).slice(0, 8);
+      else categories.push({ label, items: deduped.slice(0, 8) });
+    };
+    for (const cat of (Array.isArray(raw) ? raw : [])) {
+      const proposedLabel = this._clampInline(cat?.label, 48);
+      if (!proposedLabel) continue;
+      // Category labels are model-authored display text. Keep them within an
+      // application-owned vocabulary (or the user's own CV category labels)
+      // so a model cannot smuggle an employer, credential, instruction, or
+      // other unsupported claim into a heading.
+      const label = safeLabels.get(this._normaliseText(proposedLabel)) || 'Relevant Skills';
+      const items = [];
+      for (const rawItem of (Array.isArray(cat?.items) ? cat.items : [])) {
+        const claim = rawItem && typeof rawItem === 'object' ? rawItem : null;
+        const item = this._clampInline(claim?.text, 48);
+        if (!item) continue;
+        if (PROSE_RE.test(item)) continue;
+        if (item.split(/\s+/).length > 4) continue;
+        const key = this._normaliseText(item);
+        if (!key || globalKeys.has(key)) continue;
+        const sourceIds = Array.isArray(claim?.sourceIds) ? claim.sourceIds.filter(id => typeof id === 'string') : [];
+        const supported = confirmedKeys.has(key)
+          || this._groundCompetencyItem(item, groundingContext).supported
+          || isTextSupported(item, groundingContext, { sourceIds, requireSourceIds: true }).supported;
+        if (!supported) continue;
+        globalKeys.add(key);
+        items.push(item);
+      }
+      addCategory(label, this._dedupeContainedSkillItems(items));
+      if (categories.length >= 6) break;
+    }
+
+    // Transfer the user's own skill categories: when the model returned fewer
+    // than five usable categories, top up from the CV's skills section
+    // (verbatim user content, grounded by construction) so matched skills are
+    // never lost between the source CV and the tailored CV.
+    for (const category of skillCategories) {
+      if (categories.length >= 7) break;
+      if (categories.length >= 5 && categories.reduce((n, c) => n + c.items.length, 0) >= 15) break;
+      const label = this._clampInline(category?.label, 48);
+      if (!label) continue;
+      const items = (category.items || [])
+        .map(item => this._clampInline(item, 48))
+        .filter(item => item && !PROSE_RE.test(item) && item.split(/\s+/).length <= 5)
+        .filter(item => {
+          const key = this._normaliseText(item);
+          if (!key || globalKeys.has(key)) return false;
+          if (!this._groundCompetencyItem(item, groundingContext).supported) return false;
+          globalKeys.add(key);
+          return true;
+        });
+      addCategory(label, this._dedupeContainedSkillItems(items));
+    }
+
+    // Every user-confirmed skill must be present somewhere. The category
+    // label is recruiter-facing text - never expose internal app vocabulary
+    // like "Confirmed Skills" on the rendered CV. Skills already covered by a
+    // category item (ignoring spacing: "Argo CD" vs "ArgoCD") are not
+    // re-listed.
+    const compactKeys = new Set([...globalKeys].map(key => key.replace(/\s+/g, '')));
+    const missingConfirmed = confirmed.filter(s => {
+      const key = this._normaliseText(s);
+      return !globalKeys.has(key) && !compactKeys.has(key.replace(/\s+/g, ''));
+    });
+    if (missingConfirmed.length > 0) {
+      const target = categories.find(c => c.label === 'Additional Tools & Skills');
+      if (target) target.items.push(...missingConfirmed);
+      else categories.push({ label: 'Additional Tools & Skills', items: missingConfirmed.slice(0, 8) });
+    }
+
+    return categories;
+  }
+
+  // Drop redundant longer variants of an already-listed skill: "IaC using
+  // Terraform" collapses into "Terraform"; "reproducible training workflows"
+  // collapses into "reproducible training". Two-word product names that
+  // merely contain another token ("Azure DevOps" vs "Azure") are kept -
+  // containment only removes items that are 3+ tokens or contain glue words,
+  // i.e. phrase-shaped rather than name-shaped.
+  _dedupeContainedSkillItems(items = []) {
+    const GLUE = new Set(['using', 'with', 'in', 'for', 'of', 'and', 'on', 'to', 'via', 'across', 'the', 'a']);
+    const entries = items.map(item => {
+      const tokens = this._normaliseText(item).split(/\s+/).filter(Boolean);
+      return { item, tokens };
+    }).filter(e => e.tokens.length > 0);
+
+    const sorted = [...entries].sort((a, b) => a.tokens.length - b.tokens.length);
+    const kept = [];
+    for (const entry of sorted) {
+      const phraseShaped = entry.tokens.length >= 3 || entry.tokens.some(t => GLUE.has(t));
+      const containsKept = kept.some(k =>
+        k.tokens.length < entry.tokens.length &&
+        k.tokens.every(tok => entry.tokens.includes(tok))
+      );
+      if (phraseShaped && containsKept) continue;
+      kept.push(entry);
+    }
+    const keptItems = new Set(kept.map(k => k.item));
+    return entries.map(e => e.item).filter(item => keptItems.has(item));
+  }
+
+  // Deterministic template: the ONLY producer of tailored CV text in
+  // structured mode. Canonical Harvard shape, blank lines owned here, in
+  // exactly the format the export renderer and validators expect.
+  renderTailoredCV(skeleton, content) {
+    const lines = [];
+    if (skeleton.name) lines.push(skeleton.name);
+    if (skeleton.headline) lines.push(skeleton.headline);
+    for (const contact of (skeleton.contacts || [])) lines.push(contact);
+    lines.push('');
+
+    if (content.summary) {
+      lines.push('PROFESSIONAL SUMMARY');
+      lines.push(content.summary);
+      lines.push('');
+    }
+
+    if (Array.isArray(content.competencies) && content.competencies.length > 0) {
+      lines.push('CORE COMPETENCIES');
+      for (const cat of content.competencies) {
+        lines.push(`${cat.label}: ${cat.items.join(', ')}`);
+      }
+      lines.push('');
+    }
+
+    if (Array.isArray(skeleton.roles) && skeleton.roles.length > 0) {
+      lines.push('PROFESSIONAL EXPERIENCE');
+      const contentById = new Map((content.roles || []).map(r => [r.id, r]));
+      for (const skel of skeleton.roles) {
+        const role = contentById.get(skel.id);
+        if (skel.company) lines.push(skel.company);
+        if (skel.dates) lines.push(skel.dates);
+        if (skel.title) lines.push(skel.title);
+        if (role?.focus) lines.push(`Focus: ${role.focus}`);
+        for (const bullet of (role?.bullets || [])) lines.push(`• ${bullet}`);
+        lines.push('');
+      }
+    }
+
+    if (Array.isArray(skeleton.projects) && skeleton.projects.length > 0) {
+      lines.push('PROJECTS');
+      for (const project of skeleton.projects) {
+        lines.push(project.name);
+        lines.push(project.url);
+        for (const bullet of (project.originalBullets || project.bullets || [])) lines.push(`• ${bullet}`);
+        if ((project.skills || []).length) lines.push(`Technologies: ${project.skills.join(', ')}`);
+        lines.push('');
+      }
+    }
+
+    for (const section of (skeleton.extraSections || [])) {
+      lines.push(section.heading);
+      for (const item of section.items) lines.push(`• ${item}`);
+      lines.push('');
+    }
+
+    if (Array.isArray(skeleton.educationLines) && skeleton.educationLines.length > 0) {
+      lines.push('EDUCATION, CERTIFICATIONS & RECOGNITION');
+      for (const edu of skeleton.educationLines) lines.push(`• ${edu}`);
+    }
+
+    return `${lines.join('\n').replace(/\n{3,}/g, '\n\n').trim()}\n`;
+  }
+
   _getLockedContactFields(contactInfo = {}) {
     const fields = [
       ['Full name', contactInfo.name],
@@ -1710,6 +3313,20 @@ Do not add anything new. Return the complete corrected CV.`;
       result.push(clean);
     }
     return result;
+  }
+
+  // User confirmation authorises a concise candidate skill, never an entire
+  // JD requirement. This boundary is intentionally stricter than ordinary
+  // display cleanup because confirmed values become grounding evidence.
+  _normaliseConfirmedSkills(skills = []) {
+    return this._uniqueDisplaySkills(skills).filter(skill => {
+      if (skill.length > 64 || /[,;\n]|\s(?:\/|\||&)\s|\s\b(?:and|or)\b\s/i.test(skill)) return false;
+      if (skill.split(/\s+/).length > 4) return false;
+      if (this._isJdRequirementProse(skill) || this._isRequirementFragment(skill)) return false;
+      if (/\b(?:years?\s+of\s+experience|experience\s+(?:with|in)|ability\s+to|production\s+experience|required|preferred)\b/i.test(skill)) return false;
+      if (/^(?:must|should|build|develop|manage|deliver|own|responsible|proven)\b/i.test(skill)) return false;
+      return /[A-Za-z]/.test(skill);
+    }).slice(0, 30);
   }
 
   _rankSupportedKeywords(matchMap = [], jdData = {}) {
@@ -1862,28 +3479,88 @@ Do not add anything new. Return the complete corrected CV.`;
   }
 
   _findTitleLineIndex(lines, title, start = 0) {
-    const titleKey = this._normaliseText(title);
-    if (!titleKey) return -1;
-    for (let i = Math.max(0, start); i < lines.length; i++) {
-      const line = this._normaliseText(lines[i]);
-      if (!line) continue;
-      if (line === titleKey) return i;
-      if (line === this._normaliseText(`Position: ${title}`)) return i;
-      if (/^position\s+/.test(line) && line.includes(titleKey)) return i;
-      if (line.startsWith(titleKey) && line.length <= titleKey.length + 80) return i;
-      if (line.includes(titleKey) && line.length <= titleKey.length + 20) return i;
+    const scan = (titleKey) => {
+      if (!titleKey) return -1;
+      for (let i = Math.max(0, start); i < lines.length; i++) {
+        const raw = String(lines[i] || '');
+        const line = this._normaliseText(raw);
+        if (!line) continue;
+        if (line === titleKey) return i;
+        if (line === this._normaliseText(`Position: ${titleKey}`)) return i;
+        if (/^position\s+/.test(line) && line.includes(titleKey)) return i;
+        if (line.startsWith(titleKey) && line.length <= titleKey.length + 80) return i;
+        if (line.includes(titleKey) && line.length <= titleKey.length + 20) return i;
+        // Composite pipe titles ("Cloud Support Engineer | Cloud Service SME"):
+        // match when any pipe-separated segment equals the title exactly.
+        if (raw.includes('|') && raw.split('|').some(seg => this._normaliseText(seg) === titleKey)) {
+          return i;
+        }
+      }
+      return -1;
+    };
+
+    const fullKey = this._normaliseText(title);
+    const direct = scan(fullKey);
+    if (direct !== -1) return direct;
+
+    // Parsed title itself may be composite while the LLM rendered only the
+    // primary segment — retry with the first pipe segment when substantial.
+    if (String(title || '').includes('|')) {
+      const primary = this._normaliseText(String(title).split('|')[0]);
+      if (primary && primary.length >= 8 && primary !== fullKey) {
+        return scan(primary);
+      }
     }
     return -1;
   }
 
-  _findRoleEntryEnd(lines, titleIdx, titleKeys = new Set()) {
+  // Whether `rawLine` represents `normalisedTarget` as an entry-boundary
+  // marker - an exact match, a pipe-segment match (for composite "A | B"
+  // lines like "Cloud Support Engineer | Cloud Service SME"), or a prefix
+  // match at a genuine word boundary (for a preserved title the LLM appended
+  // a suffix to, like "Senior Customer Success Engineer IC4" or "DevOps
+  // Engineer - Transitioned from Senior Technical Support Engineer").
+  // _findTitleLineIndex already tolerates all three shapes when locating a
+  // role's OWN title; this centralises the same tolerance for detecting when
+  // scanning has crossed INTO a different role, so every entry-boundary
+  // detector agrees on what counts as a match - three independent exact-match
+  // checks (_findTitleLineIndex, _findRoleEntryEnd, _findExperienceEntryEnd)
+  // is exactly how a composite-pipe-title fix landed in only one of them,
+  // silently breaking entry-boundary detection for composite-titled roles
+  // in the other two (a later role's Focus/bullets get scooped into an
+  // earlier role's window because the boundary between them was missed).
+  _lineMatchesBoundaryValue(rawLine, normalisedTarget) {
+    if (!normalisedTarget) return false;
+    const line = this._normaliseText(rawLine);
+    if (line === normalisedTarget) return true;
+    if (String(rawLine || '').includes('|')) {
+      return String(rawLine).split('|').some(seg => this._normaliseText(seg) === normalisedTarget);
+    }
+    if (line.startsWith(normalisedTarget)) {
+      const rest = line.slice(normalisedTarget.length);
+      if (!rest || /^[\s\-–—(:,]/.test(rest)) return true;
+    }
+    return false;
+  }
+
+  _findRoleEntryEnd(lines, titleIdx, titleKeys = new Set(), companyKeys = new Set(), currentCompanyKey = '') {
     for (let i = titleIdx + 1; i < lines.length; i++) {
       const trimmed = String(lines[i] || '').trim();
       if (!trimmed) continue;
       if (this._isLikelySectionHeader(trimmed)) return i;
 
-      const key = this._normaliseText(trimmed);
-      if (i > titleIdx + 1 && titleKeys.has(key)) return i;
+      if (i > titleIdx + 1 && [...titleKeys].some(key => this._lineMatchesBoundaryValue(trimmed, key))) {
+        return i;
+      }
+      // Titles alone miss the boundary when an intervening role's title also
+      // carries an unrecognised suffix - a company line is a second, more
+      // reliable signal that scanning has crossed into a different role.
+      // Exclude this role's own company so a coincidental repeat within its
+      // own block can never falsely truncate it.
+      const isOtherCompany = [...companyKeys].some(key => key !== currentCompanyKey && this._lineMatchesBoundaryValue(trimmed, key));
+      if (i > titleIdx + 1 && isOtherCompany) {
+        return i;
+      }
     }
     return lines.length;
   }
@@ -1896,8 +3573,8 @@ Do not add anything new. Return the complete corrected CV.`;
       if (!trimmed) continue;
       if (this._isLikelySectionHeader(trimmed)) return i;
 
-      const key = this._normaliseText(trimmed);
-      if (i > titleIdx + 1 && companyKeys.has(key) && key !== currentCompanyKey) {
+      const isOtherCompany = [...companyKeys].some(key => key !== currentCompanyKey && this._lineMatchesBoundaryValue(trimmed, key));
+      if (i > titleIdx + 1 && isOtherCompany) {
         return i;
       }
     }
@@ -1953,7 +3630,125 @@ Do not add anything new. Return the complete corrected CV.`;
     if (/\b(reduced|improved|increased|built|developed|led|designed|implemented|delivered|partnered|mentored|scaled|accelerated|strengthened|mitigated)\b/i.test(bullet)) {
       score += 3;
     }
+    if (/\b(?:\d+%|\$[\d,]+|\d+x|\d+\+|\d{2,}\b)/i.test(bullet)) {
+      score += 4;
+    }
     return score;
+  }
+
+  _deriveExperienceDepthBullets(bullets = []) {
+    const derived = [];
+    const actionRe = /^(?:built|developed|designed|implemented|delivered|managed|led|supported|provided|reduced|improved|increased|automated|maintained|created|configured|deployed|monitored|troubleshot|partnered|collaborated|documented|became|contributed|strengthened|resolved|acted)\b/i;
+
+    for (const bullet of bullets) {
+      const source = String(bullet || '')
+        .replace(/^[-•*●▪◦–—]\s*/, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!source) continue;
+
+      const includingMatch = source.match(/^(.+?),\s*including\s+(.+)$/i);
+      if (includingMatch) {
+        const base = includingMatch[1].replace(/[.;]\s*$/, '').trim();
+        if (actionRe.test(base)) derived.push(base);
+        derived.push(...this._deriveGroupedSupportBullets(includingMatch[2], 'Supported'));
+      }
+
+      const whileMatch = source.match(/^(.+?)\s+while\s+(.+)$/i);
+      if (whileMatch) {
+        const base = whileMatch[1].replace(/[.;]\s*$/, '').trim();
+        if (actionRe.test(base)) derived.push(base);
+        derived.push(...this._deriveGroupedSupportBullets(
+          this._normaliseDerivedClause(whileMatch[2]),
+          ''
+        ));
+      }
+
+      const parts = source
+        .split(/\s*(?:;|\.\s+|\s+\bwhile\b\s+)\s*/i)
+        .map(part => part.trim())
+        .filter(Boolean);
+
+      if (parts.length < 2) continue;
+
+      for (const part of parts) {
+        const normalisedPart = this._normaliseDerivedClause(part);
+        const words = normalisedPart.split(/\s+/).filter(Boolean);
+        if (words.length < 6 || words.length > 34) continue;
+        if (!actionRe.test(normalisedPart)) continue;
+        derived.push(normalisedPart.replace(/[.;]\s*$/, ''));
+      }
+    }
+
+    return this._uniqueDisplaySkills(derived);
+  }
+
+  _normaliseDerivedClause(clause = '') {
+    const clean = String(clause || '').replace(/[.;]\s*$/, '').trim();
+    if (!clean) return '';
+
+    const replacements = [
+      [/^contributing\s+to\b/i, 'Contributed to'],
+      [/^supporting\b/i, 'Supported'],
+      [/^building\b/i, 'Built'],
+      [/^managing\b/i, 'Managed'],
+      [/^developing\b/i, 'Developed'],
+      [/^designing\b/i, 'Designed'],
+      [/^implementing\b/i, 'Implemented'],
+      [/^delivering\b/i, 'Delivered'],
+      [/^documenting\b/i, 'Documented'],
+      [/^maintaining\b/i, 'Maintained'],
+      [/^configuring\b/i, 'Configured'],
+      [/^troubleshooting\b/i, 'Troubleshot'],
+    ];
+
+    for (const [pattern, replacement] of replacements) {
+      if (pattern.test(clean)) return clean.replace(pattern, replacement);
+    }
+    return clean;
+  }
+
+  _deriveGroupedSupportBullets(text = '', fallbackVerb = 'Supported') {
+    const normalised = this._normaliseDerivedClause(text)
+      .replace(/^including\s+/i, '')
+      .replace(/[.;]\s*$/, '')
+      .trim();
+    if (!normalised) return [];
+
+    const actionRe = /^(?:built|developed|designed|implemented|delivered|managed|led|supported|provided|reduced|improved|increased|automated|maintained|created|configured|deployed|monitored|troubleshot|partnered|collaborated|documented|became|contributed|strengthened|resolved|acted)\b/i;
+    if (actionRe.test(normalised) && !/,/.test(normalised)) return [normalised];
+
+    const verbMatch = normalised.match(/^([A-Z][a-z]+(?:ed|t|ed to)?\s+(?:to\s+)?)?(.*)$/);
+    const prefix = actionRe.test(normalised)
+      ? normalised.match(/^(?:Contributed to|Supported|Managed|Delivered|Documented|Developed|Built|Implemented|Provided)\s+/i)?.[0] || ''
+      : fallbackVerb ? `${fallbackVerb} ` : '';
+    const body = prefix && normalised.toLowerCase().startsWith(prefix.toLowerCase())
+      ? normalised.slice(prefix.length)
+      : (verbMatch?.[2] || normalised);
+    const items = body
+      .replace(/\s+and\s+/gi, ', ')
+      .split(',')
+      .map(item => item.trim())
+      .filter(Boolean);
+
+    if (items.length === 0) return [];
+    if (items.length === 1) return [`${prefix}${items[0]}`.trim()];
+
+    const grouped = [];
+    for (let i = 0; i < items.length; i += 2) {
+      const group = items.slice(i, i + 2);
+      const phrase = group.length === 2 ? `${group[0]} and ${group[1]}` : group[0];
+      grouped.push(`${prefix}${phrase}`.trim());
+    }
+    return grouped;
+  }
+
+  _looksLikeExperienceResponsibility(text) {
+    const t = String(text || '').trim();
+    if (!t) return false;
+    if (/^[•●▪◦\-–—]/.test(t)) return true;
+    if (t.split(/\s+/).length < 5) return false;
+    return /^(?:built|developed|designed|implemented|delivered|managed|led|supported|provided|reduced|improved|increased|automated|maintained|created|configured|deployed|monitored|troubleshot|partnered|collaborated|documented|became|performed|owned|drove|coordinated|resolved|optimized|optimised)\b/i.test(t);
   }
 
   _looksLikeDateLine(line) {
@@ -2006,6 +3801,61 @@ Do not add anything new. Return the complete corrected CV.`;
     return String(text || '').toLowerCase().replace(/[^\w\s.+#]/g, ' ').replace(/\s+/g, ' ').trim();
   }
 
+  _normaliseBulletForSimilarity(text) {
+    return this._normaliseText(text)
+      .replace(/[.!?]+$/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  _scoreExperienceBulletForTarget(text, jdData = {}, matchMap = []) {
+    const raw = String(text || '').trim();
+    const normalised = this._normaliseText(raw);
+    if (!normalised) return 0;
+
+    const targetPhrases = [
+      jdData?.jobTitle,
+      ...(jdData?.requiredSkills || []),
+      ...(jdData?.preferredSkills || []),
+      ...(jdData?.tools || []),
+      ...(jdData?.atsKeywords || []),
+      ...(jdData?.responsibilities || []),
+      ...(matchMap || []).filter(m => m?.allowedToMention).map(m => m.requirement),
+    ].flat().filter(Boolean);
+
+    let score = 0;
+    const targetTokens = new Set();
+    for (const phrase of targetPhrases) {
+      const phraseKey = this._normaliseText(phrase);
+      if (phraseKey.length >= 4 && normalised.includes(phraseKey)) {
+        score += phraseKey.includes(' ') ? 14 : 8;
+      }
+      for (const token of phraseKey.split(/\s+/)) {
+        if (token.length >= 4) targetTokens.add(token);
+      }
+    }
+
+    for (const token of targetTokens) {
+      if (normalised.includes(token)) score += 2;
+    }
+
+    if (/\b\d+(?:[.,]\d+)?\s*(?:%|x|k|m|users?|customers?|teams?|systems?|services?|pipelines?|models?|hours?|days?|weeks?|months?|years?)\b/i.test(raw)) {
+      score += 8;
+    }
+    if (/^(?:delivered|designed|built|implemented|improved|reduced|increased|automated|resolved|led|owned|managed|deployed|optimized|optimised|strengthened|accelerated)\b/i.test(raw)) {
+      score += 4;
+    }
+    if (/\b(?:stakeholder|customer|production|enterprise|architecture|platform|reliability|automation|ci\/cd|kubernetes|docker|aws|azure|gcp|python|observability|security)\b/i.test(raw)) {
+      score += 3;
+    }
+    if (/\b(?:responsible for|worked on|helped with|involved in)\b/i.test(raw)) {
+      score -= 2;
+    }
+    if (raw.length > 220) score -= 3;
+
+    return score;
+  }
+
   _escapeRegExp(text) {
     return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
@@ -2013,6 +3863,14 @@ Do not add anything new. Return the complete corrected CV.`;
   _isHeaderContactLine(line) {
     return /[\w.+-]+@[\w-]+\.\w+/.test(line)
       || /https?:\/\//i.test(line)
+      // Bare domain + path with no protocol, e.g. "linkedin.com/in/jordantaylor"
+      // or "github.com/jordantaylor" - common when contact info is pasted
+      // without the https:// prefix. Anchored to the WHOLE line (not just a
+      // substring match) so ordinary prose that happens to reference a repo
+      // URL mid-sentence ("...hosted at github.com/x for anyone who wanted
+      // to review it") isn't mistaken for a standalone contact line - a real
+      // contact line is essentially just the URL, nothing else.
+      || /^(?:linkedin|github|gitlab|portfolio)\.[a-z]{2,}\/\S+$/i.test(line)
       || /^(linkedin|github|website|portfolio|personal\s+website|personal\s+site)$/i.test(line)
       || /(?:\+\d[\d\s\-.()]{5,}|\b\d{3,5}[\s\-.]\d{3,5}[\s\-.]\d{3,6}\b)/.test(line);
   }
@@ -2027,15 +3885,60 @@ Do not add anything new. Return the complete corrected CV.`;
   _isParserArtefact(text) {
     const t = String(text || '').trim();
     if (!t) return false;
+    if (this._isLocationDateParserArtefact(t)) return true;
     if (/[.!?]$/.test(t)) return true;
     if (/^(and|or|with|for|to|in|of|at|by|from|that|which|who|when|where)\s+/i.test(t) && /^[a-z]/.test(t)) return true;
     if (/^[a-z]/.test(t) && !/[A-Z]/.test(t.slice(1)) && t.split(/\s+/).length >= 2) return true;
     return false;
   }
 
+  _isLocationDateParserArtefact(text) {
+    const t = String(text || '').trim();
+    if (!t || t.length > 60) return false;
+    const month = '(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)';
+    const countryOrLocation = '(?:UK|United Kingdom|England|Scotland|Wales|Ireland|Nigeria|USA|United States|Canada|Germany|France|Remote|London|Birmingham|Manchester|Lagos|Abuja)';
+    const gluedCountryMonth = new RegExp(`^${countryOrLocation}\\s*${month}\\b`, 'i');
+    const anyGluedCountryMonth = new RegExp(`\\b${countryOrLocation}${month}\\b`, 'i');
+    const locationCountryMonth = new RegExp(`\\b${countryOrLocation}\\b\\s*,?\\s*\\b${countryOrLocation}\\s*${month}\\b`, 'i');
+    const commaLocationMonth = new RegExp(`,\\s*\\b${countryOrLocation}\\s*${month}\\b`, 'i');
+    return gluedCountryMonth.test(t) || anyGluedCountryMonth.test(t) || locationCountryMonth.test(t) || commaLocationMonth.test(t);
+  }
+
   _isLikelySectionHeader(line) {
-    return /^(professional\s+summary|core\s+competenc(?:y|ies)|professional\s+experience|technical\s+skills?|education|certifications?\s*(?:&|and)\s*awards?|technical\s+leadership|achievements?|projects?)\s*[:\-]?$/i
-      .test(String(line || '').trim());
+    // Section-boundary functions (mergeDuplicateSkillCategoryLines,
+    // ensureExperienceDepth, etc.) rely on this to detect leaving the skills
+    // section - the generation prompt dictates "PROFESSIONAL EXPERIENCE"
+    // exactly, but real/uploaded CVs and LLM output vary ("Experience",
+    // "Employment History", "Work History"). Missing a variant here silently
+    // keeps section-scoped logic active past the section it should stop at.
+    const trimmed = String(line || '').trim();
+    if (/^(professional\s+summary|core\s+competenc(?:y|ies)|(?:professional\s+)?experience|employment(?:\s+history)?|work\s+history|technical\s+skills?|education|certifications?\s*(?:&|and)\s*awards?|technical\s+leadership|achievements?|projects?)\s*[:\-]?$/i
+      .test(trimmed)) {
+      return true;
+    }
+    // The anchored list above only matches bare section names, but real CVs
+    // routinely combine several into one heading ("EDUCATION, CERTIFICATIONS
+    // & RECOGNITION", "TECHNICAL LEADERSHIP, ACHIEVEMENTS & INNOVATION").
+    // Rather than enumerate every combination, fall back to an ALL-CAPS
+    // multi-word heuristic (mirroring cv-export.js's renderer-side check) -
+    // without it, an unrecognised compound header is invisible to
+    // entry-boundary detection, so the last experience entry's window never
+    // closes and silently swallows everything after it, including the next
+    // section's own content. Require multiple words so a single all-caps
+    // company acronym on its own line (IBM, SAP, NASA) is never mistaken for
+    // a section boundary - real section headers are always multi-word.
+    // "/" is allowed ("EDUCATION / CERTIFICATIONS") - digits, @ and + still
+    // disqualify a line, since those indicate dates/contacts, not headings.
+    if (
+      trimmed.length >= 3 &&
+      /\s/.test(trimmed) &&
+      trimmed === trimmed.toUpperCase() &&
+      /[A-Z]/.test(trimmed) &&
+      !/[@+\d]/.test(trimmed)
+    ) {
+      return true;
+    }
+    return false;
   }
 
   _isSkillsSectionHeader(line) {
@@ -2055,7 +3958,7 @@ Do not add anything new. Return the complete corrected CV.`;
 
     const allowedSeed = [
       ...((matchMap || []).filter(m => m.allowedToMention).map(m => m.requirement)),
-      ...(confirmedSkills || []),
+      ...this._normaliseConfirmedSkills(confirmedSkills),
     ];
     const allowedPhrases = this._uniqueDisplaySkills(
       allowedSeed.flatMap(item => this._splitSkillLine(String(item || '')))
@@ -2078,9 +3981,11 @@ Do not add anything new. Return the complete corrected CV.`;
       }
     }
 
-    const unique = this._uniqueDisplaySkills(compactItems)
-      .filter(item => !this._isJdRequirementProse(item))
-      .filter(item => !this._isRequirementFragment(item));
+    const unique = this._dedupeContainedSkillItems(
+      this._uniqueDisplaySkills(compactItems)
+        .filter(item => !this._isJdRequirementProse(item))
+        .filter(item => !this._isRequirementFragment(item))
+    );
 
     const grouped = this._buildGroupedSkills(unique, jdData);
     if (grouped.length > 0) return grouped;
@@ -2357,6 +4262,7 @@ Do not add anything new. Return the complete corrected CV.`;
     for (const source of cvSources) {
       if (!source) continue;
       const lower = this._normaliseText(source);
+      if (/\b(?:no|not|never|without|lack(?:s|ed|ing)?|do(?:es)?n t)\b/i.test(lower)) continue;
 
       // Full phrase match (strongest signal)
       if (lower.includes(needle)) {

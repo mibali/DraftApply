@@ -143,6 +143,80 @@ Used log analysis to reproduce and isolate customer platform issues.`,
     expect(prompt.userPrompt).toMatch(/\[Achievement\] Improved production reliability/);
   });
 
+  it('keeps the complete original CV and all parsed role bullets available to answer generation', () => {
+    const omittedByOldCaps = 'Recovered a legacy public-sector migration by aligning six resistant stakeholder groups.';
+    const rawCv = `${CV}\n\nVOLUNTEERING\nMentored career changers through a community technology programme.\n${omittedByOldCaps}`;
+    const prompt = buildPrompts({
+      question: 'Describe a time you influenced stakeholders during a difficult migration',
+      cvText: rawCv,
+      jobDescription: 'Lead complex customer migrations and build stakeholder alignment.',
+      cvData: {
+        contactInfo: { name: 'Michael T Bali' },
+        experience: [{
+          title: 'Migration Lead', company: 'Legacy Systems Ltd', dates: '2018-2020',
+          responsibilities: [
+            'First bullet', 'Second bullet', 'Third bullet', 'Fourth bullet',
+            'Fifth bullet', 'Sixth bullet', 'Seventh bullet', omittedByOldCaps,
+          ],
+        }],
+      },
+    });
+
+    expect(prompt.userPrompt).toContain(omittedByOldCaps);
+    expect(prompt.userPrompt).toContain('VOLUNTEERING');
+    expect(prompt.userPrompt.match(/VOLUNTEERING/g)).toHaveLength(1);
+    expect(prompt.userPrompt).not.toMatch(/COMPLETE ORIGINAL CV — SOURCE OF TRUTH/);
+  });
+
+  it('does not duplicate the canonical CV when parsed data is available', () => {
+    const marker = 'UNIQUE_SOURCE_MARKER_FOR_PROMPT';
+    const prompt = buildPrompts({
+      question: 'Describe your relevant experience',
+      cvText: `${CV}\n${marker}`,
+      jobDescription: 'Build reliable systems.',
+      cvData: { experience: [{ title: 'Engineer', company: 'Acme', responsibilities: ['Built reliable systems'] }] },
+    });
+    expect(prompt.userPrompt.match(new RegExp(marker, 'g'))).toHaveLength(1);
+  });
+
+  it('uses a technical answer contract and covers every part of multi-part questions', () => {
+    const prompt = buildPrompts({
+      question: 'Describe your experience designing cloud API architectures, and explain one important technical decision you made?',
+      cvText: CV,
+      jobDescription: 'Design secure cloud APIs and explain architectural tradeoffs.',
+    });
+    expect(prompt.questionType).toBe('technical');
+    expect(prompt.systemPrompt).toMatch(/TECHNICAL ANSWER CONTRACT/);
+    expect(prompt.userPrompt).toMatch(/MULTI-PART QUESTION/);
+  });
+
+  it('never invents an absent personal fact', () => {
+    const prompt = buildPrompts({ question: 'What is your notice period?', cvText: CV });
+    expect(prompt.questionType).toBe('personal_factual');
+    expect(prompt.systemPrompt).toMatch(/Never infer a personal fact/);
+    expect(prompt.systemPrompt).toMatch(/Needs your input/);
+  });
+
+  it('selects semantically related project evidence even without exact question wording', () => {
+    const prompt = buildPrompts({
+      question: 'Tell me about influencing without authority',
+      cvText: CV,
+      jobDescription: 'Partner across teams to secure support for technical change.',
+      cvData: {
+        experience: [{ title: 'Engineer', company: 'Acme', responsibilities: ['Maintained internal services'] }],
+        projects: [{
+          name: 'Platform Adoption',
+          bullets: ['Secured executive buy-in and aligned cross-functional stakeholders around the rollout plan'],
+          skills: ['facilitation'],
+        }],
+      },
+    });
+
+    expect(prompt.userPrompt).toMatch(/MOST RELEVANT CV BULLETS AND EVIDENCE/);
+    expect(prompt.userPrompt).toMatch(/\[Project: Platform Adoption\]/);
+    expect(prompt.userPrompt).toMatch(/Secured executive buy-in/);
+  });
+
   it('allows cover letters to use top matched requirements even without question word overlap', () => {
     const prompt = buildPrompts({
       question: 'Cover letter',
@@ -293,5 +367,63 @@ Worked with engineering and support stakeholders to prioritise fixes.`,
 
     expect(prompt.userPrompt).not.toMatch(/ROLE CREDIBILITY RUBRIC/);
     expect(prompt.systemPrompt).toMatch(/SALARY \/ COMPENSATION question/);
+  });
+});
+
+describe('domain risk prompt guard', () => {
+  it('adds domain review guidance without changing the recipe contract', async () => {
+    const { buildPrompts } = await import('../render-proxy/recipe/index.js');
+    const result = buildPrompts({
+      question: 'Do you have an active RN license?',
+      cvText: 'Jordan Taylor\nHealthcare Operations Coordinator\nExperience\nCoordinated patient intake workflows and documentation for clinical teams.',
+      jobTitle: 'Registered Nurse',
+      jobDescription: 'Requirements: Active RN license, BLS certification, patient care.',
+      domainRisk: {
+        detected: true,
+        primaryProfile: { label: 'Clinical healthcare' },
+        credentialWarnings: [{ missingCredentials: ['rn license'], severity: 'block' }],
+        reviewPrompts: ['Which clinical licenses or registrations do you currently hold?'],
+      },
+    });
+
+    expect(result).toHaveProperty('systemPrompt');
+    expect(result).toHaveProperty('userPrompt');
+    expect(result.userPrompt).toContain('DOMAIN REVIEW GUARD');
+    expect(result.userPrompt).toContain('rn license');
+  });
+});
+
+describe('location and residence form fields (regression: rambling career-history answers)', () => {
+  it('routes "Where are you located?" to the short-factual prompt, not general', () => {
+    const prompt = buildPrompts({
+      question: 'Where are you located? (State/Province & Country)',
+      length: 'short',
+      tone: 'natural',
+      cvText: CV,
+      maxChars: 255,
+    });
+    expect(prompt.questionType).toBe('short_factual');
+    expect(prompt.systemPrompt).toMatch(/CURRENT SITUATION/);
+    expect(prompt.systemPrompt).toMatch(/Do NOT mention past jobs/);
+  });
+
+  it('routes residence/timezone variants to short-factual', () => {
+    for (const question of [
+      'What is your current location?',
+      'Where are you based?',
+      'What timezone do you work in?',
+    ]) {
+      expect(buildPrompts({ question, cvText: CV }).questionType).toBe('short_factual');
+    }
+  });
+
+  it('keeps bare location field labels on the data-extraction path', () => {
+    const prompt = buildPrompts({ question: 'City of residence', cvText: CV });
+    expect(prompt.systemPrompt).toMatch(/data extraction/i);
+  });
+
+  it('keeps relocation-willingness questions as yes/no, not short-factual', () => {
+    const prompt = buildPrompts({ question: 'Are you willing to relocate?', cvText: CV });
+    expect(prompt.questionType).toBe('yes_no');
   });
 });

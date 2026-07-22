@@ -23,7 +23,11 @@ describe('Render proxy JD extraction route', () => {
     expect(route).toContain('text must be at least 100 characters');
     expect(route).toContain('Job posting is too large');
     expect(route).toContain('Remove completely:');
-    expect(route).toContain('res.json({ extractedText, provider: completion.provider, fallbackFrom: completion.fallbackFrom || undefined })');
+    expect(route).toContain('model: data?.model || completion.model');
+    expect(route).toContain('...buildQualityMetadata(completion)');
+    expect(route).toContain('requestedModels: completion.requestedModels');
+    expect(route).toContain('openRouterMetadata: data?.openrouter_metadata || undefined');
+    expect(route).toContain('openRouterStrategy: completion.openRouterStrategy');
   });
 
   it('keeps profile URL fields deterministic even with compound labels', () => {

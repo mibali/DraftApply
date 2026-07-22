@@ -1,6 +1,6 @@
 {
   "name": "draftapply",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "description": "DraftApply - Generate authentic job application answers using your CV",
   "type": "module",
   "scripts": {
@@ -9,15 +9,26 @@
     "serve-frontend": "npx serve frontend -p 3000",
     "install-all": "npm install --prefix backend",
     "refresh:salary-benchmarks": "node scripts/refresh-salary-benchmarks.js",
-    "test": "vitest run",
+    "refresh:domain-packs": "node scripts/refresh-domain-packs.js",
+    "validate:domain-packs": "node scripts/validate-domain-packs.js",
+    "test": "npm run test:static && npm run test:unit",
+    "test:static": "npm run verify:architecture && npm run validate:domain-packs && npm run release:validate",
+    "test:unit": "vitest run",
+    "test:browser": "playwright test",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "verify:architecture": "node scripts/verify-stage-architecture.js",
+    "eval:evidence-retrieval": "node scripts/eval-evidence-retrieval.js",
+    "eval:cv-quality": "node scripts/eval-cv-quality.js",
+    "build:extension": "node scripts/build-extension.js",
     "release:validate": "node scripts/validate-release.js",
     "release:chrome": "node scripts/chrome-release.js",
     "release:chrome:upload": "node scripts/chrome-release.js --upload",
     "release:chrome:publish": "node scripts/chrome-release.js --publish"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "redis": "^4.7.1",
     "vitest": "^2.1.0"
   },
   "keywords": [
