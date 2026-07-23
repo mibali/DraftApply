@@ -31,6 +31,14 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      # render-proxy/ is its own npm package (separate package.json and
+      # lockfile) - the root install above never touches it, but
+      # `npm run release:chrome` runs the full test suite as a gate, which
+      # includes tests/proxy-routes.integration.test.js importing
+      # render-proxy/server.js directly. Same gap as ci.yml's Tests job.
+      - name: Install render-proxy dependencies
+        run: npm install --prefix render-proxy
+
       - name: Package extension
         run: npm run release:chrome
 
