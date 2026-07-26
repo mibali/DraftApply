@@ -34,6 +34,15 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      # render-proxy/ is its own npm package (separate package.json and
+      # lockfile) - the root install above never touches it, but `npm test`
+      # below includes tests/proxy-routes.integration.test.js and
+      # tests/redis-safety.integration.test.js, which import
+      # render-proxy/server.js directly. Same gap as ci.yml and
+      # chrome-web-store-release.yml.
+      - name: Install render-proxy dependencies
+        run: npm install --prefix render-proxy
+
       - name: Validate release metadata
         run: npm run release:validate -- --tag="${RELEASE_TAG}"
 
