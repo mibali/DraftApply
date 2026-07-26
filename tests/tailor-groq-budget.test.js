@@ -91,19 +91,18 @@ describe('Tailor CV Groq budget', () => {
     expect(renderProxyServer).toContain('llmErrorResponse(e, { allowFallback: OPENROUTER_TAILOR_FALLBACK })');
   });
 
-  it('keeps the local Tailor CV route to generation + audit per path (structured primary, legacy fallback)', () => {
+  it('keeps the local Tailor CV route to one fail-closed structured generation and audit path', () => {
     const route = getCvTailorRoute(backendServer);
-    // Local dev uses generateWithFallback (same as production) so Groq failures
-    // don't cause silent hangs when an Ollama or other local provider is available.
+    // Local dev uses the same structured-only safety boundary as production.
     const fallbackCalls = route.match(/await generateWithFallback\(FALLBACK_CHAIN/g) || [];
 
-    // 2 structured + 2 legacy fallback; only one path runs per request.
-    expect(fallbackCalls).toHaveLength(4);
+    expect(fallbackCalls).toHaveLength(2);
     expect(route).toContain('buildStructuredTailoringPrompt');
     expect(route).toContain('validateStructuredContent');
     expect(route).toContain('renderTailoredCV');
-    expect(route).toContain('buildTailoringPrompt');
-    expect(route).toContain('buildTailoredCvAuditPrompt');
+    expect(route).not.toContain('buildTailoringPrompt');
+    expect(route).not.toContain('buildTailoredCvAuditPrompt');
+    expect(route).toContain("code: 'structured_cv_output_invalid'");
     expect(route).toContain('buildRecruiterReview');
     expect(route).not.toContain('buildLLMAnalysisPrompt');
     expect(route).not.toContain('buildSemanticMatchPrompt');
@@ -116,9 +115,10 @@ describe('Tailor CV Groq budget', () => {
     expect(route).toContain('auditSkipped');
   });
 
-  it('guards audit output with isValidCvOutput on the raw LLM response before replacing the tailored CV in local dev', () => {
+  it('validates structured audit output before replacing generated content in local dev', () => {
     const route = getCvTailorRoute(backendServer);
-    expect(route).toContain('tailor.isValidCvOutput(auditedText)');
+    expect(route).toContain('tailor.validateStructuredContent');
+    expect(route).toContain('if (audited)');
     expect(route).toContain('auditSkipped');
   });
 

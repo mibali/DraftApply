@@ -32,7 +32,10 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
+
+      - name: Install render-proxy dependencies
+        run: npm ci --prefix render-proxy
 
       - name: Validate release metadata
         run: npm run release:validate -- --tag="${RELEASE_TAG}"
@@ -47,11 +50,13 @@ jobs:
         run: npm run release:validate -- --require-zip --tag="${RELEASE_TAG}"
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           draft: false
           prerelease: false
           generate_release_notes: true
           body_path: CHANGELOG.md
-          files: dist/*.zip
+          files: |
+            dist/*.zip
+            dist/*.zip.sha256

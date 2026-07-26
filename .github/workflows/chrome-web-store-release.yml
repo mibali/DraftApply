@@ -29,7 +29,7 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       # render-proxy/ is its own npm package (separate package.json and
       # lockfile) - the root install above never touches it, but
@@ -37,7 +37,7 @@ jobs:
       # includes tests/proxy-routes.integration.test.js importing
       # render-proxy/server.js directly. Same gap as ci.yml's Tests job.
       - name: Install render-proxy dependencies
-        run: npm install --prefix render-proxy
+        run: npm ci --prefix render-proxy
 
       - name: Package extension
         run: npm run release:chrome
@@ -46,7 +46,9 @@ jobs:
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
         with:
           name: draftapply-chrome-package
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/*.zip.sha256
           if-no-files-found: error
 
       - name: Upload to Chrome Web Store

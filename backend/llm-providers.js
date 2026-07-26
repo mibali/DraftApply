@@ -9,7 +9,7 @@
  * - LocalAI: OpenAI-compatible local server
  *
  * CLOUD (free tiers, API key required):
- * - Groq: Very fast, generous free tier (DEFAULT)
+ * - Groq: Very fast, generous free tier
  * - Google Gemini: 15 RPM free
  * - Anthropic: Claude models
  * - Mistral: Free tier available
@@ -95,6 +95,40 @@ export const PROVIDERS = {
   }
 };
 
+export const DEFAULT_PROVIDER = 'ollama';
+const DEFAULT_ATTEMPT_TIMEOUT_MS = 30_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+const MAX_ERROR_BODY_BYTES = 16 * 1024;
+
+export function resolveProvider(env = {}) {
+  const name = String(env.LLM_PROVIDER || DEFAULT_PROVIDER).toLowerCase();
+  if (!PROVIDERS[name]) throw new Error('Invalid LLM_PROVIDER');
+  return name;
+}
+
+function requestOptions(options = {}) {
+  return options.signal ? { signal: options.signal } : {};
+}
+
+async function boundedError(response) {
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  let size = 0;
+  const chunks = [];
+  try {
+    while (size < MAX_ERROR_BODY_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const slice = value.subarray(0, MAX_ERROR_BODY_BYTES - size);
+      chunks.push(slice);
+      size += slice.byteLength;
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks.map(chunk => Buffer.from(chunk))));
+}
+
 /**
  * Get provider configuration
  */
@@ -119,6 +153,7 @@ export function getProviderConfig(providerName, env = {}) {
  */
 export async function generateOllama(config, messages, options = {}) {
   const response = await fetch(`${config.baseUrl}/api/chat`, {
+    ...requestOptions(options),
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -130,7 +165,7 @@ export async function generateOllama(config, messages, options = {}) {
   });
 
   if (!response.ok) {
-    const error = await response.text();
+    const error = await boundedError(response);
     throw new Error(`Ollama error: ${error}`);
   }
 
@@ -143,6 +178,7 @@ export async function generateOllama(config, messages, options = {}) {
  */
 export async function streamOllama(config, messages, options = {}, res) {
   const response = await fetch(`${config.baseUrl}/api/chat`, {
+    ...requestOptions(options),
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -194,6 +230,7 @@ export async function generateOpenAICompatible(config, messages, options = {}) {
   }
 
   const response = await fetch(`${config.baseUrl}/chat/completions`, {
+    ...requestOptions(options),
     method: 'POST',
     headers,
     body: JSON.stringify({
@@ -205,8 +242,8 @@ export async function generateOpenAICompatible(config, messages, options = {}) {
   });
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new Error(error.error?.message || `${config.name} error: ${response.status}`);
+    await boundedError(response);
+    throw new Error(`${config.name} returned HTTP ${response.status}`);
   }
 
   const data = await response.json();
@@ -227,6 +264,7 @@ export async function streamOpenAICompatible(config, messages, options = {}, res
   }
 
   const response = await fetch(`${config.baseUrl}/chat/completions`, {
+    ...requestOptions(options),
     method: 'POST',
     headers,
     body: JSON.stringify({
@@ -294,6 +332,7 @@ export async function generateGemini(config, messages, options = {}) {
   const response = await fetch(
     `${config.baseUrl}/models/${config.model}:generateContent?key=${config.apiKey}`,
     {
+      ...requestOptions(options),
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -306,8 +345,8 @@ export async function generateGemini(config, messages, options = {}) {
   );
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new Error(error.error?.message || `Gemini error: ${response.status}`);
+    await boundedError(response);
+    throw new Error(`Gemini returned HTTP ${response.status}`);
   }
 
   const data = await response.json();
@@ -343,6 +382,7 @@ export async function streamGemini(config, messages, options = {}, res) {
   const response = await fetch(
     `${config.baseUrl}/models/${config.model}:streamGenerateContent?key=${config.apiKey}&alt=sse`,
     {
+      ...requestOptions(options),
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -405,6 +445,7 @@ export async function generateAnthropic(config, messages, options = {}) {
   if (systemMsg) body.system = systemMsg.content;
 
   const response = await fetch(`${config.baseUrl}/messages`, {
+    ...requestOptions(options),
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -415,8 +456,8 @@ export async function generateAnthropic(config, messages, options = {}) {
   });
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new Error(error.error?.message || `Anthropic error: ${response.status}`);
+    await boundedError(response);
+    throw new Error(`Anthropic returned HTTP ${response.status}`);
   }
 
   const data = await response.json();
@@ -448,6 +489,7 @@ export async function streamAnthropic(config, messages, options = {}, res) {
   if (systemMsg) body.system = systemMsg.content;
 
   const response = await fetch(`${config.baseUrl}/messages`, {
+    ...requestOptions(options),
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -534,11 +576,11 @@ export async function stream(providerName, config, messages, options = {}, res) 
 /**
  * Check provider availability
  */
-export async function checkProvider(providerName, config) {
+export async function checkProvider(providerName, config, options = {}) {
   try {
     switch (providerName) {
       case 'ollama': {
-        const response = await fetch(`${config.baseUrl}/api/tags`);
+        const response = await fetch(`${config.baseUrl}/api/tags`, requestOptions(options));
         if (!response.ok) throw new Error('Not responding');
         
         const data = await response.json();
@@ -555,7 +597,7 @@ export async function checkProvider(providerName, config) {
       
       case 'lmstudio':
       case 'localai': {
-        const response = await fetch(`${config.baseUrl}/models`);
+        const response = await fetch(`${config.baseUrl}/models`, requestOptions(options));
         if (!response.ok) throw new Error('Not responding');
         
         const data = await response.json();
@@ -571,7 +613,8 @@ export async function checkProvider(providerName, config) {
         }
 
         const response = await fetch(
-          `${config.baseUrl}/models?key=${config.apiKey}`
+          `${config.baseUrl}/models?key=${config.apiKey}`,
+          requestOptions(options)
         );
         return { available: response.ok };
       }
@@ -582,6 +625,7 @@ export async function checkProvider(providerName, config) {
         }
 
         const response = await fetch(`${config.baseUrl}/models`, {
+          ...requestOptions(options),
           headers: {
             'x-api-key': config.apiKey,
             'anthropic-version': '2023-06-01'
@@ -599,6 +643,7 @@ export async function checkProvider(providerName, config) {
         }
 
         const response = await fetch(`${config.baseUrl}/models`, {
+          ...requestOptions(options),
           headers: { 'Authorization': `Bearer ${config.apiKey}` }
         });
         return { available: response.ok };
@@ -622,21 +667,33 @@ export async function checkProvider(providerName, config) {
  */
 export async function generateWithFallback(fallbackChain, messages, options = {}) {
   const errors = [];
+  const deadlineAt = Number(options.deadlineAt) ||
+    Date.now() + (Number(options.requestTimeoutMs) || DEFAULT_REQUEST_TIMEOUT_MS);
+  const attemptMs = Number(options.attemptTimeoutMs) || DEFAULT_ATTEMPT_TIMEOUT_MS;
   
   for (const { name, config } of fallbackChain) {
+    const remaining = deadlineAt - Date.now();
+    if (remaining <= 0 || options.signal?.aborted) break;
+    const controller = new AbortController();
+    const abort = () => controller.abort(options.signal?.reason);
+    options.signal?.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(() => controller.abort(new Error('Provider attempt timed out')), Math.min(attemptMs, remaining));
     try {
       console.log(`[Fallback] Trying ${name}...`);
-      const result = await generate(name, config, messages, options);
+      const result = await generate(name, config, messages, { ...options, signal: controller.signal });
       console.log(`[Fallback] Success with ${name}`);
       return { ...result, provider: name };
     } catch (error) {
       console.warn(`[Fallback] ${name} failed:`, error.message);
       errors.push({ provider: name, error: error.message });
+    } finally {
+      clearTimeout(timer);
+      options.signal?.removeEventListener('abort', abort);
     }
   }
   
   // All providers failed
-  throw new Error(`All providers failed: ${errors.map(e => `${e.provider}: ${e.error}`).join('; ')}`);
+  throw new Error('No configured provider completed the request');
 }
 
 /**
@@ -645,12 +702,25 @@ export async function generateWithFallback(fallbackChain, messages, options = {}
 export function buildFallbackChain(env = {}) {
   const chain = [];
 
-  // Primary provider (if set) — default is groq
-  const primary = env.LLM_PROVIDER || 'groq';
+  const primary = resolveProvider(env);
   const primaryConfig = getProviderConfig(primary, env);
   chain.push({ name: primary, config: primaryConfig });
 
-  // Add cloud fallbacks if API keys are available (skip primary)
+  // Crossing provider trust boundaries is opt-in. Explicit order wins; the
+  // legacy switch allows keyed cloud fallbacks but never enables them silently.
+  const explicit = String(env.LLM_FALLBACK_PROVIDERS || '').split(',').map(v => v.trim().toLowerCase()).filter(Boolean);
+  const allowCloud = env.ALLOW_CLOUD_FALLBACK === 'true';
+  if (explicit.length) {
+    for (const name of explicit) {
+      if (!PROVIDERS[name] || name === primary) continue;
+      if (PROVIDERS[name].type === 'cloud' && !allowCloud) continue;
+      chain.push({ name, config: getProviderConfig(name, env) });
+    }
+    return chain;
+  }
+  if (!allowCloud) return chain;
+
+  // Add cloud fallbacks only after explicit cloud-fallback consent.
   if (env.GROQ_API_KEY && primary !== 'groq') {
     chain.push({
       name: 'groq',
@@ -690,14 +760,6 @@ export function buildFallbackChain(env = {}) {
     chain.push({
       name: 'openai',
       config: getProviderConfig('openai', env)
-    });
-  }
-
-  // Add Ollama as local last-resort fallback
-  if (primary !== 'ollama') {
-    chain.push({
-      name: 'ollama',
-      config: getProviderConfig('ollama', env)
     });
   }
 

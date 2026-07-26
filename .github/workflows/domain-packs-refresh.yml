@@ -25,7 +25,10 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
+
+      - name: Install render-proxy dependencies
+        run: npm ci --prefix render-proxy
 
       - name: Refresh domain packs
         env:

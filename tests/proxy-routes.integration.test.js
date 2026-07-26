@@ -61,10 +61,21 @@ describe.sequential('Render proxy real HTTP routes', () => {
         : 'At Acme, I built Python automation for Kubernetes deployments and production diagnostics.';
       res.setHeader('content-type', body.stream ? 'text/event-stream' : 'application/json');
       if (body.stream) {
-        if (prompt.includes('STREAM_FAILURE')) return res.end('data: [DONE]\n\n');
+        if (provider === 'groq' && prompt.includes('STREAM_FAILURE')) return res.end('data: [DONE]\n\n');
+        if (provider === 'groq' && prompt.includes('TRUNCATED_STREAM')) {
+          return res.end(`data: ${JSON.stringify({ choices: [{ delta: { content: answer } }] })}\n\n`);
+        }
+        if (provider === 'groq' && prompt.includes('MALFORMED_STREAM')) return res.end('data: {\n\ndata: [DONE]\n\n');
+        if (provider === 'groq' && prompt.includes('INVALID_STREAM_CONTENT')) {
+          return res.end('data: {"choices":[{"delta":{"content":{"unexpected":true}}}]}\n\ndata: [DONE]\n\n');
+        }
         res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: answer.slice(0, 30) } }], model: `${provider}-model` })}\n\n`);
         res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: answer.slice(30) } }] })}\n\n`);
         return res.end('data: [DONE]\n\n');
+      }
+      if (provider === 'groq' && prompt.includes('EMPTY_JSON')) return res.end('{}');
+      if (provider === 'groq' && prompt.includes('LARGE_RESPONSE')) {
+        return res.end(JSON.stringify({ choices: [{ message: { content: 'x'.repeat(3000) } }] }));
       }
       const content = structuredCvRequest
         ? malformedStructuredResponses
@@ -87,6 +98,7 @@ describe.sequential('Render proxy real HTTP routes', () => {
       GROQ_API_URL: `${providerBase}/groq`, OPENROUTER_API_URL: `${providerBase}/openrouter`,
       OPENROUTER_MODELS_URL: `${providerBase}/models`, OPENROUTER_MODEL: 'mock/free:free',
       REQUIRE_DURABLE_QUOTAS: 'false', REQUEST_DEADLINE_MS: '150',
+      PROVIDER_RESPONSE_MAX_BYTES: '2048', PROVIDER_ERROR_MAX_BYTES: '256',
       CIRCUIT_FAILURE_THRESHOLD: '20', OPENROUTER_MAX_FALLBACK_MODELS: '1',
       RECIPE_PATH: './render-proxy/recipe/index.js',
     });
@@ -131,30 +143,53 @@ describe.sequential('Render proxy real HTTP routes', () => {
     expect(text).not.toContain('"delta"');
   });
 
-  it('records body parse failures as incomplete provider attempts', async () => {
+  it('falls back when a provider returns malformed successful JSON', async () => {
     const events = [];
     const info = vi.spyOn(console, 'info').mockImplementation(value => events.push(JSON.parse(value)));
     try {
       const failureToken = await registerToken();
-      const { response } = await jsonRequest('/api/generate', { question: 'MALFORMED_BODY: Why suitable?', cvText, skipEvaluation: true }, failureToken);
-      expect(response.status).toBe(500);
+      const { response, body } = await jsonRequest('/api/generate', { question: 'MALFORMED_BODY: Why suitable?', cvText, skipEvaluation: true }, failureToken);
+      expect(response.status).toBe(200);
+      expect(body.finalProvider.provider).toBe('openrouter');
     } finally {
       info.mockRestore();
     }
     expect(events).toContainEqual(expect.objectContaining({ event: 'proxy_safety', provider: 'groq', outcome: 'error' }));
   });
 
-  it('marks an empty stream as a provider failure instead of closing a half-open circuit', async () => {
+  it.each([
+    ['STREAM_FAILURE', 'an empty stream'],
+    ['TRUNCATED_STREAM', 'a truncated stream'],
+    ['MALFORMED_STREAM', 'a malformed stream'],
+    ['INVALID_STREAM_CONTENT', 'schema-invalid stream content'],
+  ])('falls back when Groq returns %s (%s)', async (marker) => {
     const events = [];
     const info = vi.spyOn(console, 'info').mockImplementation(value => events.push(JSON.parse(value)));
     try {
       const failureToken = await registerToken();
-      const response = await fetch(`${proxyBase}/api/generate`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${failureToken}` }, body: JSON.stringify({ question: 'STREAM_FAILURE: Why suitable?', cvText, stream: true, skipEvaluation: true }) });
-      expect(await response.text()).toContain('stream_generation_failed');
+      const headers = { 'content-type': 'application/json', authorization: `Bearer ${failureToken}` };
+      const body = JSON.stringify({ question: `${marker}: Why suitable?`, cvText, stream: true, skipEvaluation: true });
+      const response = await fetch(`${proxyBase}/api/generate`, { method: 'POST', headers, body });
+      const text = await response.text();
+      expect(response.status).toBe(200);
+      expect(text).toContain('"provider":"openrouter"');
+      expect(text).toContain('data: [DONE]');
     } finally {
       info.mockRestore();
     }
     expect(events).toContainEqual(expect.objectContaining({ event: 'proxy_safety', provider: 'groq', outcome: 'error' }));
+    expect(events).toContainEqual(expect.objectContaining({ event: 'proxy_safety', provider: 'openrouter', outcome: 'success' }));
+  });
+
+  it.each([
+    ['EMPTY_JSON', 'schema-empty JSON'],
+    ['LARGE_RESPONSE', 'an oversized response'],
+  ])('falls back when Groq returns %s (%s)', async (marker) => {
+    const failureToken = await registerToken();
+    const { response, body } = await jsonRequest('/api/generate', { question: `${marker}: Why suitable?`, cvText, skipEvaluation: true }, failureToken);
+    expect(response.status).toBe(200);
+    expect(body.finalProvider.provider).toBe('openrouter');
+    expect(body.fallbackFrom).toBe('groq');
   });
 
   it('falls back with privacy controls, ordered trace, and final attribution', async () => {

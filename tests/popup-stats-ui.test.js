@@ -59,7 +59,8 @@ describe('popup productivity stats UI', () => {
     expect(popupJs).toContain('const TAILOR_JOB_MAX_POLL_MS = 7 * 60 * 1000');
     expect(popupJs).toContain('jobAgeMs > TAILOR_JOB_MAX_POLL_MS');
     expect(popupJs).toContain("Date.parse(job?.startedAt || '')");
-    expect(popupJs).toContain('await chrome.storage.local.remove(TAILOR_JOB_KEY)');
+    expect(popupJs).toContain("type: 'CANCEL_TAILOR_JOB', jobId: job?.id");
+    expect(backgroundJs).toContain('dataRequests.get(job.id)?.abort()');
     expect(popupJs).toContain('CV generation is taking longer than expected');
     expect(popupJs).toContain('Previous CV generation timed out before DraftApply could finish');
   });

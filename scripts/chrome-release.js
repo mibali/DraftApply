@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process';
-import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
+import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { join, relative, resolve } from 'node:path';
 import { buildExtension, OFFICIAL_PROXY_URL, validateProxyUrl } from './build-extension.js';
 
 const ROOT = resolve(new URL('..', import.meta.url).pathname);
@@ -25,6 +26,7 @@ function run(command, commandArgs, options = {}) {
     cwd: options.cwd || ROOT,
     stdio: options.capture ? 'pipe' : 'inherit',
     encoding: 'utf8',
+    env: options.env ? { ...process.env, ...options.env } : process.env,
   });
   if (result.status !== 0) {
     const details = result.stderr || result.stdout || `${command} exited with ${result.status}`;
@@ -72,26 +74,39 @@ function ensureCleanGit() {
   }
 }
 
+function releaseFiles(root, directory = root) {
+  return readdirSync(directory, { withFileTypes: true })
+    .flatMap(entry => {
+      const path = join(directory, entry.name);
+      return entry.isDirectory() ? releaseFiles(root, path) : [relative(root, path)];
+    })
+    .filter(file => !/(^|\/)(\.DS_Store|Thumbs\.db|desktop\.ini|.*~|\.swp)$/i.test(file))
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
 function zipExtension(version, extensionDir) {
   mkdirSync(DIST_DIR, { recursive: true });
   const zipName = `draftapply-chrome-${version}.zip`;
   const zipPath = join(DIST_DIR, zipName);
   if (existsSync(zipPath)) rmSync(zipPath);
 
-  run('zip', [
-    '-r',
-    zipPath,
-    '.',
-    '-x',
-    '*.DS_Store',
-    '__MACOSX/*',
-    '*.pem',
-    '*.crx',
-  ], { cwd: extensionDir });
+  const files = releaseFiles(extensionDir)
+    .filter(file => !/\.(?:pem|crx)$/i.test(file));
+  if (files.length === 0) throw new Error('Release staging directory contains no files');
+
+  // Normalize copied-file timestamps and archive entries so the same source
+  // produces the same bytes regardless of checkout time or host filesystem.
+  const epoch = new Date(Number(process.env.SOURCE_DATE_EPOCH || 946684800) * 1000);
+  if (Number.isNaN(epoch.getTime())) throw new Error('SOURCE_DATE_EPOCH must be Unix seconds');
+  for (const file of files) utimesSync(join(extensionDir, file), epoch, epoch);
+  run('zip', ['-X', '-q', zipPath, ...files], { cwd: extensionDir, env: { TZ: 'UTC' } });
 
   const size = statSync(zipPath).size;
   if (size <= 0) throw new Error('Created ZIP is empty');
-  return { zipPath, zipName, size };
+  const checksum = createHash('sha256').update(readFileSync(zipPath)).digest('hex');
+  const checksumPath = `${zipPath}.sha256`;
+  writeFileSync(checksumPath, `${checksum}  ${zipName}\n`);
+  return { zipPath, zipName, checksum, checksumPath, size };
 }
 
 async function getAccessToken() {
@@ -178,8 +193,10 @@ async function main() {
     run('node', ['--check', join(STAGE_DIR, file)]);
   }
 
-  const { zipPath, zipName, size } = zipExtension(manifest.version, STAGE_DIR);
+  const { zipPath, zipName, checksum, checksumPath, size } = zipExtension(manifest.version, STAGE_DIR);
   console.log(`\nPackaged ${zipName} (${Math.round(size / 1024)} KB)`);
+  console.log(`SHA-256 ${checksum}`);
+  console.log(`Checksum file: ${checksumPath}`);
 
   const allReleases = readdirSync(DIST_DIR)
     .filter(f => f.endsWith('.zip'))

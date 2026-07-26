@@ -5,14 +5,17 @@ This policy describes the checked-in official extension configured for `https://
 ## What we store
 
 - **Your CV text**: stored locally in your browser using `chrome.storage.local`.
-- **Install token**: stored locally in your browser to authenticate requests to the DraftApply proxy API.
+- **CV links and application facts**: profile URLs and optional facts such as notice period, availability, work authorization, relocation, and salary preferences, stored locally to answer factual fields accurately.
+- **Tailoring state and output**: pasted job context, in-progress job metadata, tailored CV drafts, and temporary export data, stored locally so the popup and export page can complete the workflow.
+- **Productivity counters**: local counts of answers inserted and CVs tailored/exported. DraftApply includes no analytics or tracking service.
+- **Install token and expiry**: stored locally to authenticate requests to the DraftApply proxy API. This pseudonymous token identifies an installation to the proxy's authentication and quota controls.
 
 ## What we send over the network
 
-When you click “Generate”:
+When you generate an answer, analyze a match, or tailor a CV:
 
 - We send a request to the DraftApply proxy API at `https://draftapply.onrender.com`.
-- The request includes the prompts needed to generate the answer (derived from your CV + the job page context + the question).
+- The request includes the content needed for that action: CV text, job-page or pasted job context, the question, and any confirmed facts or skills you supplied.
 - The proxy forwards the request to Groq, or when enabled and needed, to OpenRouter and a downstream model provider. Responses include provider-route metadata where the protocol permits.
 
 When you upload a **PDF/DOCX** CV file for text extraction:
@@ -28,9 +31,13 @@ When you upload a **PDF/DOCX** CV file for text extraction:
 
 ## Data retention
 
-- **Extension (local)**: CV data stays in your browser until you clear it in the extension UI.
+- **Extension (local)**: data stays in `chrome.storage.local` until you remove the extension, clear its site/extension data in Chrome, or choose **Delete all local data** in the popup. That command cancels active DraftApply work and clears all extension-local CV, fact, token, draft, export, and productivity data. **Clear CV** removes only the saved CV and its extracted links.
 - **DraftApply proxy (server)**: application code does not intentionally persist CVs, prompts, or answers. Hosting, security, and quota infrastructure can retain operational metadata.
 - **LLM route**: the official operator must enable and verify Groq account ZDR. OpenRouter requests require ZDR/data-collection restrictions by default, but OpenRouter and the selected downstream provider remain separate processors. Source code cannot prove an account-level setting is enabled.
+
+## Security and deletion limitations
+
+Network traffic uses HTTPS. Local data is protected by Chrome's extension storage and the security of your browser profile and device; DraftApply does not add separate at-rest encryption. Deleting local data does not retroactively erase information already processed under an infrastructure or model provider's retention policy. For provider and operator responsibilities, see the [privacy/provider matrix](docs/privacy-provider-matrix.md).
 
 Grounding reports and final answer validation reduce unsupported claims; they are not privacy or retention controls.
 

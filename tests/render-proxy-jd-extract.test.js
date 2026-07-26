@@ -19,9 +19,12 @@ describe('Render proxy JD extraction route', () => {
     const route = getRoute(renderProxyServer, "app.post('/api/jd/extract'");
     expect(route).toContain('authRequired');
     expect(route).toContain('generateLimiter');
+    expect(route).toContain('validateJdExtract');
+    expect(route).toContain('networkPaidLimit');
     expect(route).toContain('callChatCompletionWithFallback');
-    expect(route).toContain('text must be at least 100 characters');
-    expect(route).toContain('Job posting is too large');
+    expect(renderProxyServer).toContain("typeof text !== 'string'");
+    expect(renderProxyServer).toContain('text must be at least 100 characters');
+    expect(renderProxyServer).toContain('Job posting is too large');
     expect(route).toContain('Remove completely:');
     expect(route).toContain('model: data?.model || completion.model');
     expect(route).toContain('...buildQualityMetadata(completion)');

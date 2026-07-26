@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
@@ -62,6 +63,12 @@ const zipPath = join(DIST_DIR, `draftapply-chrome-${manifest.version}.zip`);
 if (args.has('--require-zip')) {
   if (!existsSync(zipPath)) fail(`expected packaged extension ZIP at ${zipPath}`);
   if (statSync(zipPath).size <= 0) fail(`packaged extension ZIP is empty: ${zipPath}`);
+  const checksumPath = `${zipPath}.sha256`;
+  if (!existsSync(checksumPath)) fail(`expected SHA-256 checksum at ${checksumPath}`);
+  const expected = readFileSync(checksumPath, 'utf8').trim().match(/^([a-f0-9]{64})\s{2}/)?.[1];
+  if (!expected) fail(`invalid checksum file: ${checksumPath}`);
+  const actual = createHash('sha256').update(readFileSync(zipPath)).digest('hex');
+  if (actual !== expected) fail(`checksum does not match packaged extension ZIP: ${zipPath}`);
 }
 
 console.log(`Release validation passed for v${manifest.version}`);

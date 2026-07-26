@@ -3,13 +3,13 @@
   "name": "DraftApply",
   "version": "2.5.0",
   "description": "Generate authentic job application answers using your CV",
+  "minimum_chrome_version": "116",
   "permissions": [
     "storage",
     "contextMenus",
     "activeTab",
     "scripting",
-    "tabs",
-    "alarms"
+    "tabs"
   ],
   "host_permissions": [
     "https://draftapply.onrender.com/*",

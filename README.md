@@ -81,7 +81,7 @@ See [`render-proxy/README.md`](render-proxy/README.md) for the full API contract
 | `OPENROUTER_MAX_FALLBACK_MODELS` | No | Maximum OpenRouter free models to try per request (default: `6`) |
 | `OPENROUTER_TAILOR_FALLBACK` | No | Tailor CV generation/audit falls back to OpenRouter by default when `OPENROUTER_API_KEY` is set. Set to `false` only if you want Tailor CV to hard-fail rather than use OpenRouter as backup. |
 | `OPENROUTER_MODEL` | No | Optional configured OpenRouter model. Use this for a paid/reliable OpenRouter fallback instead of relying only on free models. |
-| `OPENROUTER_USE_MODELS_ARRAY` | No | Sends a ranked fallback chain to OpenRouter in one request (default: `true`). |
+| `OPENROUTER_USE_MODELS_ARRAY` | No | Sends a ranked fallback chain to OpenRouter in one request (default: `false`; the manual loop preserves provider/model attribution). |
 | OpenRouter privacy controls | — | Hosted requests always require ZDR and deny providers marked as collecting data. This cannot be disabled by environment configuration. |
 | `TOKEN_SECRET` | Yes | Secret for signing install tokens |
 | `GROQ_MODEL` | No | Model name (default: `llama-3.3-70b-versatile`) |
@@ -92,9 +92,13 @@ See [`render-proxy/README.md`](render-proxy/README.md) for the full API contract
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/health` | GET | Health check |
+| `/api/ready` | GET | Deployment readiness check |
 | `/api/register` | POST | Get install token (90-day expiry) |
 | `/api/generate` | POST | Generate answer (structured payload preferred) |
 | `/api/cv/upload` | POST | Extract text from PDF/DOCX/TXT file |
+| `/api/jd/extract` | POST | Normalize pasted job-description text |
+| `/api/cv/analyze` | POST | Analyze CV fit against a job description |
+| `/api/cv/tailor` | POST | Generate a validated structured tailored CV |
 
 The extension sends a **structured payload** to `/api/generate`:
 

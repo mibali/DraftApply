@@ -13,10 +13,11 @@ import {
   admissionMiddleware, connectRedisAtStartup, MemoryAdmissionStore, RedisAdmissionStore, redisClientOptions,
 } from './admission-control.js';
 import {
-  CircuitBreaker, RedisCircuitBreaker, RequestDeadlineError, assertBudget, boundedTimeout,
+  CircuitBreaker, ClientCancelledError, ProviderAttemptTimeoutError, RedisCircuitBreaker, RequestDeadlineError, assertBudget, attemptSignal, boundedTimeout, isCircuitFailure,
   recordProviderTrace, recordProviderUsage, reconciledUsage, remainingMs,
-  requestSafetyMiddleware, safetyMetadata, telemetry,
+  requestSafetyMiddleware, requestSignal, safetyMetadata, telemetry,
 } from './safety-runtime.js';
+import { idempotencyMiddleware, MemoryIdempotencyStore, RedisIdempotencyStore } from './idempotency.js';
 import { CVParser } from '../shared/cv-parser.js';
 import { JDParser } from '../shared/jd-parser.js';
 import { CVTailor } from '../shared/cv-tailor.js';
@@ -99,8 +100,12 @@ const LOCAL_EMBEDDING_TIMEOUT_MS = coercePositiveInteger(process.env.LOCAL_EMBED
 const LOCAL_EMBEDDING_PROMOTE_THRESHOLD = Number(process.env.LOCAL_EMBEDDING_PROMOTE_THRESHOLD || 0.60);
 const LOCAL_EMBEDDING_ENRICH_THRESHOLD = Number(process.env.LOCAL_EMBEDDING_ENRICH_THRESHOLD || 0.50);
 const TOKEN_SECRET = process.env.TOKEN_SECRET;
+const OPERATOR_SECRET = (process.env.OPERATOR_SECRET || '').trim();
+const VERBOSE_DIAGNOSTICS = /^true$/i.test(process.env.VERBOSE_DIAGNOSTICS || 'false');
 const ALLOW_LEGACY_RAW_PROMPTS = /^true$/i.test(process.env.ALLOW_LEGACY_RAW_PROMPTS || 'false');
 const REQUEST_DEADLINE_MS = coercePositiveInteger(process.env.REQUEST_DEADLINE_MS, 90000);
+const PROVIDER_RESPONSE_MAX_BYTES = coercePositiveInteger(process.env.PROVIDER_RESPONSE_MAX_BYTES, 2 * 1024 * 1024);
+const PROVIDER_ERROR_MAX_BYTES = coercePositiveInteger(process.env.PROVIDER_ERROR_MAX_BYTES, 64 * 1024);
 const OPENROUTER_ZDR_REQUIRED = true;
 const REDIS_URL = (process.env.REDIS_URL || '').trim();
 const REQUIRE_DURABLE_QUOTAS = /^true$/i.test(process.env.REQUIRE_DURABLE_QUOTAS || (process.env.NODE_ENV === 'production' ? 'true' : 'false'));
@@ -109,11 +114,20 @@ const REDIS_CONNECT_TIMEOUT_MS = coercePositiveInteger(process.env.REDIS_CONNECT
 const REDIS_RECONNECT_MAX_MS = coercePositiveInteger(process.env.REDIS_RECONNECT_MAX_MS, 10_000);
 const REDIS_STARTUP_TIMEOUT_MS = coercePositiveInteger(process.env.REDIS_STARTUP_TIMEOUT_MS, 30_000);
 const SUBJECT_QUOTA_OPTIONS = {
+  maxConcurrent: coercePositiveInteger(process.env.QUOTA_MAX_CONCURRENT, 100),
+  maxRequests: coercePositiveInteger(process.env.QUOTA_MAX_REQUESTS, 10000),
+  maxTokens: coercePositiveInteger(process.env.QUOTA_MAX_TOKENS, 20_000_000),
+  maxSpendMicros: coercePositiveInteger(process.env.QUOTA_MAX_SPEND_MICROS, 1_000_000_000),
   maxConcurrentPerSubject: coercePositiveInteger(process.env.QUOTA_MAX_CONCURRENT_PER_SUBJECT, 1),
   maxRequestsPerSubject: coercePositiveInteger(process.env.QUOTA_MAX_REQUESTS_PER_SUBJECT, 100),
   maxTokensPerSubject: coercePositiveInteger(process.env.QUOTA_MAX_TOKENS_PER_SUBJECT, 5_000_000),
   maxSpendMicrosPerSubject: coercePositiveInteger(process.env.QUOTA_MAX_SPEND_MICROS_PER_SUBJECT, 5_000_000),
+  windowSeconds: coercePositiveInteger(process.env.QUOTA_WINDOW_SECONDS, 86400),
+  leaseSeconds: coercePositiveInteger(process.env.QUOTA_LEASE_SECONDS, Math.ceil(REQUEST_DEADLINE_MS / 1000) + 30),
 };
+if (SUBJECT_QUOTA_OPTIONS.leaseSeconds * 1000 <= REQUEST_DEADLINE_MS) {
+  throw new Error('QUOTA_LEASE_SECONDS must exceed REQUEST_DEADLINE_MS');
+}
 
 // Recipe module – default is the bundled open-source recipe. Set RECIPE_PATH to override.
 const RECIPE_PATH = process.env.RECIPE_PATH || './recipe/index.js';
@@ -186,6 +200,12 @@ const circuitBreaker = redisClient
   : new CircuitBreaker(circuitOptions);
 
 const app = express();
+const IDEMPOTENCY_TTL_MS = coercePositiveInteger(process.env.IDEMPOTENCY_TTL_SECONDS, 900) * 1000;
+if (IDEMPOTENCY_TTL_MS <= REQUEST_DEADLINE_MS) throw new Error('IDEMPOTENCY_TTL_SECONDS must exceed REQUEST_DEADLINE_MS');
+const idempotencyStore = redisClient
+  ? new RedisIdempotencyStore(redisClient, { ttlMs: IDEMPOTENCY_TTL_MS })
+  : new MemoryIdempotencyStore({ ttlMs: IDEMPOTENCY_TTL_MS });
+const costlyIdempotency = idempotencyMiddleware(idempotencyStore);
 app.disable('x-powered-by');
 // Render (and most PaaS/load-balancer setups) sit exactly one reverse-proxy
 // hop in front of this app. Without this, Express's req.ip resolves to that
@@ -427,8 +447,7 @@ async function callEmbeddingEndpoint(texts, {
   if (!LOCAL_EMBEDDING_BASE_URL || input.length === 0) return null;
 
   const useHfNativeShape = isHfInferenceRouterUrl(LOCAL_EMBEDDING_BASE_URL);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), boundedTimeout(timeoutMs));
+  const attempt = attemptSignal(timeoutMs);
   const startedAt = Date.now();
   try {
     const response = await fetch(localEmbeddingsUrl(LOCAL_EMBEDDING_BASE_URL, model), {
@@ -437,16 +456,16 @@ async function callEmbeddingEndpoint(texts, {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${LOCAL_EMBEDDING_API_KEY}`,
       },
-      signal: controller.signal,
+      signal: attempt.signal,
       body: JSON.stringify(buildEmbeddingsRequestBody(useHfNativeShape, model, input)),
     });
 
     if (!response.ok) {
-      const detail = await response.text().catch(() => '');
+      const detail = await readBoundedResponseText(response, PROVIDER_ERROR_MAX_BYTES).catch(() => '');
       throw new LLMProviderError('local-openai-embeddings', response.status, detail.slice(0, 500), null, model);
     }
 
-    const data = await response.json();
+    const data = JSON.parse(await readBoundedResponseText(response, PROVIDER_RESPONSE_MAX_BYTES));
     const embeddings = parseEmbeddingsResponse(useHfNativeShape, data);
 
     if (embeddings.length !== input.length) {
@@ -475,7 +494,7 @@ async function callEmbeddingEndpoint(texts, {
     if (error?.name === 'AbortError' && remainingMs() <= 0) throw new RequestDeadlineError();
     throw error;
   } finally {
-    clearTimeout(timeout);
+    attempt.cleanup();
   }
 }
 
@@ -485,21 +504,21 @@ async function callEmbeddingEndpoint(texts, {
 // without every health hit paying for an external round-trip.
 async function probeEmbeddingLiveness() {
   if (!LOCAL_EMBEDDING_BASE_URL) {
-    return { configured: false, status: 'not_configured' };
+    return { ok: false, configured: false, status: 'not_configured' };
   }
   const startedAt = Date.now();
   try {
     const vectors = await callEmbeddingEndpoint(['DraftApply embedding liveness probe.']);
     const dimensions = Array.isArray(vectors?.[0]) ? vectors[0].length : 0;
     if (!dimensions) {
-      return { configured: true, status: 'error', reason: 'Endpoint returned no usable vector.', elapsedMs: Date.now() - startedAt };
+      return { ok: false, configured: true, status: 'error', reason: 'Endpoint returned no usable vector.', elapsedMs: Date.now() - startedAt };
     }
-    return { configured: true, status: 'live', model: LOCAL_EMBEDDING_MODEL, dimensions, elapsedMs: Date.now() - startedAt };
+    return { ok: true, configured: true, status: 'live', model: LOCAL_EMBEDDING_MODEL, dimensions, elapsedMs: Date.now() - startedAt };
   } catch (error) {
     const reason = error?.name === 'AbortError'
       ? `Timed out after ${LOCAL_EMBEDDING_TIMEOUT_MS}ms.`
       : String(error?.message || error).slice(0, 200);
-    return { configured: true, status: 'error', reason, elapsedMs: Date.now() - startedAt };
+    return { ok: false, configured: true, status: 'error', reason, elapsedMs: Date.now() - startedAt };
   }
 }
 
@@ -529,8 +548,7 @@ async function callProviderChat(provider, {
   assertBudget();
   const circuitKey = `${provider}:${config.model || (models || []).join(',')}`;
   if (!await circuitBreaker.permit(circuitKey)) throw new LLMProviderError(provider, 503, 'Circuit open', null, config.model);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), boundedTimeout(timeoutMs));
+  const attemptSignalHandle = attemptSignal(timeoutMs);
   const startedAt = Date.now();
   try {
     const response = await fetch(config.url, {
@@ -541,7 +559,7 @@ async function callProviderChat(provider, {
         ...(metadata ? { 'X-OpenRouter-Metadata': 'enabled' } : {}),
         ...config.headers,
       },
-      signal: controller.signal,
+      signal: attemptSignalHandle.signal,
       body: JSON.stringify({
         ...(useModelsArray ? { models } : { model: config.model }),
         temperature,
@@ -559,69 +577,105 @@ async function callProviderChat(provider, {
     });
 
     if (!response.ok) {
-      const text = await response.text().catch(() => '');
+      let text;
+      try {
+        text = await readBoundedResponseText(response, PROVIDER_ERROR_MAX_BYTES);
+      } catch (error) {
+        if (attemptSignalHandle.signal.aborted) throw attemptSignalHandle.signal.reason;
+        if (error instanceof ProviderAttemptTimeoutError || error instanceof RequestDeadlineError || error instanceof ClientCancelledError) throw error;
+        throw new LLMProviderError(provider, 502, 'Invalid provider error response', null, useModelsArray ? models.join(' > ') : config.model);
+      }
       const retryAfterMs = retryAfterMsFromHeaders(response.headers) ?? retryAfterMsFromProviderDetail(text);
       const attemptedModel = useModelsArray ? models.join(' > ') : config.model;
       logLLMAttempt({ provider, model: attemptedModel, attempt, outcome: 'error', status: response.status, fallbackFrom, elapsedMs: Date.now() - startedAt });
-      throw new LLMProviderError(provider, response.status, text.slice(0, 500), retryAfterMs, attemptedModel);
+      const providerError = new LLMProviderError(provider, response.status, text.slice(0, 500), retryAfterMs, attemptedModel);
+      providerError.attemptLogged = true;
+      throw providerError;
     }
 
     const requestedModel = useModelsArray ? models[0] : config.model;
-    let finalized = false;
-    const markSuccess = async (actualModel = requestedModel) => {
-      if (finalized) return;
-      finalized = true;
-      // Admission already succeeded before this provider call. If Redis drops
-      // mid-request, do not discard a complete paid-provider response merely
-      // because distributed circuit telemetry cannot be updated.
+    if (!stream) {
+      // Consume the body while this provider attempt is still inside the
+      // fallback boundary. Providers can send headers and then stall or send
+      // malformed JSON; both are attempt failures, not successful routing.
+      let body;
+      try {
+        body = JSON.parse(await readBoundedResponseText(response, PROVIDER_RESPONSE_MAX_BYTES));
+        if (typeof body?.choices?.[0]?.message?.content !== 'string' || !body.choices[0].message.content.trim()) {
+          throw new Error('Missing provider answer content');
+        }
+      } catch (error) {
+        if (attemptSignalHandle.signal.aborted) throw attemptSignalHandle.signal.reason;
+        if (error instanceof ProviderAttemptTimeoutError || error instanceof RequestDeadlineError || error instanceof ClientCancelledError) throw error;
+        throw new LLMProviderError(provider, 502, 'Invalid provider response', null, useModelsArray ? models.join(' > ') : config.model);
+      }
+      recordProviderUsage(body?.usage);
+      attemptSignalHandle.cleanup();
       try { await circuitBreaker.success(circuitKey); } catch {}
-      logLLMAttempt({ provider, model: actualModel, attempt, outcome: 'success', fallbackFrom, elapsedMs: Date.now() - startedAt });
-    };
-    const markFailure = async (error, actualModel = requestedModel) => {
-      if (finalized) return;
-      finalized = true;
-      try { await circuitBreaker.failure(circuitKey); } catch {}
       logLLMAttempt({
         provider,
-        model: actualModel,
+        model: body?.model || requestedModel,
+        attempt,
+        outcome: 'success',
+        fallbackFrom,
+        elapsedMs: Date.now() - startedAt,
+      });
+      response.json = async () => body;
+      return {
+        response,
+        provider: config.provider,
+        model: requestedModel,
+        requestedModels: useModelsArray ? models : undefined,
+        markSuccess: async () => {},
+        markFailure: async () => {},
+      };
+    }
+
+    let streamed;
+    try {
+      streamed = await consumeOpenAIStream(response.body, PROVIDER_RESPONSE_MAX_BYTES);
+      if (!streamed.complete || !streamed.answer.trim()) throw new Error('Incomplete provider stream');
+    } catch (error) {
+      if (attemptSignalHandle.signal.aborted) throw attemptSignalHandle.signal.reason;
+      if (error instanceof ProviderAttemptTimeoutError || error instanceof RequestDeadlineError || error instanceof ClientCancelledError) throw error;
+      throw new LLMProviderError(provider, 502, 'Invalid provider stream', null, useModelsArray ? models.join(' > ') : config.model);
+    }
+    recordProviderUsage(streamed.usage);
+    attemptSignalHandle.cleanup();
+    try { await circuitBreaker.success(circuitKey); } catch {}
+    logLLMAttempt({
+      provider,
+      model: streamed.model || requestedModel,
+      attempt,
+      outcome: 'success',
+      fallbackFrom,
+      elapsedMs: Date.now() - startedAt,
+    });
+    return {
+      response,
+      streamed,
+      provider: config.provider,
+      model: requestedModel,
+      requestedModels: useModelsArray ? models : undefined,
+      markSuccess: async () => {},
+      markFailure: async () => {},
+    };
+  } catch (error) {
+    attemptSignalHandle.cleanup();
+    if (isCircuitFailure(error)) try { await circuitBreaker.failure(circuitKey); } catch {}
+    if (!error?.attemptLogged) {
+      logLLMAttempt({
+        provider,
+        model: useModelsArray ? models.join(' > ') : config.model,
         attempt,
         outcome: error?.name === 'AbortError' ? 'timeout' : 'error',
         status: error?.status,
         fallbackFrom,
         elapsedMs: Date.now() - startedAt,
       });
-    };
-    const originalJson = response.json.bind(response);
-    response.json = async () => {
-      try {
-        const body = await originalJson();
-        recordProviderUsage(body?.usage);
-        await markSuccess(body?.model || requestedModel);
-        return body;
-      } catch (error) {
-        await markFailure(error);
-        throw error;
-      }
-    };
-    return {
-      response,
-      provider: config.provider,
-      model: requestedModel,
-      requestedModels: useModelsArray ? models : undefined,
-      markSuccess,
-      markFailure,
-    };
-  } catch (error) {
-    try { await circuitBreaker.failure(circuitKey); } catch {}
-    if (error?.name === 'AbortError') {
-      logLLMAttempt({
-        provider,
-        model: useModelsArray ? models.join(' > ') : config.model,
-        attempt,
-        outcome: 'timeout',
-        fallbackFrom,
-        elapsedMs: Date.now() - startedAt,
-      });
+    }
+    if (error instanceof ProviderAttemptTimeoutError) {
+      throw new LLMProviderError(provider, 408, error.message, null, useModelsArray ? models.join(' > ') : config.model);
     }
     throw error;
   }
@@ -629,7 +683,7 @@ async function callProviderChat(provider, {
 
 async function getOpenRouterFallbackModelOrder() {
   assertBudget();
-  const models = await openRouterModelCache.getModels({ timeoutMs: boundedTimeout(10000) });
+  const models = await openRouterModelCache.getModels({ timeoutMs: boundedTimeout(10000), signal: requestSignal() });
   assertBudget();
   const preferred = OPENROUTER_MODEL
     ? [OPENROUTER_MODEL, ...PREFERRED_OPENROUTER_FREE_MODELS.filter(model => model !== OPENROUTER_MODEL)]
@@ -738,6 +792,9 @@ async function callChatCompletionWithFallback(options) {
         route,
       };
     } catch (error) {
+      if (requestSignal()?.aborted) throw requestSignal().reason;
+      if (error instanceof RequestDeadlineError) throw error;
+      if (error?.name === 'AbortError') assertBudget();
       if (!GROQ_API_KEY && !OPENROUTER_API_KEY) throw error;
       console.warn(`[DraftApply] Local lightweight model ${route.model} failed (${error.status || error.name || 'error'}); falling back to hosted proxy path.`);
     }
@@ -749,6 +806,7 @@ async function callChatCompletionWithFallback(options) {
     if (primary === 'openrouter') return { ...(await callOpenRouterFreeFallback(options, { callStart, fallbackFrom: null })), fallbackFrom: null, route };
     return { ...(await callProviderChat(primary, { ...options, attempt: 1 })), fallbackFrom: null, route };
   } catch (error) {
+    if (requestSignal()?.aborted) throw requestSignal().reason;
     if (error instanceof RequestDeadlineError || error?.name === 'AbortError') {
       if (error instanceof RequestDeadlineError) throw error;
       try { assertBudget(); } catch (deadline) { throw deadline; }
@@ -783,6 +841,19 @@ const generateLimiter = rateLimit({
   }
 });
 const costlyAdmission = admissionMiddleware(admissionStore, undefined, reconciledUsage);
+async function networkPaidLimit(req, res, next) {
+  if (!redisClient) return next();
+  try {
+    const hash = crypto.createHmac('sha256', TOKEN_SECRET).update(String(req.ip)).digest('hex').slice(0, 32);
+    const key = `draftapply:paid-network:${hash}:${Math.floor(Date.now() / 86400000)}`;
+    const count = await redisClient.incr(key);
+    if (count === 1) await redisClient.expire(key, 172800);
+    if (count > coercePositiveInteger(process.env.PAID_NETWORK_DAILY_LIMIT, 300)) {
+      return res.status(429).json({ error: 'Request quota exceeded', code: 'quota_network_requests' });
+    }
+    next();
+  } catch (error) { next(error); }
+}
 
 // /api/health itself is intentionally open (no auth, no limiter) for uptime
 // monitors. But ?probe=embedding makes one real, billed call to the
@@ -808,6 +879,11 @@ function authRequired(req, res, next) {
 // and unthrottled for uptime monitors.
 function embeddingProbeGate(req, res, next) {
   if (req.query.probe === 'embedding') {
+    const supplied = req.get('x-operator-secret') || '';
+    if (!OPERATOR_SECRET || supplied.length !== OPERATOR_SECRET.length ||
+        !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(OPERATOR_SECRET))) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
     return healthProbeLimiter(req, res, () => costlyAdmission(req, res, next));
   }
   return next();
@@ -834,9 +910,17 @@ app.get('/api/health', embeddingProbeGate, async (req, res) => {
   const embeddingLiveness = req.query.probe === 'embedding' ? await probeEmbeddingLiveness() : undefined;
   const qualityMode = deploymentQualityMode();
 
-  res.json({
+  const publicHealth = {
     ok: true,
     capabilities: { apiVersion: 2, streamFinal: true, answerValidation: true },
+  };
+  if (!VERBOSE_DIAGNOSTICS && !embeddingLiveness) return res.json(publicHealth);
+  if (!VERBOSE_DIAGNOSTICS) return res.status(embeddingLiveness?.ok ? 200 : 503).json({
+    ...publicHealth, ok: Boolean(embeddingLiveness?.ok), embeddingLiveness,
+  });
+  res.status(embeddingLiveness && !embeddingLiveness.ok ? 503 : 200).json({
+    ...publicHealth,
+    ok: embeddingLiveness ? embeddingLiveness.ok : true,
     // Which code is actually running: Render injects RENDER_GIT_COMMIT on
     // every deploy, and startedAt shows when this process last restarted.
     // Without these there is no way to tell whether a pushed fix is live yet.
@@ -878,8 +962,23 @@ app.get('/api/health', embeddingProbeGate, async (req, res) => {
   });
 });
 
-app.post('/api/register', registerLimiter, (req, res) => {
+app.get('/api/ready', (req, res) => {
+  const ready = !REDIS_URL || Boolean(redisClient?.isReady);
+  res.status(ready ? 200 : 503).json({ ok: ready });
+});
+
+app.post('/api/register', registerLimiter, async (req, res, next) => {
   if (!TOKEN_SECRET) return res.status(500).json({ error: 'Server misconfigured' });
+  try {
+    if (redisClient) {
+      const networkHash = crypto.createHmac('sha256', TOKEN_SECRET).update(String(req.ip)).digest('hex').slice(0, 32);
+      const key = `draftapply:registration:${networkHash}:${Math.floor(Date.now() / 86400000)}`;
+      const count = await redisClient.incr(key);
+      if (count === 1) await redisClient.expire(key, 172800);
+      if (count > coercePositiveInteger(process.env.REGISTRATION_NETWORK_DAILY_LIMIT, 30)) {
+        return res.status(429).json({ error: 'Registration limit exceeded', code: 'registration_network_limit' });
+      }
+    }
 
   const now = Math.floor(Date.now() / 1000);
   const exp = now + 60 * 60 * 24 * 90; // 90 days
@@ -892,7 +991,29 @@ app.post('/api/register', registerLimiter, (req, res) => {
 
   const token = signToken(payload);
   res.json({ token, expiresAt: exp * 1000 });
+  } catch (error) { next(error); }
 });
+
+const MAX_CV_CHARS = coercePositiveInteger(process.env.MAX_CV_CHARS, 60000);
+const MAX_JD_CHARS = coercePositiveInteger(process.env.MAX_JD_CHARS, 60000);
+const MAX_PARSER_CONCURRENCY = coercePositiveInteger(process.env.MAX_PARSER_CONCURRENCY, 2);
+let activeParsers = 0;
+function parserAdmission(req, res, next) {
+  if (activeParsers >= MAX_PARSER_CONCURRENCY) return res.status(503).json({ error: 'Parser is busy', code: 'parser_busy' });
+  activeParsers++;
+  let released = false;
+  const release = () => { if (!released) { released = true; activeParsers--; } };
+  res.once('finish', release); res.once('close', release); next();
+}
+function validateCostlyText(req, res, next) {
+  const body = req.body || {};
+  for (const [field, max] of [['cvText', MAX_CV_CHARS], ['jobDescription', MAX_JD_CHARS]]) {
+    if (body[field] != null && typeof body[field] !== 'string') return res.status(400).json({ error: `${field} must be a string`, code: 'invalid_request_type' });
+    if (body[field]?.length > max) return res.status(413).json({ error: `${field} is too large`, code: field === 'cvText' ? 'cv_too_large_for_complete_context' : 'job_description_too_large' });
+  }
+  if (body.confirmedSkills != null && !Array.isArray(body.confirmedSkills)) return res.status(400).json({ error: 'confirmedSkills must be an array', code: 'invalid_request_type' });
+  next();
+}
 
 // ---------------------------------------------------------------------------
 // Deterministic CV fact extraction
@@ -977,8 +1098,21 @@ function normalizeExtractedUrl(raw) {
   return `https://${cleaned}`;
 }
 
-function tryDeterministicExtract(cleanedQuestion, cvText) {
-  const profileUrl = extractProfileUrl(cleanedQuestion, cvText);
+function tryDeterministicExtract(cleanedQuestion, cvText, contactInfo) {
+  const contact = contactInfo && typeof contactInfo === 'object' ? contactInfo : null;
+  if (contact) {
+    const rules = [
+      [/^e-?mail(?:\s*address)?$/i, 'email'], [/^(?:phone|mobile|cell(?:phone)?|telephone)(?:\s*number)?$/i, 'phone'],
+      [/^linkedin(?:\s*(?:url|link|profile|page))*$/i, 'linkedin'], [/^github(?:\s*(?:url|link|profile|page))*$/i, 'github'],
+      [/^(?:portfolio|personal\s*website?|personal\s*site|blog)(?:\s*(?:url|link|profile|page|website))*$/i, contact.portfolio ? 'portfolio' : 'website'],
+      [/^(?:full\s*)?name$/i, 'name'],
+    ];
+    for (const [pattern, field] of rules) if (pattern.test(cleanedQuestion) && contact[field]) return String(contact[field]).trim();
+    if (/^first\s*name$/i.test(cleanedQuestion) && contact.name) return contact.name.trim().split(/\s+/)[0];
+    if (/^(?:last|sur|family)\s*name$/i.test(cleanedQuestion) && contact.name) return contact.name.trim().split(/\s+/).at(-1);
+    return null;
+  }
+  const profileUrl = !contact && extractProfileUrl(cleanedQuestion, cvText);
   if (profileUrl) return profileUrl;
   for (const [pattern, extractor] of DETERMINISTIC_EXTRACTORS) {
     if (pattern.test(cleanedQuestion)) {
@@ -1175,7 +1309,33 @@ function pipelineMetadata(context) {
   };
 }
 
-async function consumeOpenAIStream(body) {
+async function readBoundedResponseText(response, maxBytes) {
+  const declaredLength = Number(response.headers?.get?.('content-length'));
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) throw new Error('Provider response too large');
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  let text = '';
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > maxBytes) {
+        await reader.cancel().catch(() => {});
+        throw new Error('Provider response too large');
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+    return text + decoder.decode();
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+async function consumeOpenAIStream(body, maxBytes = PROVIDER_RESPONSE_MAX_BYTES) {
+  if (!body) throw new Error('Missing provider stream');
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -1183,28 +1343,47 @@ async function consumeOpenAIStream(body) {
   let model;
   let openRouterMetadata;
   let usage;
+  let bytes = 0;
+  let complete = false;
   const consumeEvent = event => {
     const data = event.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n').trim();
-    if (!data || data === '[DONE]') return;
-    try {
-      const json = JSON.parse(data);
-      answer += json.choices?.[0]?.delta?.content || '';
-      model = json.model || model;
-      openRouterMetadata = json.openrouter_metadata || openRouterMetadata;
-      usage = json.usage || usage;
-    } catch (_) { /* malformed provider events are not forwarded */ }
+    if (!data) return;
+    if (data === '[DONE]') { complete = true; return; }
+    if (complete) throw new Error('Provider stream continued after terminal event');
+    const json = JSON.parse(data);
+    if (!json || typeof json !== 'object' || !Array.isArray(json.choices)) {
+      throw new Error('Invalid provider stream event');
+    }
+    if (json.choices.length > 0) {
+      const delta = json.choices[0]?.delta;
+      if (!delta || typeof delta !== 'object' || Array.isArray(delta)) throw new Error('Invalid provider stream delta');
+      if (delta.content != null && typeof delta.content !== 'string') throw new Error('Invalid provider stream content');
+      answer += delta.content || '';
+    }
+    model = json.model || model;
+    openRouterMetadata = json.openrouter_metadata || openRouterMetadata;
+    usage = json.usage || usage;
   };
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const events = buffer.split(/\r?\n\r?\n/);
-    buffer = events.pop() || '';
-    events.forEach(consumeEvent);
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > maxBytes) {
+        await reader.cancel().catch(() => {});
+        throw new Error('Provider stream too large');
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split(/\r?\n\r?\n/);
+      buffer = events.pop() || '';
+      events.forEach(consumeEvent);
+    }
+    buffer += decoder.decode();
+    if (buffer.trim()) consumeEvent(buffer);
+    return { answer, model, openRouterMetadata, usage, complete };
+  } finally {
+    reader.releaseLock();
   }
-  buffer += decoder.decode();
-  if (buffer.trim()) consumeEvent(buffer); // final unterminated SSE event
-  return { answer, model, openRouterMetadata, usage };
 }
 
 function compactText(value, max = 160) {
@@ -1421,7 +1600,7 @@ function cleanFieldLabel(raw) {
     .trim();
 }
 
-app.post('/api/generate', authRequired, generateLimiter, costlyAdmission, async (req, res) => {
+app.post('/api/generate', authRequired, generateLimiter, validateCostlyText, costlyIdempotency, networkPaidLimit, costlyAdmission, async (req, res) => {
   const body = req.body || {};
 
   let systemPrompt, userPrompt, temperature, maxTokens, questionType;
@@ -1435,7 +1614,7 @@ app.post('/api/generate', authRequired, generateLimiter, costlyAdmission, async 
     if (typeof body.cvText !== 'string' || body.cvText.length < 50) {
       return res.status(400).json({ error: 'Missing or empty cvText' });
     }
-    if (body.cvText.length > 60000) {
+    if (body.cvText.length > MAX_CV_CHARS) {
       return res.status(413).json({
         error: 'CV text is too large to use completely. Please remove duplicated PDF text layers or upload a CV under 60,000 characters.',
         code: 'cv_too_large_for_complete_context',
@@ -1461,7 +1640,7 @@ app.post('/api/generate', authRequired, generateLimiter, costlyAdmission, async 
     } catch (_) {}
 
     // Direct extraction still receives the same final grounding contract.
-    const deterministicAnswer = tryDeterministicExtract(cleanedQuestion, body.cvText);
+    const deterministicAnswer = tryDeterministicExtract(cleanedQuestion, body.cvText, answerAgentContext?.cvData?.contactInfo);
     if (deterministicAnswer) {
       const validation = answerValidation(deterministicAnswer, answerAgentContext, body, cleanedQuestion, 'data_extraction');
       return res.json({
@@ -1577,13 +1756,10 @@ app.post('/api/generate', authRequired, generateLimiter, costlyAdmission, async 
         if (!res.writableEnded) res.write(': draftapply-keepalive\n\n');
       }, 10000);
       try {
-        const streamed = await consumeOpenAIStream(response.body);
+        const streamed = completion.streamed;
         let answer = streamed.answer;
-        if (!answer.trim()) throw new Error('No answer from provider');
         let finalCompletion = completion;
         let responseModel = streamed.model || completion.model;
-        recordProviderUsage(streamed.usage);
-        await completion.markSuccess?.(responseModel);
         let openRouterMetadata = streamed.openRouterMetadata;
         if (questionType && !body.skipEvaluation) {
           const evaluation = evaluateAnswer(answer, questionType);
@@ -1626,9 +1802,11 @@ app.post('/api/generate', authRequired, generateLimiter, costlyAdmission, async 
         // Circuit-state recording is best-effort here: never let it escape
         // into Express 4 or replace the existing terminal SSE error event.
         try { await completion.markFailure?.(streamError); } catch {}
-        const code = streamError instanceof RequestDeadlineError || streamError?.name === 'AbortError'
+        const code = streamError instanceof RequestDeadlineError
+          || (streamError?.name === 'AbortError' && remainingMs() <= 0)
           ? 'request_deadline_exceeded'
           : 'stream_generation_failed';
+        res.locals.idempotencyFailed = true;
         res.write(`data: ${JSON.stringify({ draftapplyError: { code, error: code === 'request_deadline_exceeded' ? 'Request deadline exceeded.' : 'Answer generation failed.' } })}\n\n`);
       } finally {
         clearInterval(keepAlive);
@@ -1711,7 +1889,7 @@ app.post('/api/generate', authRequired, generateLimiter, costlyAdmission, async 
       finalProvider: { provider: finalCompletion.provider, model: responseModel, stage: 'generation' },
     });
   } catch (e) {
-    if (e?.name === 'AbortError' || e instanceof RequestDeadlineError) {
+    if (e instanceof RequestDeadlineError || (e?.name === 'AbortError' && remainingMs() <= 0)) {
       return res.status(504).json({ error: 'Request deadline exceeded.', code: 'request_deadline_exceeded', ...safetyMetadata() });
     }
     if (e instanceof LLMProviderError) {
@@ -1727,14 +1905,21 @@ app.post('/api/generate', authRequired, generateLimiter, costlyAdmission, async 
 // Optional: keep file upload UX working (PDF/DOCX/TXT)
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 }
+  limits: { fileSize: 5 * 1024 * 1024, files: 1, fields: 2, parts: 3 }
 });
 
-app.post('/api/cv/upload', authRequired, generateLimiter, upload.single('cv'), async (req, res) => {
+app.post('/api/cv/upload', authRequired, generateLimiter, parserAdmission, upload.single('cv'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file provided' });
     const buffer = req.file.buffer;
     const mimetype = req.file.mimetype;
+    const pdfMagic = buffer.subarray(0, 5).toString() === '%PDF-';
+    const zipMagic = buffer[0] === 0x50 && buffer[1] === 0x4b;
+    if ((mimetype === 'application/pdf' && !pdfMagic) ||
+        (mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' && !zipMagic) ||
+        !['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain'].includes(mimetype)) {
+      return res.status(400).json({ error: 'Unsupported or invalid CV file', code: 'invalid_cv_file' });
+    }
 
     let text = '';
     let linkAnnotations = [];
@@ -1833,6 +2018,9 @@ app.post('/api/cv/upload', authRequired, generateLimiter, upload.single('cv'), a
         error: 'No selectable text found in this file — it looks like a scanned or image-based document. Export a text-based version, or paste your CV text instead.',
       });
     }
+    if (text.length > MAX_CV_CHARS) return res.status(413).json({
+      error: 'Extracted CV text is too large', code: 'cv_too_large_for_complete_context',
+    });
 
     res.json({
       success: true,
@@ -1843,7 +2031,7 @@ app.post('/api/cv/upload', authRequired, generateLimiter, upload.single('cv'), a
     });
   } catch (e) {
     console.error('CV upload error:', e);
-    res.status(500).json({ error: `Could not process this file (${String(e?.message || 'unknown error').slice(0, 120)}). Try re-exporting it, or paste your CV text instead.` });
+    res.status(500).json({ error: 'Could not process this file.', code: 'cv_parse_failed' });
   }
 });
 
@@ -1853,18 +2041,18 @@ app.post('/api/cv/upload', authRequired, generateLimiter, upload.single('cv'), a
  * long pasted postings before CV/JD analysis. The popup falls back to raw text
  * if this fails, but production should still provide the route it calls.
  */
-app.post('/api/jd/extract', authRequired, generateLimiter, costlyAdmission, async (req, res) => {
+function validateJdExtract(req, res, next) {
+  const { text } = req.body || {};
+  if (typeof text !== 'string') return res.status(400).json({ error: 'text must be a string', code: 'invalid_request_type' });
+  if (text.trim().length < 100) return res.status(400).json({ error: 'text must be at least 100 characters', code: 'jd_too_short' });
+  if (text.length > MAX_JD_CHARS) return res.status(413).json({ error: 'Job posting is too large', code: 'job_description_too_large' });
+  next();
+}
+app.post('/api/jd/extract', authRequired, generateLimiter, validateJdExtract, networkPaidLimit, costlyAdmission, async (req, res) => {
   try {
     const { text } = req.body || {};
 
-    if (!text || String(text).trim().length < 100) {
-      return res.status(400).json({ error: 'text must be at least 100 characters' });
-    }
-
-    const normalizedText = String(text).trim();
-    if (normalizedText.length > 60000) {
-      return res.status(413).json({ error: 'Job posting is too large. Please paste a shorter posting.' });
-    }
+    const normalizedText = text.trim();
 
     const systemPrompt = `You are a job posting parser. Extract only the job-relevant content from a full job posting.
 
@@ -1895,7 +2083,7 @@ Preserve the original bullet point structure and section headings. Output only t
     });
 
     const data = await completion.response.json();
-    const extractedText = data?.choices?.[0]?.message?.content?.trim();
+    const extractedText = data?.choices?.[0]?.message?.content?.trim().slice(0, MAX_JD_CHARS);
     if (!extractedText) {
       return res.status(502).json({ error: 'No output from provider' });
     }
@@ -1914,7 +2102,7 @@ Preserve the original bullet point structure and section headings. Output only t
       agentChain: completion.route?.agentChain || WORKFLOW_AGENT_CHAINS.tailoredCv,
     });
   } catch (e) {
-    if (e?.name === 'AbortError' || e instanceof RequestDeadlineError) {
+    if (e instanceof RequestDeadlineError || (e?.name === 'AbortError' && remainingMs() <= 0)) {
       return res.status(504).json({ error: 'Request deadline exceeded.', code: 'request_deadline_exceeded', ...safetyMetadata() });
     }
     if (e instanceof LLMProviderError) {
@@ -2054,7 +2242,7 @@ async function enrichJdData(jdParser, regexParsed, jdText) {
   }
 }
 
-app.post('/api/cv/analyze', authRequired, generateLimiter, costlyAdmission, async (req, res) => {
+app.post('/api/cv/analyze', authRequired, generateLimiter, validateCostlyText, networkPaidLimit, costlyAdmission, async (req, res) => {
   const { cvText, jobTitle = '', company = '', jobDescription, confirmedSkills = [] } = req.body || {};
 
   if (!cvText || cvText.length < 100) {
@@ -2143,7 +2331,7 @@ app.post('/api/cv/analyze', authRequired, generateLimiter, costlyAdmission, asyn
       }),
     });
   } catch (e) {
-    if (e?.name === 'AbortError' || e instanceof RequestDeadlineError) {
+    if (e instanceof RequestDeadlineError || (e?.name === 'AbortError' && remainingMs() <= 0)) {
       return res.status(504).json({ error: 'Request deadline exceeded.', code: 'request_deadline_exceeded', ...safetyMetadata() });
     }
     console.error('[DraftApply] Analyze error:', e.message);
@@ -2151,7 +2339,7 @@ app.post('/api/cv/analyze', authRequired, generateLimiter, costlyAdmission, asyn
   }
 });
 
-app.post('/api/cv/tailor', authRequired, generateLimiter, costlyAdmission, async (req, res) => {
+app.post('/api/cv/tailor', authRequired, generateLimiter, validateCostlyText, costlyIdempotency, networkPaidLimit, costlyAdmission, async (req, res) => {
   const { cvText, jobTitle = '', company = '', jobDescription, confirmedSkills = [] } = req.body || {};
 
   if (!cvText || cvText.length < 100) {
@@ -2362,7 +2550,7 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, costlyAdmission, async
       agentInsights: buildAgentInsights(tailorAgentContext),
     });
   } catch (e) {
-    if (e?.name === 'AbortError' || e instanceof RequestDeadlineError) {
+    if (e instanceof RequestDeadlineError || (e?.name === 'AbortError' && remainingMs() <= 0)) {
       return res.status(504).json({ error: 'Request deadline exceeded.', code: 'request_deadline_exceeded', ...safetyMetadata() });
     }
     if (e instanceof LLMProviderError) {
@@ -2375,10 +2563,29 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, costlyAdmission, async
   }
 });
 
-export { app };
+app.use((error, req, res, next) => {
+  if (res.headersSent) return next(error);
+  if (error instanceof multer.MulterError || error?.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'Request payload is too large', code: 'payload_too_large' });
+  }
+  console.error('[DraftApply] Unhandled request error:', error?.name || 'Error');
+  return res.status(500).json({ error: 'Internal server error' });
+});
+
+let server;
+export { app, server };
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
-  app.listen(PORT, () => {
+  server = app.listen(PORT, () => {
     console.log(`DraftApply Render proxy listening on :${PORT}`);
   });
+  const shutdown = () => {
+    const force = setTimeout(() => process.exit(1), coercePositiveInteger(process.env.SHUTDOWN_TIMEOUT_MS, 10000));
+    force.unref();
+    server.close(async () => {
+      try { if (redisClient?.isOpen) await redisClient.quit(); } finally { clearTimeout(force); process.exit(0); }
+    });
+  };
+  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', shutdown);
 }

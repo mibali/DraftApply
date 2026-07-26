@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { requestContext, waitForUpstreams } from './safety-runtime.js';
 
 export class AdmissionDeniedError extends Error { constructor(reason = 'quota_exceeded') { super(reason); this.code = reason; } }
 
@@ -48,17 +49,29 @@ export class MemoryAdmissionStore {
   constructor({
     maxConcurrent = 8, maxRequests = 1000, maxTokens = 20_000_000, maxSpendMicros = 100_000_000,
     maxConcurrentPerSubject = 1, maxRequestsPerSubject = 100, maxTokensPerSubject = 5_000_000,
-    maxSpendMicrosPerSubject = 5_000_000,
+    maxSpendMicrosPerSubject = 5_000_000, windowSeconds = 86400, leaseSeconds = 120, now = Date.now,
   } = {}) {
     this.limits = {
       maxConcurrent, maxRequests, maxTokens, maxSpendMicros,
       maxConcurrentPerSubject, maxRequestsPerSubject, maxTokensPerSubject, maxSpendMicrosPerSubject,
+      windowSeconds, leaseSeconds,
     };
     this.active = new Map();
     this.used = { requests: 0, tokens: 0, spendMicros: 0 };
     this.subjects = new Map();
+    this.now = now;
+    this.windowStartedAt = now();
+  }
+  rotateWindow() {
+    if (this.now() - this.windowStartedAt < this.limits.windowSeconds * 1000) return;
+    this.windowStartedAt = this.now();
+    this.used = { requests: 0, tokens: 0, spendMicros: 0 };
+    for (const [key, subject] of this.subjects) this.subjects.set(key, {
+      concurrent: subject.concurrent, requests: 0, tokens: 0, spendMicros: 0,
+    });
   }
   async reserve({ subjectKey = 'anonymous', tokens = 0, spendMicros = 0 }) {
+    this.rotateWindow();
     const subject = this.subjects.get(subjectKey) || { concurrent: 0, requests: 0, tokens: 0, spendMicros: 0 };
     // Distinct denial codes: "quota_exceeded" alone made a token/spend cap
     // denial indistinguishable from a request-count denial in production.
@@ -188,6 +201,14 @@ export function admissionMiddleware(store, estimate = req => {
       void store.reconcile(id, actualUsage(req)).catch(() => {});
     };
     req.admissionReservation = { id };
-    res.once('finish', release); res.once('close', release); next();
+    // Release only after the handler finishes normally, or after request-scoped
+    // cancellation has propagated to upstream fetches and their promises have
+    // unwound. Route handlers call this in finally; finish is a safe fallback
+    // for deterministic responses that start no upstream work.
+    req.releaseAdmission = release;
+    res.once('finish', release);
+    const context = requestContext();
+    res.once('close', () => { void waitForUpstreams(context).then(release); });
+    next();
   };
 }

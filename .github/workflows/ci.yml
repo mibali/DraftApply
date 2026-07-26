@@ -20,7 +20,7 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       # render-proxy/ is its own npm package (separate package.json and
       # lockfile) - the root install above never touches it, but
@@ -29,7 +29,7 @@ jobs:
       # directly, which needs its own node_modules (express, redis, ...) at
       # runtime.
       - name: Install render-proxy dependencies
-        run: npm install --prefix render-proxy
+        run: npm ci --prefix render-proxy
 
       - name: Install Redis for safety integration tests
         run: sudo apt-get update && sudo apt-get install -y redis-server

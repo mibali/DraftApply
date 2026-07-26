@@ -11,21 +11,48 @@ export class RequestDeadlineError extends Error {
   }
 }
 
+export class ClientCancelledError extends Error {
+  constructor() { super('Client cancelled request'); this.name = 'ClientCancelledError'; this.code = 'client_cancelled'; }
+}
+
+export class ProviderAttemptTimeoutError extends Error {
+  constructor() {
+    super('Provider attempt timed out');
+    this.name = 'AbortError';
+    this.code = 'provider_attempt_timeout';
+    this.status = 408;
+  }
+}
+
 export function requestSafetyMiddleware({ deadlineMs = 90000 } = {}) {
   return (req, res, next) => {
+    const controller = new AbortController();
     const context = {
-      requestId: req.get('x-request-id')?.slice(0, 128) || crypto.randomUUID(),
+      requestId: /^[A-Za-z0-9._:-]{1,128}$/.test(req.get('x-request-id') || '')
+        ? req.get('x-request-id') : crypto.randomUUID(),
       deadlineAt: Date.now() + deadlineMs,
       providerTrace: [],
       finalProvider: null,
       usage: { tokens: 0, spendMicros: 0, attempts: 0, tokenReports: 0, costReports: 0 },
+      signal: controller.signal,
+      activeUpstreams: 0,
+      upstreamWaiters: [],
     };
+    let finished = false;
+    res.once?.('finish', () => { finished = true; });
+    req.once?.('aborted', () => controller.abort(new ClientCancelledError()));
+    res.once?.('close', () => { if (!finished) controller.abort(new ClientCancelledError()); });
     res.setHeader('X-Request-Id', context.requestId);
     storage.run(context, next);
   };
 }
 
 export const requestContext = () => storage.getStore();
+export const requestSignal = () => requestContext()?.signal;
+export function waitForUpstreams(context = requestContext()) {
+  if (!context || context.activeUpstreams === 0) return Promise.resolve();
+  return new Promise(resolve => context.upstreamWaiters.push(resolve));
+}
 export const remainingMs = (context = requestContext()) => Math.max(0, (context?.deadlineAt || 0) - Date.now());
 export function assertBudget(minimumMs = 1) {
   if (remainingMs() < minimumMs) throw new RequestDeadlineError();
@@ -33,6 +60,42 @@ export function assertBudget(minimumMs = 1) {
 export function boundedTimeout(attemptMs) {
   assertBudget();
   return Math.max(1, Math.min(Number(attemptMs) || 60000, remainingMs()));
+}
+
+export function attemptSignal(attemptMs) {
+  const context = requestContext();
+  const budget = remainingMs();
+  const requestedTimeout = Math.max(1, Number(attemptMs) || 60000);
+  const timeout = boundedTimeout(requestedTimeout); // validate before taking a lease
+  const timeoutReason = requestedTimeout >= budget
+    ? new RequestDeadlineError()
+    : new ProviderAttemptTimeoutError();
+  if (context) context.activeUpstreams++;
+  const controller = new AbortController();
+  const parent = requestSignal();
+  const abort = () => controller.abort(parent?.reason);
+  if (parent?.aborted) abort(); else parent?.addEventListener('abort', abort, { once: true });
+  const timer = setTimeout(() => controller.abort(timeoutReason), timeout);
+  let cleaned = false;
+  return {
+    signal: controller.signal,
+    cleanup() {
+      if (cleaned) return;
+      cleaned = true;
+      clearTimeout(timer);
+      parent?.removeEventListener('abort', abort);
+      if (context && context.activeUpstreams > 0 && --context.activeUpstreams === 0) {
+        for (const resolve of context.upstreamWaiters.splice(0)) resolve();
+      }
+    },
+  };
+}
+
+export function isCircuitFailure(error) {
+  if (error instanceof ClientCancelledError || error instanceof RequestDeadlineError) return false;
+  if (requestSignal()?.aborted && (requestSignal().reason instanceof ClientCancelledError || requestSignal().reason instanceof RequestDeadlineError)) return false;
+  const status = Number(error?.status);
+  return !status || status === 408 || status === 429 || status >= 500;
 }
 
 export function recordProviderTrace(entry) {

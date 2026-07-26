@@ -1,0 +1,36 @@
+name: Bug report
+description: Report reproducible incorrect behavior
+body:
+  - type: markdown
+    attributes:
+      value: Do not include CV text, application data, API keys, tokens, or security vulnerabilities. Report vulnerabilities privately as described in SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: DraftApply version or commit
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options: [Chrome extension, hosted/self-hosted proxy, local web app, documentation or release tooling]
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Use synthetic or redacted data only.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment and relevant sanitized logs
