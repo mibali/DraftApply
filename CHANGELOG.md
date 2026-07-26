@@ -8,6 +8,28 @@ must match the release tag.
 
 ## [Unreleased]
 
+## [2.5.1] - 2026-07-26
+
+### Reliability and safety
+
+- Hardened hosted proxy request deadlines, cancellation, admission control,
+  idempotency, provider fallback, and response validation so misbehaving
+  requests fail closed with bounded resource usage instead of hanging or
+  falling through to unsafe defaults.
+- Extension answer insertion, token handling, deletion, Tailor CV requests,
+  and other request-lifecycle mutations are now serialized so overlapping
+  actions can no longer race each other.
+- Hardened local-provider privacy defaults, BYOK key isolation, structured
+  CV generation, and disconnect handling.
+- Further improvements to grounding accuracy, contact extraction, release
+  reproducibility, and dependency security.
+
+### Documentation and process
+
+- Added issue/PR templates, a Code of Conduct, Contributing guide, Security
+  policy, and Privacy Policy for the open-source project.
+- Added Dependabot configuration and a scheduled domain-packs refresh workflow.
+
 ## [2.5.0] - 2026-07-22
 
 ### Tailored CV generation
