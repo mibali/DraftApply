@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createClient } from 'redis';
 import { connectRedisAtStartup, RedisAdmissionStore, redisClientOptions } from '../render-proxy/admission-control.js';
 import { RedisCircuitBreaker } from '../render-proxy/safety-runtime.js';
+import { RedisIdempotencyStore } from '../render-proxy/idempotency.js';
 
 const redisAvailable = spawnSync('redis-server', ['--version'], { stdio: 'ignore' }).status === 0;
 const suite = redisAvailable ? describe.sequential : describe.skip;
@@ -43,6 +44,16 @@ suite('Redis-backed proxy safety', () => {
   afterAll(async () => {
     if (client?.isOpen) await client.quit();
     process?.kill('SIGTERM');
+  });
+
+  it('atomically rejects stale idempotency completion and abandon owners', async () => {
+    const store = new RedisIdempotencyStore(client, { ttlMs: 5000, pollMs: 5 });
+    const key = `integration-${Date.now()}`;
+    const owner = await store.begin(key, 'payload');
+    await expect(store.complete(key, 'stale', owner.entry.generation, { status: 200 })).resolves.toBe(false);
+    await expect(store.abandon(key, owner.entry.ownerId, 'stale')).resolves.toBe(false);
+    await expect(store.complete(key, owner.entry.ownerId, owner.entry.generation, { status: 200, body: 'ok' })).resolves.toBe(true);
+    expect((await store.begin(key, 'payload')).state).toBe('done');
   });
 
   it('atomically reconciles reserved tokens and spend while retaining request counts', async () => {

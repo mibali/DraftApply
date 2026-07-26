@@ -163,12 +163,10 @@ export class OpenRouterFreeModelCache {
     this.inFlight = null;
   }
 
-  async getModels({ timeoutMs = this.fetchTimeoutMs } = {}) {
+  async getModels({ timeoutMs = this.fetchTimeoutMs, signal } = {}) {
     const age = this.now() - this.cachedAt;
     if (this.models && age < this.ttlMs) return this.models;
-    if (this.inFlight) return this.inFlight;
-
-    this.inFlight = this.fetchModels(timeoutMs)
+    if (!this.inFlight) this.inFlight = this.fetchModels(timeoutMs)
       .then(models => {
         this.models = models;
         this.cachedAt = this.now();
@@ -182,8 +180,11 @@ export class OpenRouterFreeModelCache {
       .finally(() => {
         this.inFlight = null;
       });
-
-    return this.inFlight;
+    if (!signal) return this.inFlight;
+    if (signal.aborted) throw signal.reason;
+    return Promise.race([this.inFlight, new Promise((_, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    })]);
   }
 
   async fetchModels(timeoutMs = this.fetchTimeoutMs) {

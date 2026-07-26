@@ -102,27 +102,68 @@ describe('extension critical modal behavior', () => {
     expect(backgroundJs).toContain('function isTailorJobRelevant');
     expect(backgroundJs).toContain('isTailorDraftRelevant(job, context)');
     expect(backgroundJs).toContain("message.type === 'GET_TAILOR_JOB_FOR_ACTIVE_PAGE'");
-    expect(backgroundJs).toContain('await chrome.storage.local.remove(TAILOR_JOB_KEY)');
+    expect(backgroundJs).not.toMatch(/GET_TAILOR_JOB_FOR_ACTIVE_PAGE[\s\S]{0,900}remove\(TAILOR_JOB_KEY\)/);
   });
 
-  it('clears transient Tailor state on extension reload without deleting saved CV data', () => {
-    expect(backgroundJs).toContain('const TRANSIENT_TAILOR_STORAGE_KEYS');
-    expect(backgroundJs).toContain("'tailorCvDraft'");
-    expect(backgroundJs).toContain("'tailoredCvExport'");
-    expect(backgroundJs).toContain('clearTransientTailorState();');
+  it('isolates answer cancellation while deliberate deletion cancels every request family', () => {
+    expect(backgroundJs).toContain('const answerRequests = new Map()');
+    expect(backgroundJs).toContain('const dataRequests = new Map()');
+    expect(backgroundJs).toMatch(/message\.type === 'CANCEL_ALL'[\s\S]{0,160}abortRegistry\(answerRequests\)/);
+    expect(backgroundJs).toMatch(/message\.type === 'DELETE_ALL_USER_DATA'[\s\S]{0,500}abortRegistry\(answerRequests\)[\s\S]{0,200}abortRegistry\(dataRequests\)/);
+  });
+
+  it('prevents delete races and stale 401s from restoring or clearing newer tokens/data', () => {
+    expect(backgroundJs).toContain('let dataGeneration = 0');
+    expect(backgroundJs).toContain('dataGeneration++;');
+    expect(backgroundJs).toContain('function mutateTokenRecord(operation)');
+    expect(backgroundJs).toMatch(/setInstallToken[\s\S]{0,200}mutateTokenRecord/);
+    expect(backgroundJs).toMatch(/clearInstallTokenIfCurrent[\s\S]{0,200}mutateTokenRecord/);
+    expect(backgroundJs).toContain('clearInstallTokenIfCurrent(staleToken, generation)');
+    expect(backgroundJs).toContain('stored.installToken !== staleToken');
+    expect(backgroundJs).toMatch(/DELETE_ALL_USER_DATA[\s\S]{0,600}mutateTokenRecord\(\(\) => mutateTailorRecord/);
+    expect(backgroundJs).toContain("registerController(dataRequests, `register:${generation}`");
+    expect(backgroundJs).toContain('registerController(dataRequests, requestId, controller)');
+    expect(backgroundJs).toContain('setTailorJobIfCurrent(jobId, generation');
+    expect(backgroundJs).toMatch(/message\.type === 'SAVE_CV'[\s\S]{0,900}mutateTailorRecord/);
+    expect(popupJs).not.toContain('chrome.storage.local.set({ userProfileLinks: profileLinksRaw })');
+  });
+
+  it('serializes Tailor ownership changes and never deletes a job for an unrelated page lookup', () => {
+    expect(backgroundJs).toContain('function mutateTailorRecord(operation)');
+    expect(backgroundJs).toContain('latest?.id !== job.id');
+    expect(backgroundJs).toContain('stored?.[TAILOR_JOB_KEY]?.id !== jobId');
+    expect(backgroundJs).not.toMatch(/GET_TAILOR_JOB_FOR_ACTIVE_PAGE[\s\S]{0,900}remove\(TAILOR_JOB_KEY\)/);
+    expect(backgroundJs).toContain("message.type === 'CANCEL_TAILOR_JOB'");
+    expect(popupJs).not.toContain('chrome.storage.local.remove(TAILOR_JOB_KEY)');
+  });
+
+  it('clears answer caches and modal data when any answer input is deleted', () => {
+    expect(contentJs).toContain("['cvText', 'cvLinkAnnotations', 'applicationFacts']");
+    expect(contentJs).toContain('clearSensitiveAnswerState()');
+    expect(contentJs).toContain('this.lastAnswer = null');
+    expect(contentJs).toContain("display:none !important;");
+  });
+
+  it('exports benign gaps but blocks unsafe or unaudited text until it is genuinely edited', () => {
+    expect(popupJs).toContain('shouldBlockTailorExport({ warnings, auditSkipped })');
+    expect(popupJs).not.toContain('normalizeMissingSkills(matchReport).length > 0');
+    expect(popupJs).toContain('Boolean(auditSkipped)');
+    expect(popupJs).toContain('warnings.some(isUnsafeTailorWarning)');
+    expect(popupJs).toContain('blockedTailorText = tailorAccuracyBlocked');
+    expect(popupJs).toContain('elements.tailorOutput.value === blockedTailorText');
+  });
+
+  it('fails worker-owned running Tailor jobs on restart without deleting saved CV data', () => {
+    expect(backgroundJs).toContain('failWorkerOwnedTailorJob().catch');
+    expect(backgroundJs).toContain('previous incarnation');
     expect(backgroundJs).toContain('chrome.runtime.onInstalled.addListener');
     expect(backgroundJs).toContain('chrome.runtime.onStartup.addListener');
-
-    const keysStart = backgroundJs.indexOf('const TRANSIENT_TAILOR_STORAGE_KEYS');
-    const keysEnd = backgroundJs.indexOf('];', keysStart);
-    const keyBlock = backgroundJs.slice(keysStart, keysEnd);
-    expect(keyBlock).not.toContain("'cvText'");
-    expect(keyBlock).not.toContain("'installToken'");
+    expect(backgroundJs).not.toContain('clearTransientTailorState');
   });
 
   it('preserves specific proxy/provider error messages instead of replacing all 429s', () => {
     expect(backgroundJs).toContain('async function responseErrorMessage');
-    expect(backgroundJs).toContain('if (body?.error) return body.error');
+    expect(backgroundJs).toContain("body.error.length <= 180");
     expect(backgroundJs).toContain('if (response.status === 429) return rateLimitError(response)');
     expect(backgroundJs).toContain("response.headers.get('Retry-After')");
     expect(backgroundJs).toContain('function formatRetryDelay');
@@ -141,13 +182,12 @@ describe('extension critical modal behavior', () => {
     expect(backgroundJs).not.toContain("type: 'STREAM_CHUNK', requestId: effectiveRequestId");
   });
 
-  it('gates only ungrounded model output, with the state shown as a badge instead of button labels', () => {
+  it('gates every non-passing model answer while preserving explicit user editing', () => {
     expect(contentJs).toContain('id="da-btn-insert" disabled');
     expect(contentJs).toContain("if (message.type === 'STREAM_FINAL')");
     expect(contentJs).toContain('if (this.currentRequestId !== message.requestId) return');
-    // Grounded and review-state answers insert directly; ungrounded output is
-    // stopped at click time with a plain explanation.
-    expect(contentJs).toContain("modelStatus !== 'pass' && modelStatus !== 'review'");
+    expect(contentJs).toContain("modelStatus !== 'pass'");
+    expect(contentJs).toContain("button.disabled = !hasAnswer || status !== 'pass'");
     expect(contentJs).toContain('could not verify from your CV');
     // No alarming persistent button states; validation lives in the badge.
     expect(contentJs).not.toContain('Review Required');
@@ -221,7 +261,8 @@ describe('answer generation uses full CV facts and respects user authorship', ()
 
   it('lets the user insert their own edited answer, gated only by the field character limit', () => {
     expect(contentJs).toContain('const isUserEdit = this.answerUserEdited && Boolean(current)');
-    expect(contentJs).toContain("insertButton.textContent = overLimit ? 'Over Character Limit' : 'Insert (Your Edit)'");
+    expect(contentJs).toContain('this.answerUserEdited = Boolean(text && text !== this.validatedAnswer)');
+    expect(contentJs).toContain("this.answerUserEdited ? 'Insert (Your Edit)' : 'Insert Answer'");
     // The old behavior forced regeneration after any manual edit.
     expect(contentJs).not.toContain("'Regenerate to Validate'");
   });
@@ -252,7 +293,8 @@ describe('user-entered profile links', () => {
     expect(popupJs).toContain('function parseProfileLinks(raw)');
     // Manual links take precedence and are stored for future sessions.
     expect(popupJs).toContain('...manualLinks,');
-    expect(popupJs).toContain("chrome.storage.local.set({ userProfileLinks: profileLinksRaw })");
+    expect(popupJs).toContain('userProfileLinks: profileLinksRaw, applicationFacts');
+    expect(backgroundJs).toContain('userProfileLinks: String(message.userProfileLinks');
     // Restored into the input on popup load.
     expect(popupJs).toContain("chrome.storage.local.get(['userProfileLinks', 'applicationFacts'])");
   });

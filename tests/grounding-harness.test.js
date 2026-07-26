@@ -1,10 +1,31 @@
 import { describe, expect, it } from 'vitest';
 import { buildGroundingContext, isTextSupported, validateApplicationAnswer } from '../shared/grounding-harness.js';
 import { CVTailor } from '../shared/cv-tailor.js';
+import { CVParser } from '../shared/cv-parser.js';
 import { groundingCases, groundingCv } from './fixtures/grounding-adversarial.js';
 import { evaluateGroundingCases } from './grounding-evaluation-helper.js';
 
 describe('deterministic grounding harness', () => {
+  it('grounds parsed candidate contacts and rejects headings and company profile links', () => {
+    const parsed = new CVParser().parse(`Jane Candidate
+jane@example.com | +44 7700 900123
+https://linkedin.com/in/jane-candidate https://github.com/janecandidate https://jane.dev
+EXPERIENCE
+Engineer — Acme
+Company profile https://linkedin.com/company/acme
+Built reliable services.`);
+    expect(parsed.contactInfo).toMatchObject({
+      name: 'Jane Candidate', email: 'jane@example.com', phone: '+44 7700 900123',
+      linkedin: 'https://linkedin.com/in/jane-candidate', github: 'https://github.com/janecandidate', website: 'https://jane.dev',
+    });
+    expect(parsed.contactInfo.name).not.toBe('EXPERIENCE');
+    expect(parsed.contactInfo.linkedin).not.toContain('/company/');
+    const context = buildGroundingContext(parsed);
+    for (const field of ['name', 'email', 'phone', 'linkedin', 'github', 'website']) {
+      expect(context.sourceIndex[`contact:${field}`]?.text).toBe(parsed.contactInfo[field]);
+    }
+  });
+
   it('accepts a truthful ordinary paraphrase without weakening protected claims', () => {
     const cvData = {
       experience: [{
@@ -32,8 +53,8 @@ describe('deterministic grounding harness', () => {
     expect(result.status).toBe('pass');
   });
 
-  it('reviews unsupported personal state and unsupported affirmative propositions', () => {
-    expect(validateApplicationAnswer('Yes.', { context, question: 'Are you authorized to work in the UK?', questionType: 'yes_no' }).status).toBe('review');
+  it('blocks unsupported personal state and unsupported affirmative propositions', () => {
+    expect(validateApplicationAnswer('Yes.', { context, question: 'Are you authorized to work in the UK?', questionType: 'yes_no' }).status).toBe('block');
     expect(validateApplicationAnswer('Yes.', { context, question: 'Have you managed 500 customers?', questionType: 'yes_no' }).status).toBe('block');
   });
 
@@ -60,8 +81,8 @@ describe('deterministic grounding harness', () => {
   it('fails closed for malformed yes/no answers and non-first-person assertions', () => {
     expect(validateApplicationAnswer('Absolutely.', {
       question: 'Do you have experience with Rust?', questionType: 'yes_no', context,
-    }).status).toBe('review');
-    expect(validateApplicationAnswer('Built a payment platform in Rust.', { context }).status).toBe('review');
+    }).status).toBe('block');
+    expect(validateApplicationAnswer('Built a payment platform in Rust.', { context }).status).toBe('block');
   });
 
   it('does not erase negation or treat credential preparation as completion', () => {
@@ -73,8 +94,8 @@ describe('deterministic grounding harness', () => {
 
   it('respects negation and never treats a similarity score as authorization', () => {
     const negative = buildGroundingContext({ summary: 'I have never held security clearance.' });
-    expect(validateApplicationAnswer('Yes.', { context: negative, question: 'Do you hold security clearance?', questionType: 'yes_no' }).status).toBe('review');
-    expect(validateApplicationAnswer('Yes.', { context, question: 'Are you authorized to work?', questionType: 'yes_no', similarity: 1 }).status).toBe('review');
+    expect(validateApplicationAnswer('Yes.', { context: negative, question: 'Do you hold security clearance?', questionType: 'yes_no' }).status).toBe('block');
+    expect(validateApplicationAnswer('Yes.', { context, question: 'Are you authorized to work?', questionType: 'yes_no', similarity: 1 }).status).toBe('block');
   });
 
   it('verifies proposed IDs without trusting foreign or cross-role IDs', () => {

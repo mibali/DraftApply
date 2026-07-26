@@ -14,7 +14,44 @@
 
 import { PROXY_URL } from './build-config.js';
 
-const pendingRequests = new Map(); // requestId -> AbortController
+// Answer requests are intentionally isolated from popup Tailor/analysis work:
+// content-script CANCEL_ALL means "stop answers", not "stop everything".
+const answerRequests = new Map(); // requestId -> AbortController
+const dataRequests = new Map(); // requestId -> AbortController (register/analyse/tailor/extract)
+let dataGeneration = 0;
+let tailorMutation = Promise.resolve();
+let tokenMutation = Promise.resolve();
+const WORKER_INSTANCE_ID = globalThis.crypto?.randomUUID?.() || `worker_${Date.now()}_${Math.random()}`;
+
+function currentGeneration(generation) {
+  return generation === dataGeneration;
+}
+
+function registerController(registry, id, controller) {
+  registry.set(id, controller);
+  return () => {
+    if (registry.get(id) === controller) registry.delete(id);
+  };
+}
+
+function abortRegistry(registry) {
+  for (const controller of registry.values()) {
+    try { controller.abort(); } catch (_) {}
+  }
+  registry.clear();
+}
+
+function mutateTailorRecord(operation) {
+  const result = tailorMutation.then(operation, operation);
+  tailorMutation = result.catch(() => {});
+  return result;
+}
+
+function mutateTokenRecord(operation) {
+  const result = tokenMutation.then(operation, operation);
+  tokenMutation = result.catch(() => {});
+  return result;
+}
 
 function rateLimitError(response) {
   const retryAfter = parseRetryDelay(response.headers.get('Retry-After'));
@@ -71,31 +108,51 @@ function formatRetryDelay(ms) {
 
 async function responseErrorMessage(response, fallback = `Error ${response?.status || ''}`.trim()) {
   const body = await response.clone().json().catch(() => ({}));
-  if (body?.error) return body.error;
   if (response.status === 429) return rateLimitError(response);
-  return fallback;
+  // Provider traces and implementation details are not public UI. Preserve
+  // only deliberately actionable, bounded messages from the API.
+  if (typeof body?.error === 'string' && body.error.length <= 180
+      && /(?:rate limit|try again|CV|job description|unauthori[sz]ed|sign in|required)/i.test(body.error)) {
+    return body.error;
+  }
+  if (response.status === 401 || response.status === 403) return 'Your DraftApply session expired. Please try again.';
+  if (response.status >= 500) return 'DraftApply could not complete this request. Please try again.';
+  return fallback || 'DraftApply could not complete this request. Please try again.';
 }
 
 const TAILOR_JOB_KEY = 'tailorCvJob';
-const TRANSIENT_TAILOR_STORAGE_KEYS = [
-  'tailorCvDraft',
-  TAILOR_JOB_KEY,
-  'tailoredCvExport',
-  'tailoredCvContactUrls',
-  'tailoredCvLinkAnnotations',
-];
-
-function clearTransientTailorState() {
-  chrome.storage.local.remove(TRANSIENT_TAILOR_STORAGE_KEYS, () => {
-    void chrome.runtime.lastError;
+async function failWorkerOwnedTailorJob() {
+  return mutateTailorRecord(async () => {
+    const generation = dataGeneration;
+    const stored = await chrome.storage.local.get(TAILOR_JOB_KEY);
+    const job = stored?.[TAILOR_JOB_KEY];
+    if (!currentGeneration(generation) || job?.status !== 'running' || job.workerInstanceId === WORKER_INSTANCE_ID) return;
+    // Re-read immediately before writing: startup inspection must never replace
+    // a job that was created while the first storage read was pending.
+    const latest = (await chrome.storage.local.get(TAILOR_JOB_KEY))?.[TAILOR_JOB_KEY];
+    if (!currentGeneration(generation) || latest?.id !== job.id || latest?.workerInstanceId !== job.workerInstanceId) return;
+    await chrome.storage.local.set({ [TAILOR_JOB_KEY]: {
+      ...latest,
+      status: 'error',
+      error: 'Generation was interrupted when DraftApply restarted. Please generate again.',
+      completedAt: new Date().toISOString(),
+    } });
   });
 }
 
-async function setTailorJobIfCurrent(jobId, nextState) {
-  const stored = await chrome.storage.local.get(TAILOR_JOB_KEY);
-  if (stored?.[TAILOR_JOB_KEY]?.id !== jobId) return false;
-  await chrome.storage.local.set({ [TAILOR_JOB_KEY]: nextState });
-  return true;
+// Executed on every service-worker incarnation. A `running` record belongs to
+// the previous incarnation: fetch/AbortController state cannot survive MV3
+// worker loss, so report interruption instead of pretending it can resume.
+failWorkerOwnedTailorJob().catch(() => {});
+
+async function setTailorJobIfCurrent(jobId, generation, nextState) {
+  return mutateTailorRecord(async () => {
+    if (!currentGeneration(generation)) return false;
+    const stored = await chrome.storage.local.get(TAILOR_JOB_KEY);
+    if (!currentGeneration(generation) || stored?.[TAILOR_JOB_KEY]?.id !== jobId) return false;
+    await chrome.storage.local.set({ [TAILOR_JOB_KEY]: nextState });
+    return true;
+  });
 }
 
 async function getProxyUrl() {
@@ -118,19 +175,34 @@ async function getInstallToken() {
   return { token: installToken, expiring: isExpiring };
 }
 
-async function setInstallToken(token, expiresAt) {
-  await chrome.storage.local.set({ installToken: token, installTokenExpiresAt: expiresAt || null });
+async function setInstallToken(token, expiresAt, generation) {
+  return mutateTokenRecord(async () => {
+    if (!currentGeneration(generation)) throw new DOMException('Deleted', 'AbortError');
+    await chrome.storage.local.set({ installToken: token, installTokenExpiresAt: expiresAt || null });
+    if (!currentGeneration(generation)) {
+      const stored = await chrome.storage.local.get('installToken');
+      if (stored.installToken === token) await chrome.storage.local.remove(['installToken', 'installTokenExpiresAt']);
+      throw new DOMException('Deleted', 'AbortError');
+    }
+  });
 }
 
-async function clearInstallToken() {
-  await chrome.storage.local.remove(['installToken', 'installTokenExpiresAt']);
+async function clearInstallTokenIfCurrent(staleToken, generation) {
+  return mutateTokenRecord(async () => {
+    if (!currentGeneration(generation)) return false;
+    const stored = await chrome.storage.local.get('installToken');
+    if (!currentGeneration(generation) || stored.installToken !== staleToken) return false;
+    await chrome.storage.local.remove(['installToken', 'installTokenExpiresAt']);
+    return true;
+  });
 }
 
 // Mutex: if a registration is already in-flight, queue up behind it rather than
 // firing a second concurrent request (which could cause a duplicate-token race).
 let _tokenRefreshPromise = null;
 
-async function ensureInstallToken(proxyUrl) {
+async function ensureInstallToken(proxyUrl, generation = dataGeneration) {
+  if (!currentGeneration(generation)) throw new DOMException('Deleted', 'AbortError');
   const result = await getInstallToken();
   const existing = result?.token ?? null;
   const expiring = result?.expiring ?? false;
@@ -140,25 +212,29 @@ async function ensureInstallToken(proxyUrl) {
   // Re-use an in-flight registration if one is already running
   if (_tokenRefreshPromise) return _tokenRefreshPromise;
 
-  _tokenRefreshPromise = (async () => {
+  const controller = new AbortController();
+  const unregister = registerController(dataRequests, `register:${generation}`, controller);
+  const refreshPromise = (async () => {
     try {
-      const response = await fetch(`${proxyUrl}/api/register`, { method: 'POST' });
+      const response = await fetch(`${proxyUrl}/api/register`, { method: 'POST', signal: controller.signal });
       if (!response.ok) throw new Error(`Register failed (${response.status})`);
       const data = await response.json().catch(() => ({}));
       if (!data.token) throw new Error('Register failed (no token)');
-      await setInstallToken(data.token, data.expiresAt);
+      await setInstallToken(data.token, data.expiresAt, generation);
       return data.token;
     } catch (e) {
-      if (existing) {
+      if (existing && currentGeneration(generation)) {
         // Re-registration failed but old token still valid — use it
         console.warn('[DraftApply] Token refresh failed, using existing token:', e.message);
         return existing;
       }
       throw e;
     } finally {
-      _tokenRefreshPromise = null;
+      unregister();
+      if (_tokenRefreshPromise === refreshPromise) _tokenRefreshPromise = null;
     }
   })();
+  _tokenRefreshPromise = refreshPromise;
 
   return _tokenRefreshPromise;
 }
@@ -330,47 +406,13 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   }
 });
 
-// ---------------------------------------------------------------------------
-// Server keep-alive — ping /api/health every 14 minutes so the Render proxy
-// never hits its 15-minute idle cold-start. Uses chrome.alarms which fires
-// even when the MV3 service worker is otherwise sleeping.
-// ---------------------------------------------------------------------------
-const KEEPALIVE_ALARM = 'draftapply-keepalive';
-const KEEPALIVE_PERIOD_MINUTES = 14;
-
-async function pingProxyHealth() {
-  try {
-    await fetch(`${PROXY_URL}/api/health`, { method: 'GET' });
-  } catch (_) {
-    // Network error during ping is expected when offline — ignore silently.
-  }
-}
-
-function ensureKeepaliveAlarm() {
-  chrome.alarms.get(KEEPALIVE_ALARM, alarm => {
-    if (!alarm) {
-      chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: KEEPALIVE_PERIOD_MINUTES });
-    }
-  });
-}
-
-chrome.alarms.onAlarm.addListener(alarm => {
-  if (alarm.name === KEEPALIVE_ALARM) pingProxyHealth();
-});
-
-// Recreate the alarm after install/update or browser restart (alarms persist
-// across SW restarts but are cleared on extension update/reinstall). Tailor CV
-// drafts/jobs/exports are transient session state, so clear them here while
-// preserving saved CV text and install tokens.
 chrome.runtime.onStartup.addListener(() => {
-  ensureKeepaliveAlarm();
-  clearTransientTailorState();
+  failWorkerOwnedTailorJob().catch(() => {});
 });
 
 // Create context menu on install/update (idempotent)
 chrome.runtime.onInstalled.addListener(() => {
-  ensureKeepaliveAlarm();
-  clearTransientTailorState();
+  failWorkerOwnedTailorJob().catch(() => {});
 
   // On extension reload/update, Chrome may keep old menu items.
   // Ensure we don't throw "duplicate id" by removing first.
@@ -468,10 +510,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'CANCEL_API') {
-    const controller = pendingRequests.get(message.requestId);
+    const controller = answerRequests.get(message.requestId);
     if (controller) {
       controller.abort();
-      pendingRequests.delete(message.requestId);
+      answerRequests.delete(message.requestId);
       sendResponse({ cancelled: true });
     } else {
       sendResponse({ cancelled: false });
@@ -480,12 +522,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'CANCEL_ALL') {
-    for (const [id, controller] of pendingRequests.entries()) {
-      try {
-        controller.abort();
-      } catch (e) {}
-      pendingRequests.delete(id);
-    }
+    abortRegistry(answerRequests);
     sendResponse({ cancelled: true });
     return true;
   }
@@ -512,27 +549,68 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'SAVE_CV') {
-    chrome.storage.local.set({
-      cvText: message.cvText,
-      cvLinkAnnotations: Array.isArray(message.linkAnnotations) ? message.linkAnnotations : [],
-    }, () => {
-      sendResponse({ success: true });
-    });
+    const generation = dataGeneration;
+    mutateTailorRecord(async () => {
+      if (!currentGeneration(generation)) return false;
+      await chrome.storage.local.set({
+        cvText: message.cvText,
+        cvLinkAnnotations: Array.isArray(message.linkAnnotations) ? message.linkAnnotations : [],
+        userProfileLinks: String(message.userProfileLinks || ''),
+        applicationFacts: message.applicationFacts && typeof message.applicationFacts === 'object'
+          ? message.applicationFacts : {},
+      });
+      return currentGeneration(generation);
+    }).then(success => sendResponse({ success })).catch(() => sendResponse({ success: false }));
     return true;
   }
 
   if (message.type === 'CLEAR_CV') {
-    chrome.storage.local.remove(['cvText', 'cvLinkAnnotations'], () => {
-      sendResponse({ success: true });
-    });
+    const generation = dataGeneration;
+    mutateTailorRecord(async () => {
+      if (!currentGeneration(generation)) return false;
+      await chrome.storage.local.remove(['cvText', 'cvLinkAnnotations']);
+      return currentGeneration(generation);
+    }).then(success => sendResponse({ success })).catch(() => sendResponse({ success: false }));
+    return true;
+  }
+
+  if (message.type === 'CANCEL_TAILOR_JOB') {
+    mutateTailorRecord(async () => {
+      const stored = await chrome.storage.local.get(TAILOR_JOB_KEY);
+      const job = stored?.[TAILOR_JOB_KEY];
+      if (!job || (message.jobId && message.jobId !== job.id)) return false;
+      try { dataRequests.get(job.id)?.abort(); } catch (_) {}
+      dataRequests.delete(job.id);
+      await chrome.storage.local.remove(TAILOR_JOB_KEY);
+      return true;
+    }).then(cancelled => sendResponse({ cancelled })).catch(() => sendResponse({ cancelled: false }));
+    return true;
+  }
+
+  if (message.type === 'DELETE_ALL_USER_DATA') {
+    // Advance synchronously, before aborting or awaiting storage. Every async
+    // continuation captured the old generation and is now forbidden to write.
+    dataGeneration++;
+    abortRegistry(answerRequests);
+    abortRegistry(dataRequests);
+    _tokenRefreshPromise = null;
+    // The full clear participates in both queues. Registrations that started
+    // before deletion fail their generation check; newer registrations queue
+    // behind the clear and cannot have their token erased by it.
+    mutateTokenRecord(() => mutateTailorRecord(() => chrome.storage.local.clear()))
+      .then(() => sendResponse({ success: true }))
+      .catch(() => sendResponse({ success: false }));
     return true;
   }
 
   if (message.type === 'TAILOR_CV') {
     (async () => {
+      const generation = dataGeneration;
       const jobId = `tailor_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+      const idempotencyKey = message.idempotencyKey || `tailor:${jobId}`;
       const jobSnapshot = {
         id: jobId,
+        workerInstanceId: WORKER_INSTANCE_ID,
         status: 'running',
         startedAt: new Date().toISOString(),
         jobDescription: message.jobDescription || '',
@@ -557,7 +635,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const stored = await chrome.storage.local.get('cvText');
         cvText = stored.cvText;
         if (!cvText) { sendResponse({ error: 'No CV loaded — please save your CV first' }); return; }
-        await chrome.storage.local.set({ [TAILOR_JOB_KEY]: jobSnapshot });
+        await mutateTailorRecord(async () => {
+          if (!currentGeneration(generation)) throw new DOMException('Deleted', 'AbortError');
+          await chrome.storage.local.set({ [TAILOR_JOB_KEY]: jobSnapshot });
+        });
       } catch (e) {
         sendResponse({ error: e.message });
         return;
@@ -566,15 +647,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       // Phase 2: run the job. The message channel is closed; popup polls storage.
       const controller = new AbortController();
+      const unregister = registerController(dataRequests, jobId, controller);
       const timeout = setTimeout(() => controller.abort(), 360000);
       const keepAlive = setInterval(() => chrome.storage.local.get('_sw_keepalive'), 20000);
       try {
         const proxyUrl = await getProxyUrl();
-        let token = await ensureInstallToken(proxyUrl);
+        let token = await ensureInstallToken(proxyUrl, generation);
 
         let response = await fetch(`${proxyUrl}/api/cv/tailor`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, 'Idempotency-Key': idempotencyKey },
           signal: controller.signal,
           body: JSON.stringify({
             cvText,
@@ -586,11 +668,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
 
         if (response.status === 401) {
-          await clearInstallToken();
-          token = await ensureInstallToken(proxyUrl);
+          await clearInstallTokenIfCurrent(token, generation);
+          token = await ensureInstallToken(proxyUrl, generation);
           response = await fetch(`${proxyUrl}/api/cv/tailor`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, 'Idempotency-Key': idempotencyKey },
             signal: controller.signal,
             body: JSON.stringify({
               cvText,
@@ -607,7 +689,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         const data = await response.json();
-        await setTailorJobIfCurrent(jobId, {
+        await setTailorJobIfCurrent(jobId, generation, {
           ...jobSnapshot,
           status: 'done',
           result: data,
@@ -615,7 +697,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
       } catch (e) {
         const error = e?.name === 'AbortError' ? 'Timed out — please try again' : e.message;
-        await setTailorJobIfCurrent(jobId, {
+        await setTailorJobIfCurrent(jobId, generation, {
           ...jobSnapshot,
           status: 'error',
           error,
@@ -624,6 +706,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       } finally {
         clearTimeout(timeout);
         clearInterval(keepAlive);
+        unregister();
       }
     })();
     return true;
@@ -631,10 +714,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === 'EXTRACT_JD') {
     (async () => {
+      const generation = dataGeneration;
+      const requestId = `extract_${Date.now()}_${Math.random()}`;
+      const controller = new AbortController();
+      const unregister = registerController(dataRequests, requestId, controller);
       try {
         const proxyUrl = await getProxyUrl();
-        let token = await ensureInstallToken(proxyUrl);
-        const controller = new AbortController();
+        let token = await ensureInstallToken(proxyUrl, generation);
         const timeout = setTimeout(() => controller.abort(), 30000);
 
         const doRequest = () => fetch(`${proxyUrl}/api/jd/extract`, {
@@ -647,35 +733,38 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         try {
           let response = await doRequest();
           if (response.status === 401) {
-            await clearInstallToken();
-            token = await ensureInstallToken(proxyUrl);
+            await clearInstallTokenIfCurrent(token, generation);
+            token = await ensureInstallToken(proxyUrl, generation);
             response = await doRequest();
           }
           if (!response.ok) {
             throw new Error(await responseErrorMessage(response));
           }
           const data = await response.json();
-          sendResponse({ success: true, extractedText: data.extractedText });
+          if (currentGeneration(generation)) sendResponse({ success: true, extractedText: data.extractedText });
         } finally {
           clearTimeout(timeout);
         }
       } catch (e) {
         if (e?.name === 'AbortError') sendResponse({ error: 'Extraction timed out' });
         else sendResponse({ error: e.message });
-      }
+      } finally { unregister(); }
     })();
     return true;
   }
 
   if (message.type === 'ANALYZE_CV_MATCH') {
     (async () => {
+      const generation = dataGeneration;
+      const requestId = `analyse_${Date.now()}_${Math.random()}`;
+      const controller = new AbortController();
+      const unregister = registerController(dataRequests, requestId, controller);
       try {
         const { cvText } = await chrome.storage.local.get('cvText');
         if (!cvText) { sendResponse({ error: 'No CV loaded — please save your CV first' }); return; }
 
         const proxyUrl = await getProxyUrl();
-        let token = await ensureInstallToken(proxyUrl);
-        const controller = new AbortController();
+        let token = await ensureInstallToken(proxyUrl, generation);
         const timeout = setTimeout(() => controller.abort(), 45000);
         const keepAlive = setInterval(() => chrome.storage.local.get('_sw_keepalive'), 20000);
 
@@ -696,8 +785,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           });
 
           if (response.status === 401) {
-            await clearInstallToken();
-            token = await ensureInstallToken(proxyUrl);
+            await clearInstallTokenIfCurrent(token, generation);
+            token = await ensureInstallToken(proxyUrl, generation);
             response = await fetch(`${proxyUrl}/api/cv/analyze`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -711,7 +800,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
 
           const data = await response.json();
-          sendResponse({ success: true, ...data });
+          if (currentGeneration(generation)) sendResponse({ success: true, ...data });
         } finally {
           clearTimeout(timeout);
           clearInterval(keepAlive);
@@ -719,7 +808,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       } catch (e) {
         if (e?.name === 'AbortError') sendResponse({ error: 'Analysis timed out — please try again' });
         else sendResponse({ error: e.message });
-      }
+      } finally { unregister(); }
     })();
     return true;
   }
@@ -761,9 +850,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         url: snapshot.url,
         tabId: snapshot.tabId,
       });
-      if (tailorCvJob && !relevant) {
-        await chrome.storage.local.remove(TAILOR_JOB_KEY);
-      }
       sendResponse({ job: relevant ? tailorCvJob : null, snapshot });
     })().catch(error => sendResponse({ job: null, error: error.message }));
     return true;
@@ -892,31 +978,16 @@ async function checkProxy() {
   return { available: true, ...data, proxyUrl };
 }
 
-async function withRetry(fn, maxRetries = 2) {
-  let lastError;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (e) {
-      lastError = e;
-      if (e?.name === 'AbortError') throw e; // don't retry cancellations
-      if (attempt < maxRetries) {
-        await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt)));
-      }
-    }
-  }
-  throw lastError;
-}
-
 /**
  * Streaming API call: relay SSE chunks to the content script tab.
  * Chunks are forwarded via chrome.tabs.sendMessage as STREAM_CHUNK messages.
  */
 async function handleStreamingAPICall(payload, requestId, tabId, frameId) {
+  const generation = dataGeneration;
   const proxyUrl = await getProxyUrl();
   const controller = new AbortController();
   const effectiveRequestId = requestId || `req_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-  pendingRequests.set(effectiveRequestId, controller);
+  const unregister = registerController(answerRequests, effectiveRequestId, controller);
 
   const timeout = setTimeout(() => controller.abort(), 120000);
 
@@ -925,15 +996,17 @@ async function handleStreamingAPICall(payload, requestId, tabId, frameId) {
   const keepAlive = setInterval(() => chrome.storage.local.get('_sw_keepalive'), 20000);
 
   const enrichedPayload = { ...payload, stream: true };
+  const idempotencyKey = `answer:${effectiveRequestId}`;
 
   try {
-    let token = await ensureInstallToken(proxyUrl);
+    let token = await ensureInstallToken(proxyUrl, generation);
 
     const doRequest = () => fetch(`${proxyUrl}/api/generate`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`
+        Authorization: `Bearer ${token}`,
+        'Idempotency-Key': idempotencyKey
       },
       signal: controller.signal,
       body: JSON.stringify(enrichedPayload)
@@ -942,8 +1015,8 @@ async function handleStreamingAPICall(payload, requestId, tabId, frameId) {
     let response = await doRequest();
 
     if (response.status === 401) {
-      await clearInstallToken();
-      token = await ensureInstallToken(proxyUrl);
+      await clearInstallTokenIfCurrent(token, generation);
+      token = await ensureInstallToken(proxyUrl, generation);
       response = await doRequest();
     }
 
@@ -1018,9 +1091,9 @@ async function handleStreamingAPICall(payload, requestId, tabId, frameId) {
     if (buffer.trim()) consumeEvent(buffer); // final unterminated event
 
     if (!receivedFinal && !receivedError) chrome.tabs.sendMessage(tabId, {
-      type: 'STREAM_FINAL', requestId: effectiveRequestId,
-      validation: { status: 'review', violations: [{ code: 'missing_final_event', severity: 'review' }] },
-      legacyUnvalidated: true,
+      type: 'STREAM_ERROR', requestId: effectiveRequestId,
+      error: 'The connection ended before the answer was verified. Please generate again.',
+      code: 'incomplete_response',
     }, { frameId }).catch(() => {});
 
     chrome.tabs.sendMessage(tabId, { type: 'STREAM_DONE', requestId: effectiveRequestId }, { frameId }).catch(() => {});
@@ -1035,7 +1108,7 @@ async function handleStreamingAPICall(payload, requestId, tabId, frameId) {
   } finally {
     clearInterval(keepAlive);
     clearTimeout(timeout);
-    pendingRequests.delete(effectiveRequestId);
+    unregister();
   }
 }
 
@@ -1046,43 +1119,39 @@ async function handleStreamingAPICall(payload, requestId, tabId, frameId) {
  * (and falls back to the default Groq key if it fails).
  */
 async function handleAPICall(payload, requestId) {
+  const generation = dataGeneration;
   const proxyUrl = await getProxyUrl();
   const controller = new AbortController();
   const effectiveRequestId = requestId || `req_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-  pendingRequests.set(effectiveRequestId, controller);
+  const unregister = registerController(answerRequests, effectiveRequestId, controller);
 
   // Hard timeout so the UI never spins forever
   const timeout = setTimeout(() => controller.abort(), 120000);
 
   const enrichedPayload = payload;
+  const idempotencyKey = `answer:${effectiveRequestId}`;
 
   try {
-    let token = await ensureInstallToken(proxyUrl);
+    let token = await ensureInstallToken(proxyUrl, generation);
 
     const doRequest = async () =>
       fetch(`${proxyUrl}/api/generate`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`
+          Authorization: `Bearer ${token}`,
+          'Idempotency-Key': idempotencyKey
         },
         signal: controller.signal,
         body: JSON.stringify(enrichedPayload)
       });
 
-    let response = await withRetry(async () => {
-      const r = await doRequest();
-      if (r.status >= 500) {
-        const err = await r.json().catch(() => ({}));
-        throw new Error(err.error || `Proxy error: ${r.status}`);
-      }
-      return r;
-    });
+    let response = await doRequest();
 
     if (response.status === 401) {
       // Token expired/revoked → re-register once and retry
-      await clearInstallToken();
-      token = await ensureInstallToken(proxyUrl);
+      await clearInstallTokenIfCurrent(token, generation);
+      token = await ensureInstallToken(proxyUrl, generation);
       response = await doRequest();
     }
 
@@ -1098,6 +1167,6 @@ async function handleAPICall(payload, requestId) {
     throw e;
   } finally {
     clearTimeout(timeout);
-    pendingRequests.delete(effectiveRequestId);
+    unregister();
   }
 }

@@ -2,6 +2,15 @@
 
 DraftApply is a plain JavaScript Chrome extension plus Node/Express proxy. Keep changes small, privacy-aware, and easy to verify.
 
+By participating, you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md). For vulnerabilities, use the private process in [SECURITY.md](SECURITY.md), not a public issue.
+
+## Proposing a change
+
+1. Search existing issues and pull requests first.
+2. Open an issue for behavior changes or large fixes so maintainers can confirm scope before substantial work.
+3. Create a focused branch and keep unrelated refactors out of the pull request.
+4. Explain user impact, privacy/security implications, and the checks you ran. Add regression coverage for fixes.
+
 ## Local Checks
 
 Run the dependency-light gate first:

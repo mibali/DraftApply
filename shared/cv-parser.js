@@ -203,8 +203,8 @@ export class CVParser {
     const firstSectionIdx = lines.findIndex((line, i) => i > 0 && this._isExactSectionHeading(line));
     const headerText = lines.slice(0, firstSectionIdx === -1 ? 20 : Math.min(firstSectionIdx, 20)).join('\n');
     const emailMatch = text.match(/[\w.-]+@[\w.-]+\.\w+/);
-    const phoneMatch = text.match(/(?:^|[^\d])((?:\+?\d{10,15})|(?:\+\d{1,3}[\s.-]?)?(?:\(?\d{2,4}\)?[\s.-])\d{3,4}[\s.-]\d{3,4})(?!\d)/m);
-    const linkedinMatch = headerText.match(/(?:https?:\/\/)?(?:www\.)?linkedin\.com\/in\/[\w-]+\/?/i);
+    const phoneMatch = text.match(/(?:^|[^\d])((?:\+\d[\d\s().-]{7,18}\d)|(?:\+?\d{10,15})|(?:\(?\d{2,4}\)?[\s.-])\d{3,4}[\s.-]\d{3,4})(?!\d)/m);
+    const linkedinMatch = headerText.match(/(?:https?:\/\/)?(?:www\.)?linkedin\.com\/(?:in|pub)\/[\w%-]+(?:\/[\w%-]+){0,3}\/?/i);
     const githubMatch = headerText.match(/(?:https?:\/\/)?(?:www\.)?github\.com\/[\w-]+\/?/i);
     const websiteMatch = headerText.match(/\b(?:https?:\/\/|www\.)(?!(?:www\.)?(?:linkedin|github|twitter|x)\.com\b)[\w.-]+\.[a-z]{2,}(?:\/[\w./-]*)?/i);
     const twitterMatch = headerText.match(/(?:https?:\/\/)?(?:www\.)?(?:twitter\.com|x\.com)\/[\w-]+\/?/i);

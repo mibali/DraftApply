@@ -28,9 +28,13 @@ Extension  ──(structured JSON)──▶  Proxy Engine  ──▶  Recipe Mod
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | `GET` | `/api/health` | None | Health check |
+| `GET` | `/api/ready` | None | Readiness check for deployment traffic |
 | `POST` | `/api/register` | None (rate-limited) | Issue install token → `{ token, expiresAt }` |
 | `POST` | `/api/generate` | `Bearer <token>` | Generate an answer (structured or legacy payload) |
 | `POST` | `/api/cv/upload` | `Bearer <token>` | Upload CV file (PDF/DOCX/TXT) → extracted text |
+| `POST` | `/api/jd/extract` | `Bearer <token>` | Normalize pasted job-description text |
+| `POST` | `/api/cv/analyze` | `Bearer <token>` | Analyze CV/JD fit without generating a CV |
+| `POST` | `/api/cv/tailor` | `Bearer <token>` | Generate a validated structured tailored CV |
 
 ### `POST /api/generate` – Structured Payload (preferred)
 
@@ -51,7 +55,7 @@ Extension  ──(structured JSON)──▶  Proxy Engine  ──▶  Recipe Mod
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `question` | `string` | Yes | The application question or field label |
-| `cvText` | `string` | Yes | Full CV text (min 5 chars) |
+| `cvText` | `string` | Yes | Full CV text (50–60,000 characters by default) |
 | `length` | `string` | No | `"short"`, `"medium"` (default), or `"long"` |
 | `jobTitle` | `string` | No | Extracted job title |
 | `company` | `string` | No | Extracted company name |
@@ -157,6 +161,8 @@ If `RECIPE_PATH` is not set (or fails to load), the proxy uses the bundled recip
 | `PORT` | No | `10000` | Server listen port |
 | `ALLOW_LEGACY_RAW_PROMPTS` | No | `false` | Allow caller-controlled raw prompts (not recommended when hosted). |
 | `REQUEST_DEADLINE_MS` | No | `90000` | Absolute budget shared by all provider attempts and body consumption. |
+| `PROVIDER_RESPONSE_MAX_BYTES` | No | `2097152` | Maximum buffered successful provider response, including SSE. |
+| `PROVIDER_ERROR_MAX_BYTES` | No | `65536` | Maximum provider error body consumed for retry classification. |
 | `REDIS_URL` | Production | — | Persistent, atomic multi-instance admission/quota store. |
 | `REQUIRE_DURABLE_QUOTAS` | No | `true` in production | Refuse startup with hosted keys when Redis is absent. Explicitly disable for local development only. |
 | `REDIS_PING_INTERVAL_MS` | No | `60000` | Application-level keepalive for managed Redis TLS connections. |
@@ -164,9 +170,9 @@ If `RECIPE_PATH` is not set (or fails to load), the proxy uses the bundled recip
 | `REDIS_RECONNECT_MAX_MS` | No | `10000` | Maximum reconnect backoff after a Redis disconnect. |
 | `REDIS_STARTUP_TIMEOUT_MS` | No | `30000` | Overall deadline for the initial Redis connection before deployment fails. |
 | `QUOTA_MAX_CONCURRENT_PER_SUBJECT` | No | `1` | Maximum simultaneous paid workflows per installation. |
-| `QUOTA_MAX_REQUESTS_PER_SUBJECT` | No | `20` | Maximum admitted paid workflows per installation per 24-hour UTC bucket. |
-| `QUOTA_MAX_TOKENS_PER_SUBJECT` | No | `500000` | Maximum reconciled/reserved provider tokens per installation per 24-hour UTC bucket. |
-| `QUOTA_MAX_SPEND_MICROS_PER_SUBJECT` | No | `500000` | Maximum estimated/reconciled spend per installation per 24-hour UTC bucket, in millionths of a dollar (`500000` = $0.50). |
+| `QUOTA_MAX_REQUESTS_PER_SUBJECT` | No | `100` | Maximum admitted paid workflows per installation per 24-hour UTC bucket. |
+| `QUOTA_MAX_TOKENS_PER_SUBJECT` | No | `5000000` | Maximum reconciled/reserved provider tokens per installation per 24-hour UTC bucket. |
+| `QUOTA_MAX_SPEND_MICROS_PER_SUBJECT` | No | `5000000` | Maximum estimated/reconciled spend per installation per 24-hour UTC bucket, in millionths of a dollar (`5000000` = $5). |
 | `CIRCUIT_FAILURE_THRESHOLD` / `CIRCUIT_OPEN_MS` | No | `3` / `30000` | Provider/model circuit policy. |
 
 ---
@@ -180,7 +186,7 @@ Provider attempts produce payload-safe structured telemetry. JSON responses and 
 1. Push this repo to GitHub.
 2. Render → New → Web Service → connect repo.
 3. Root directory: `render-proxy`
-4. Build command: `npm install`
+4. Build command: `npm ci`
 5. Start command: `npm start`
 6. Add env vars: `GROQ_API_KEY`, `TOKEN_SECRET`. Optionally add `OPENROUTER_API_KEY` for fallback. Leave `OPENROUTER_TAILOR_FALLBACK` unset to allow Tailor CV fallback, or set it to `false` if you deliberately want Tailor CV to fail rather than use OpenRouter. No need to set `RECIPE_PATH` unless you use a custom recipe.
 
@@ -216,7 +222,7 @@ OpenRouter free models are best-effort capacity. OpenRouter documents that free-
 The proxy now:
 
 - Builds a DraftApply-specific ranked shortlist from the official model catalogue instead of falling through to alphabetical free-model order.
-- Sends the shortlist to OpenRouter with the `models` fallback array so OpenRouter performs model/provider failover in one request.
+- Tries the shortlist explicitly by default so provider/model attribution remains observable. Operators can opt into OpenRouter's opaque `models` fallback array with `OPENROUTER_USE_MODELS_ARRAY=true`.
 - Sorts OpenRouter providers by throughput by default.
 - Requests OpenRouter router metadata so the actual served model can be surfaced in extension UI.
 - Keeps Groq/local Qwen as the preferred quality path. OpenRouter free remains a fallback, not the main production plan.
@@ -228,12 +234,10 @@ For reliability, the recommended production path is:
 3. OpenRouter fallback with `OPENROUTER_USE_MODELS_ARRAY=true`.
 4. If free models remain unreliable for your traffic, configure a paid OpenRouter model via `OPENROUTER_MODEL` or prefer local Qwen instead of free-only fallback.
 
-A free way to run the local chat model: [`hf-space-local-llm/`](../hf-space-local-llm/) is a
-`llama.cpp`-based Hugging Face Space (Docker SDK, free CPU tier) behind an OpenAI-compatible API.
-`Qwen/Qwen3-4B-Instruct-2507` measured too slow on that free CPU tier (~0.2-0.5 tok/s); the Space
-currently pulls `Qwen/Qwen3-1.7B` instead, pending a speed benchmark on the same hardware. Deploy
-it as its own Space, then point `LOCAL_LLM_BASE_URL` at it — see that directory's README for setup,
-the required `LLM_API_KEY` secret, and current benchmark notes.
+For a local route, deploy a separately secured OpenAI-compatible service such as Ollama, LM Studio,
+vLLM, or llama.cpp and point `LOCAL_LLM_BASE_URL` at it. The repository does not contain or maintain
+a hosted-model deployment template; operators are responsible for authentication, logging, retention,
+capacity, and model-quality validation of that service.
 
 ### Deterministic pipeline, UI insights, and retrieval
 

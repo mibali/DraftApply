@@ -26,6 +26,7 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import {
   PROVIDERS,
+  resolveProvider,
   getProviderConfig,
   generate,
   stream,
@@ -46,14 +47,24 @@ const __dirname = dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3001;
 const HOST = process.env.HOST || '127.0.0.1';
+const MAX_CV_TEXT = 100_000;
+const MAX_JD_TEXT = 60_000;
+const MAX_EXTRACTED_TEXT = 100_000;
 
 // Offline-first default. Select a cloud provider explicitly with LLM_PROVIDER.
-const PROVIDER_NAME = process.env.LLM_PROVIDER || 'ollama';
+const PROVIDER_NAME = resolveProvider(process.env);
 const PROVIDER_CONFIG = getProviderConfig(PROVIDER_NAME, process.env);
 
 // Build fallback chain for reliability
 const FALLBACK_CHAIN = buildFallbackChain(process.env);
-const USE_FALLBACK = process.env.USE_FALLBACK !== 'false'; // Enable by default
+const USE_FALLBACK = process.env.USE_FALLBACK !== 'false';
+
+export function isLoopbackHost(host) {
+  return ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(String(host).toLowerCase());
+}
+if (!isLoopbackHost(HOST) && process.env.ALLOW_UNSAFE_REMOTE_BIND !== 'true') {
+  throw new Error('Refusing non-loopback HOST. Set ALLOW_UNSAFE_REMOTE_BIND=true only on a trusted network.');
+}
 
 console.log(`LLM Provider: ${PROVIDER_CONFIG.name} (${PROVIDER_CONFIG.model})`);
 if (USE_FALLBACK && FALLBACK_CHAIN.length > 1) {
@@ -63,6 +74,21 @@ if (USE_FALLBACK && FALLBACK_CHAIN.length > 1) {
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+app.use((req, res, next) => {
+  req.requestAbort = new AbortController();
+  req.deadlineAt = Date.now() + (Number(process.env.REQUEST_TIMEOUT_MS) || 60_000);
+  const abort = () => req.requestAbort.abort(new Error('Client disconnected'));
+  const deadline = setTimeout(
+    () => req.requestAbort.abort(new Error('Request deadline exceeded')),
+    Math.max(1, req.deadlineAt - Date.now())
+  );
+  req.once('aborted', abort);
+  res.once('close', () => {
+    clearTimeout(deadline);
+    if (!res.writableEnded) abort();
+  });
+  next();
+});
 
 // File upload configuration
 const upload = multer({
@@ -115,7 +141,7 @@ app.get('/api/providers', (req, res) => {
  * Check LLM availability
  */
 app.get('/api/llm-status', async (req, res) => {
-  const status = await checkProvider(PROVIDER_NAME, PROVIDER_CONFIG);
+  const status = await checkProvider(PROVIDER_NAME, PROVIDER_CONFIG, { signal: req.requestAbort.signal });
   
   res.json({
     ...status,
@@ -138,6 +164,12 @@ app.post('/api/cv/upload', upload.single('cv'), async (req, res) => {
     let text = '';
     let linkAnnotations = [];
     const { mimetype, buffer } = req.file;
+    const validMagic = mimetype === 'application/pdf'
+      ? buffer.subarray(0, 5).toString() === '%PDF-'
+      : mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        ? buffer[0] === 0x50 && buffer[1] === 0x4b
+        : !buffer.includes(0);
+    if (!validMagic) return res.status(400).json({ error: 'File content does not match its declared type' });
 
     switch (mimetype) {
       case 'application/pdf':
@@ -166,6 +198,9 @@ app.post('/api/cv/upload', upload.single('cv'), async (req, res) => {
       .replace(/\r\n/g, '\n')
       .replace(/\n{3,}/g, '\n\n')
       .trim();
+    if (text.length > MAX_EXTRACTED_TEXT) {
+      return res.status(413).json({ error: 'Extracted CV text is too large' });
+    }
 
     res.json({
       success: true,
@@ -247,7 +282,7 @@ function linkLabelFromUrl(url = '') {
  *      requirements?, platform?, llmConfig? }
  *
  * Both formats accept optional `llmConfig: { provider, apiKey, model? }`
- * to use a user-supplied LLM. Falls back to server default (Groq) on failure.
+ * to use a user-supplied LLM. BYOK requests never fall back to another provider.
  */
 app.post('/api/generate', async (req, res) => {
   try {
@@ -282,12 +317,13 @@ app.post('/api/generate', async (req, res) => {
       { role: 'user', content: userPrompt }
     ];
 
-    const options = { temperature: temperature || 0.7 };
+    const options = { temperature: temperature || 0.7, signal: req.requestAbort.signal, deadlineAt: req.deadlineAt };
 
     // Resolve user-supplied provider config (if provided and valid)
     let userProviderName = null;
     let userProviderConfig = null;
-    if (llmConfig?.provider && llmConfig?.apiKey && PROVIDERS[llmConfig.provider]) {
+    if (llmConfig?.provider && PROVIDERS[llmConfig.provider] &&
+        (PROVIDERS[llmConfig.provider].type === 'local' || llmConfig.apiKey)) {
       userProviderName = llmConfig.provider;
       userProviderConfig = {
         ...PROVIDERS[llmConfig.provider],
@@ -300,27 +336,18 @@ app.post('/api/generate', async (req, res) => {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-DraftApply-Provider', userProviderName || PROVIDER_NAME);
+      res.write(`data: ${JSON.stringify({ provider: userProviderName || PROVIDER_NAME })}\n\n`);
 
-      // Try user's provider first, then fall back to server default
       if (userProviderName && userProviderConfig) {
-        try {
-          await stream(userProviderName, userProviderConfig, messages, options, res);
-          return;
-        } catch (e) {
-          if (res.writableEnded) return; // already started streaming, can't recover
-          console.warn(`[Stream] User provider ${userProviderName} failed:`, e.message);
-        }
+        await stream(userProviderName, userProviderConfig, messages, options, res);
+        return;
       }
       await stream(PROVIDER_NAME, PROVIDER_CONFIG, messages, options, res);
     } else {
-      // Try user's provider first
       if (userProviderName && userProviderConfig) {
-        try {
-          const result = await generate(userProviderName, userProviderConfig, messages, options);
-          return res.json({ ...result, provider: userProviderName });
-        } catch (e) {
-          console.warn(`[Generate] User provider ${userProviderName} failed, falling back:`, e.message);
-        }
+        const result = await generate(userProviderName, userProviderConfig, messages, options);
+        return res.json({ ...result, provider: userProviderName });
       }
 
       // Use server fallback chain
@@ -338,8 +365,7 @@ app.post('/api/generate', async (req, res) => {
     console.error('Generation error:', error);
     res.status(500).json({
       error: 'Failed to generate answer',
-      details: error.message,
-      hint: 'Check that GROQ_API_KEY is set, or configure a provider in the UI'
+      ...(process.env.NODE_ENV === 'development' ? { details: error.message } : {})
     });
   }
 });
@@ -358,7 +384,7 @@ app.post('/api/jd/extract', async (req, res) => {
     }
 
     const normalizedText = text.trim();
-    if (normalizedText.length > 60000) {
+    if (normalizedText.length > MAX_JD_TEXT) {
       return res.status(413).json({ error: 'Job posting is too large. Please paste a shorter posting.' });
     }
 
@@ -385,7 +411,7 @@ Preserve the original bullet point structure and section headings. Output only t
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt }
     ];
-    const options = { temperature: 0.1, max_tokens: 2000 };
+    const options = { temperature: 0.1, max_tokens: 2000, signal: req.requestAbort.signal, deadlineAt: req.deadlineAt };
 
     let userProviderName = null;
     let userProviderConfig = null;
@@ -400,12 +426,8 @@ Preserve the original bullet point structure and section headings. Output only t
 
     let result;
     if (userProviderName && userProviderConfig) {
-      try {
-        result = await generate(userProviderName, userProviderConfig, messages, options);
-        result.provider = userProviderName;
-      } catch (e) {
-        console.warn(`[JD Extract] User provider ${userProviderName} failed, falling back:`, e.message);
-      }
+      result = await generate(userProviderName, userProviderConfig, messages, options);
+      result.provider = userProviderName;
     }
 
     if (!result) {
@@ -422,10 +444,10 @@ Preserve the original bullet point structure and section headings. Output only t
       return res.status(502).json({ error: 'No output from provider' });
     }
 
-    res.json({ extractedText });
+    res.json({ extractedText, provider: result.provider });
   } catch (error) {
     console.error('JD extract error:', error);
-    res.status(500).json({ error: 'Failed to extract job description', details: error.message });
+    res.status(500).json({ error: 'Failed to extract job description', ...(process.env.NODE_ENV === 'development' ? { details: error.message } : {}) });
   }
 });
 
@@ -435,8 +457,11 @@ Preserve the original bullet point structure and section headings. Output only t
 app.post('/api/cv/text', (req, res) => {
   const { text } = req.body;
   
-  if (!text || text.trim().length < 50) {
+  if (typeof text !== 'string' || text.trim().length < 50) {
     return res.status(400).json({ error: 'CV text too short or missing' });
+  }
+  if (text.length > MAX_CV_TEXT) {
+    return res.status(413).json({ error: 'CV text is too large' });
   }
 
   res.json({
@@ -452,7 +477,7 @@ const _backendJdCacheTtl = 20 * 60 * 1000;
 function _backendJdCacheKey(text) {
   return (text || '').trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 4000);
 }
-async function _backendEnrichJd(jdParser, regexParsed, jdText) {
+async function _backendEnrichJd(jdParser, regexParsed, jdText, options) {
   const key = _backendJdCacheKey(jdText);
   const hit = _backendJdCache.get(key);
   if (hit && Date.now() < hit.exp) return { jdData: hit.data, source: 'cache' };
@@ -461,7 +486,7 @@ async function _backendEnrichJd(jdParser, regexParsed, jdText) {
   try {
     const result = await generateWithFallback(FALLBACK_CHAIN,
       [{ role: 'system', content: sp }, { role: 'user', content: up }],
-      { temperature: 0.1, max_tokens: 900 }
+      { ...options, temperature: 0.1, max_tokens: 900 }
     );
     const text = result?.answer?.trim();
     if (!text) return { jdData: regexParsed, source: 'regex' };
@@ -470,8 +495,9 @@ async function _backendEnrichJd(jdParser, regexParsed, jdText) {
     const enriched = jdParser.mergeWithLLMAnalysis(regexParsed, JSON.parse(m[0]));
     if (_backendJdCache.size >= 100) _backendJdCache.delete(_backendJdCache.keys().next().value);
     _backendJdCache.set(key, { data: enriched, exp: Date.now() + _backendJdCacheTtl });
-    return { jdData: enriched, source: 'llm' };
+    return { jdData: enriched, source: 'llm', provider: result.provider };
   } catch (err) {
+    if (options.signal?.aborted) throw err;
     console.warn('[backend] JD LLM enrichment failed, using regex fallback:', err.message);
     return { jdData: regexParsed, source: 'regex' };
   }
@@ -487,14 +513,18 @@ app.post('/api/cv/analyze', async (req, res) => {
     if (!jobDescription || jobDescription.length < 50) {
       return res.status(400).json({ error: 'jobDescription must be at least 50 characters' });
     }
+    if (typeof cvText !== 'string' || cvText.length > MAX_CV_TEXT ||
+        typeof jobDescription !== 'string' || jobDescription.length > MAX_JD_TEXT) {
+      return res.status(413).json({ error: 'CV or job description is too large' });
+    }
 
     const jdParser = new JDParser();
     const [cvData, jdDataRegex] = await Promise.all([
       Promise.resolve(new CVParser().parse(cvText)),
       Promise.resolve(jdParser.parse(jobDescription, jobTitle, company)),
     ]);
-    const { jdData, source: jdAnalysisSource } =
-      await _backendEnrichJd(jdParser, jdDataRegex, jobDescription);
+    const { jdData, source: jdAnalysisSource, provider } =
+      await _backendEnrichJd(jdParser, jdDataRegex, jobDescription, { signal: req.requestAbort.signal, deadlineAt: req.deadlineAt });
 
     const tailor = new CVTailor();
     const matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
@@ -504,10 +534,11 @@ app.post('/api/cv/analyze', async (req, res) => {
       jobTitle: jdData.jobTitle,
       company: jdData.company,
       jdAnalysisSource,
+      provider: provider || null,
     });
   } catch (error) {
     console.error('CV analyze error:', error);
-    res.status(500).json({ error: 'Failed to analyze CV match', details: error.message });
+    res.status(500).json({ error: 'Failed to analyze CV match', ...(process.env.NODE_ENV === 'development' ? { details: error.message } : {}) });
   }
 });
 
@@ -524,6 +555,10 @@ app.post('/api/cv/tailor', async (req, res) => {
     if (!jobDescription || jobDescription.length < 50) {
       return res.status(400).json({ error: 'jobDescription must be at least 50 characters' });
     }
+    if (typeof cvText !== 'string' || cvText.length > MAX_CV_TEXT ||
+        typeof jobDescription !== 'string' || jobDescription.length > MAX_JD_TEXT) {
+      return res.status(413).json({ error: 'CV or job description is too large' });
+    }
 
     const jdParser = new JDParser();
     const [cvData, jdDataRegex] = await Promise.all([
@@ -531,7 +566,7 @@ app.post('/api/cv/tailor', async (req, res) => {
       Promise.resolve(jdParser.parse(jobDescription, jobTitle, company)),
     ]);
     const { jdData, source: jdAnalysisSource } =
-      await _backendEnrichJd(jdParser, jdDataRegex, jobDescription);
+      await _backendEnrichJd(jdParser, jdDataRegex, jobDescription, { signal: req.requestAbort.signal, deadlineAt: req.deadlineAt });
 
     const tailor = new CVTailor();
     const matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
@@ -543,16 +578,24 @@ app.post('/api/cv/tailor', async (req, res) => {
     const structuredEnabled = !/^false$/i.test(process.env.STRUCTURED_CV_GENERATION || 'true');
     let tailoredCvText = '';
     let structuredCv = null;
-    let generationMode = 'legacy-text';
+    const generationMode = 'structured';
     let auditSkipped = false;
+    let tailorProvider = null;
 
-    if (structuredEnabled && Array.isArray(cvData.experience) && cvData.experience.length > 0) {
+    if (!structuredEnabled) {
+      return res.status(503).json({ error: 'Structured CV generation is disabled. DraftApply will not generate an ungrounded free-text CV.', code: 'structured_cv_generation_required' });
+    }
+    if (!Array.isArray(cvData.experience) || cvData.experience.length === 0) {
+      return res.status(422).json({ error: 'No work-experience roles could be parsed from this CV. Review the CV formatting and try again.', code: 'cv_experience_parse_failed' });
+    }
+    {
       try {
         const structuredPrompt = tailor.buildStructuredTailoringPrompt(cvData, jdData, matchMap, { confirmedSkills });
         const structuredResult = await generateWithFallback(FALLBACK_CHAIN, [
           { role: 'system', content: structuredPrompt.systemPrompt },
           { role: 'user',   content: structuredPrompt.userPrompt   },
-        ], { temperature: structuredPrompt.temperature, max_tokens: 2500 });
+        ], { temperature: structuredPrompt.temperature, max_tokens: 2500, signal: req.requestAbort.signal, deadlineAt: req.deadlineAt });
+        tailorProvider = structuredResult.provider;
         let content = tailor.validateStructuredContent(
           tailor.parseStructuredContent(structuredResult.answer),
           structuredPrompt.skeleton,
@@ -565,7 +608,7 @@ app.post('/api/cv/tailor', async (req, res) => {
             const auditResult = await generateWithFallback(FALLBACK_CHAIN, [
               { role: 'system', content: auditPrompt.systemPrompt },
               { role: 'user',   content: auditPrompt.userPrompt   },
-            ], { temperature: auditPrompt.temperature, max_tokens: 2500 });
+            ], { temperature: auditPrompt.temperature, max_tokens: 2500, signal: req.requestAbort.signal, deadlineAt: req.deadlineAt });
             const audited = tailor.validateStructuredContent(
               tailor.parseStructuredContent(auditResult.answer),
               structuredPrompt.skeleton,
@@ -574,78 +617,22 @@ app.post('/api/cv/tailor', async (req, res) => {
             if (audited) {
               content = audited;
               auditSkipped = false;
+              tailorProvider = auditResult.provider;
             }
           } catch (auditError) {
+            if (req.requestAbort.signal.aborted) throw auditError;
             console.warn('[Structured audit] skipped:', auditError.message);
           }
           structuredCv = { skeleton: structuredPrompt.skeleton, content };
           tailoredCvText = tailor.renderTailoredCV(structuredPrompt.skeleton, content);
-          generationMode = 'structured';
         } else {
-          console.warn('[Structured generation] output unsalvageable; falling back to legacy text path.');
+          return res.status(502).json({ error: 'The provider did not return a grounded structured CV. Please try again.', code: 'structured_cv_output_invalid' });
         }
       } catch (e) {
-        console.warn('[Structured generation] failed; falling back to legacy text path:', e.message);
+        console.warn('[Structured generation] failed:', e.message);
+        return res.status(502).json({ error: 'The provider did not return a grounded structured CV. Please try again.', code: 'structured_cv_output_invalid' });
       }
     }
-
-    if (generationMode !== 'structured') {
-
-    const { systemPrompt, userPrompt } = tailor.buildTailoringPrompt(cvData, jdData, matchMap);
-
-    const messages = [
-      { role: 'system', content: systemPrompt },
-      { role: 'user',   content: userPrompt   }
-    ];
-
-    const result = await generateWithFallback(FALLBACK_CHAIN, messages, {
-      temperature: 0.3,
-      // Kept in sync with render-proxy/server.js's production tailor route -
-      // CVs with many roles push the regenerated text close to the old 4000
-      // token cap, risking a mid-sentence cutoff that drops trailing content.
-      max_tokens: 6000
-    });
-
-    tailoredCvText = tailor.finalizeTailoredCV(result.answer, {
-      cvData,
-      jdData,
-      matchMap,
-      confirmedSkills,
-    });
-    if (!tailoredCvText?.trim()) {
-      return res.status(502).json({ error: 'No output from provider' });
-    }
-
-    auditSkipped = false;
-    try {
-      const { systemPrompt: auditSystemPrompt, userPrompt: auditUserPrompt, temperature: auditTemperature } =
-        tailor.buildTailoredCvAuditPrompt(cvData, jdData, matchMap, tailoredCvText, confirmedSkills);
-      const auditResult = await generateWithFallback(FALLBACK_CHAIN, [
-        { role: 'system', content: auditSystemPrompt },
-        { role: 'user',   content: auditUserPrompt },
-      ], { temperature: auditTemperature, max_tokens: 6500 });
-      const auditedText = auditResult.answer;
-      if (auditedText?.trim() && tailor.isValidCvOutput(auditedText)) {
-        const finalizedAudit = tailor.finalizeTailoredCV(auditedText, {
-          cvData,
-          jdData,
-          matchMap,
-          confirmedSkills,
-        });
-        if (finalizedAudit?.trim()) tailoredCvText = finalizedAudit;
-        else auditSkipped = true;
-      } else {
-        auditSkipped = true;
-        if (auditedText?.trim()) {
-          console.warn('[DraftApply] Audit output rejected: response does not look like a CV');
-        }
-      }
-    } catch (e) {
-      auditSkipped = true;
-      console.warn('[Tailored CV audit] LLM verification failed, using deterministic cleanup only:', e.message);
-    }
-
-    } // end legacy text path
 
     const warnings        = [
       ...tailor.validateTailoredCV(cvData, tailoredCvText),
@@ -665,10 +652,10 @@ app.post('/api/cv/tailor', async (req, res) => {
     const { missingKeywords: atsKeywordGaps, coverage: atsKeywordCoverage } =
       tailor.checkAtsKeywordCoverage(tailoredCvText, jdData);
 
-    res.json({ tailoredCvText, structuredCv, generationMode, matchReport, recruiterReview, warnings, changedSections, auditSkipped, jdAnalysisSource, atsKeywordGaps, atsKeywordCoverage });
+    res.json({ tailoredCvText, structuredCv, generationMode, provider: tailorProvider, matchReport, recruiterReview, warnings, changedSections, auditSkipped, jdAnalysisSource, atsKeywordGaps, atsKeywordCoverage });
   } catch (error) {
     console.error('CV tailor error:', error);
-    res.status(500).json({ error: 'Failed to tailor CV', details: error.message });
+    res.status(500).json({ error: 'Failed to tailor CV', ...(process.env.NODE_ENV === 'development' ? { details: error.message } : {}) });
   }
 });
 
@@ -687,14 +674,14 @@ app.get(/^\/(?!api(?:\/|$)).*/, (req, res) => {
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error('Server error:', err);
-  res.status(500).json({ error: err.message || 'Internal server error' });
+  if (err instanceof multer.MulterError) {
+    return res.status(err.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ error: 'Invalid upload' });
+  }
+  res.status(500).json({ error: 'Internal server error', ...(process.env.NODE_ENV === 'development' ? { details: err.message } : {}) });
 });
 
 app.listen(PORT, HOST, () => {
   console.log(`\nDraftApply local web app running on http://${HOST}:${PORT}`);
-  if (HOST !== '127.0.0.1' && HOST !== 'localhost' && HOST !== '::1') {
-    console.warn('WARNING: This development server is not hardened for the public Internet.');
-  }
   console.log(`\nUsing: ${PROVIDER_CONFIG.name} (${PROVIDER_CONFIG.model})`);
   console.log(`Type: ${PROVIDERS[PROVIDER_NAME].type === 'local' ? 'Local (no API key)' : 'Cloud'}`);
   console.log(`\nAPI endpoints:`);

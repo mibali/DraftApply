@@ -52,6 +52,18 @@ export function buildGroundingContext(cvData = {}, { confirmedFacts = [], target
     records.push(Object.freeze(normalized));
   };
   for (const record of cvData.evidenceIndex || []) add(record);
+  // Contact fields are parsed from the bounded CV header by CVParser. Treat
+  // them as first-class evidence instead of forcing consumers to re-scan raw
+  // prose (which can mistake section headings or employer links for identity).
+  const contactInfo = cvData.contactInfo || {};
+  for (const [field, value] of Object.entries(contactInfo)) {
+    if (typeof value === 'string' && value.trim()) add({
+      sourceId: `contact:${field}`,
+      type: 'contact',
+      field,
+      text: value.trim(),
+    });
+  }
   (cvData.experience || []).forEach((role, roleIndex) => {
     const roleSourceId = role.sourceId || `experience:${roleIndex}`;
     (role.responsibilities || []).forEach((text, index) => add({
@@ -189,12 +201,15 @@ export function validateApplicationAnswer(answer, options = {}) {
       && normalise(claim.text).includes(normalise(context.targetCompany)) && !/\b(worked|employed|served)\b/i.test(claim.text)) supported = true;
     if (claim.type === 'credential' && PREPARATION.test(claim.text)) supported = isTextSupported(claim.text, context).supported;
     if (claim.type === 'yes_no' && claim.value !== 'yes') supported = false;
-    const reviewOnly = personalUnknown || claim.type === 'factual_assertion' || (claim.type === 'yes_no' && claim.value !== 'yes');
-    const disposition = supported ? 'supported' : reviewOnly ? 'review' : 'unsupported';
+    // Model-authored factual prose must fail closed. `review` is reserved for
+    // non-factual structure/style validators; looking at an unsupported fact
+    // is not the same as correcting it. The UI still lets a person edit the
+    // draft, at which point it is explicitly treated as user-authored text.
+    const disposition = supported ? 'supported' : 'unsupported';
     if (disposition !== 'supported') violations.push({
       claimId: claim.id,
       code: personalUnknown ? 'unknown_personal_state' : `unsupported_${claim.type}`,
-      severity: disposition === 'review' ? 'review' : 'block',
+      severity: 'block',
     });
     return { ...claim, disposition };
   });

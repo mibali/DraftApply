@@ -15,7 +15,7 @@ import { PromptBuilder } from '../shared/prompt-builder.js';
 
 const LLM_SETTINGS_KEY = 'draftapply_llm_settings';
 
-// Manages user-configured LLM provider (stored in localStorage)
+// API keys are tab-session only. Remove plaintext settings left by older builds.
 class LLMSettings {
   constructor() {
     this.settings = this._load();
@@ -23,7 +23,10 @@ class LLMSettings {
 
   _load() {
     try {
-      const raw = localStorage.getItem(LLM_SETTINGS_KEY);
+      const legacy = localStorage.getItem(LLM_SETTINGS_KEY);
+      localStorage.removeItem(LLM_SETTINGS_KEY);
+      const raw = sessionStorage.getItem(LLM_SETTINGS_KEY);
+      if (legacy) console.info('DraftApply cleared a legacy persistently stored API key.');
       return raw ? JSON.parse(raw) : null;
     } catch {
       return null;
@@ -36,12 +39,13 @@ class LLMSettings {
       return;
     }
     this.settings = { provider, apiKey, model: model || '' };
-    localStorage.setItem(LLM_SETTINGS_KEY, JSON.stringify(this.settings));
+    sessionStorage.setItem(LLM_SETTINGS_KEY, JSON.stringify(this.settings));
   }
 
   clear() {
     this.settings = null;
     localStorage.removeItem(LLM_SETTINGS_KEY);
+    sessionStorage.removeItem(LLM_SETTINGS_KEY);
   }
 
   // Returns the llmConfig object to include in API requests, or null for default
@@ -75,11 +79,27 @@ function getApiEndpoint() {
   // Otherwise allow override via query param or localStorage (useful when backend port changes).
   // Example: http://localhost:3000/?api=http://localhost:3002/api
   const params = new URLSearchParams(url.search);
-  return (
-    params.get('api') ||
-    localStorage.getItem('draftapply_api') ||
-    'http://localhost:3001/api'
-  );
+  const candidate = params.get('api') || localStorage.getItem('draftapply_api');
+  if (candidate) {
+    try {
+      const endpoint = new URL(candidate, url.origin);
+      const trusted = endpoint.origin === url.origin || ['localhost', '127.0.0.1', '::1', '[::1]'].includes(endpoint.hostname);
+      if (trusted || window.confirm(`Use remote API endpoint ${endpoint.origin}? CV/job data will be sent there. BYOK credentials will not be forwarded.`)) {
+        return endpoint.href.replace(/\/$/, '');
+      }
+    } catch { /* Ignore malformed overrides. */ }
+  }
+  return 'http://localhost:3001/api';
+}
+
+function isTrustedApiEndpoint(endpoint = CONFIG?.apiEndpoint) {
+  const target = new URL(endpoint, window.location.origin);
+  return target.origin === window.location.origin || ['localhost', '127.0.0.1', '::1', '[::1]'].includes(target.hostname);
+}
+
+function buildApiJsonBody(payload, llmSettings) {
+  const llmConfig = llmSettings?.getLLMConfig();
+  return JSON.stringify({ ...payload, ...(llmConfig && isTrustedApiEndpoint() ? { llmConfig } : {}) });
 }
 
 const CONFIG = {
@@ -290,13 +310,10 @@ class AnswerService {
     };
 
     // Include user's LLM config if configured
-    const llmConfig = this.llmSettings?.getLLMConfig();
-    if (llmConfig) body.llmConfig = llmConfig;
-
     const response = await fetch(`${CONFIG.apiEndpoint}/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
+      body: buildApiJsonBody(body, this.llmSettings)
     });
 
     if (!response.ok) {
@@ -311,6 +328,7 @@ class AnswerService {
     const data = await response.json();
     return {
       answer: data.answer,
+      provider: data.provider,
       questionType: prompt.metadata.questionType,
       tokensUsed: data.tokensUsed
     };
@@ -320,6 +338,7 @@ class AnswerService {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let fullAnswer = '';
+    let provider = response.headers.get('X-DraftApply-Provider') || null;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -339,6 +358,7 @@ class AnswerService {
               fullAnswer += parsed.text;
               if (onChunk) onChunk(parsed.text, fullAnswer);
             }
+            if (parsed.provider) provider = parsed.provider;
           } catch (e) {
             // Skip malformed chunks
           }
@@ -346,7 +366,7 @@ class AnswerService {
       }
     }
 
-    return { answer: fullAnswer };
+    return { answer: fullAnswer, provider };
   }
 
   validateAnswer(answer) {
@@ -444,6 +464,7 @@ class UIController {
     this.saveSettingsBtn = document.getElementById('save-settings-btn');
     this.resetSettingsBtn = document.getElementById('reset-settings-btn');
     this.llmProviderEl = document.getElementById('llm-provider');
+    this.processingNotice = document.getElementById('processing-notice');
   }
 
   bindEvents() {
@@ -607,14 +628,10 @@ class UIController {
       try {
         this.showLoading(true);
         this.loadJobBtn.disabled = true;
-        const llmConfig = this.llmSettings?.getLLMConfig();
         const response = await fetch(`${CONFIG.apiEndpoint}/jd/extract`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            text: rawDescription,
-            ...(llmConfig ? { llmConfig } : {})
-          })
+          body: buildApiJsonBody({ text: rawDescription }, this.llmSettings)
         });
         if (response.ok) {
           const data = await response.json();
@@ -683,8 +700,16 @@ class UIController {
     if (this.llmSettings.isCustom()) {
       this.llmProviderEl.textContent = this.llmSettings.getProvider();
       this.llmProviderEl.classList.add('custom');
+      this.updateProcessingNotice(this.llmSettings.getProvider(), 'cloud');
     }
     // If not custom, the LLM status check will update the text
+  }
+
+  updateProcessingNotice(provider, type) {
+    if (!this.processingNotice) return;
+    this.processingNotice.textContent = type === 'local'
+      ? `CV and job data are sent to ${provider} on this device.`
+      : `CV and job data are sent to the selected cloud provider (${provider}).`;
   }
 
   openSettings() {
@@ -720,7 +745,7 @@ class UIController {
         this.llmProviderEl.classList.add('custom');
       }
     } else {
-      this.showToast('Reset to default provider (Groq)');
+      this.showToast('Reset to default provider (Ollama)');
     }
   }
 
@@ -731,7 +756,7 @@ class UIController {
     this.settingCustomFields.hidden = true;
     this.llmSettings.clear();
     this.closeSettings();
-    this.showToast('Reset to default provider (Groq)');
+    this.showToast('Reset to default provider (Ollama)');
     if (this.llmProviderEl) {
       this.llmProviderEl.classList.remove('custom');
     }
@@ -762,9 +787,12 @@ class UIController {
       });
 
       this.lastAnswer = result.answer;
+      if (result.provider && this.llmProviderEl) {
+        this.llmProviderEl.textContent = result.provider;
+      }
       this.answerSection.classList.remove('streaming');
       
-      let metaText = `Type: ${result.questionType || 'general'} • Length: ${this.selectedLength} • Tone: ${this.selectedTone}`;
+      let metaText = `Provider: ${result.provider || 'unknown'} • Type: ${result.questionType || 'general'} • Length: ${this.selectedLength} • Tone: ${this.selectedTone}`;
       if (hasJobContext) {
         metaText += ' • Job-tailored ✓';
       }
@@ -840,6 +868,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const providerEl = document.getElementById('llm-provider');
       if (providerEl) {
         providerEl.textContent = `${status.providerName || status.provider} (${status.model})`;
+        ui.updateProcessingNotice(status.providerName || status.provider, status.type);
       }
 
       if (!status.available) {
@@ -852,4 +881,4 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 // Export for extension reuse
-export { CVManager, JobManager, AnswerService, LLMSettings, CONFIG };
+export { CVManager, JobManager, AnswerService, LLMSettings, CONFIG, getApiEndpoint, isTrustedApiEndpoint, buildApiJsonBody };

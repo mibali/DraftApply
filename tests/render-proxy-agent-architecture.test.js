@@ -39,7 +39,8 @@ describe('render proxy agent architecture', () => {
   });
 
   it('buffers provider streams and emits only a validated final answer event', () => {
-    expect(serverJs).toContain('consumeOpenAIStream(response.body)');
+    expect(serverJs).toContain('consumeOpenAIStream(response.body, PROVIDER_RESPONSE_MAX_BYTES)');
+    expect(serverJs).toContain('const streamed = completion.streamed');
     expect(serverJs).toContain('validateApplicationAnswer(answer');
     expect(serverJs).toContain('draftapplyFinal: final');
     expect(serverJs).toContain(': draftapply-keepalive');

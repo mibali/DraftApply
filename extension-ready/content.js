@@ -122,7 +122,12 @@ class DraftApplyExtension {
     window.addEventListener('draftapply:navigation', this._onDraftApplyNavigation);
 
     this._onStorageChanged = (changes, areaName) => {
-      if (areaName === 'local' && changes.tailorCvDraft) this.clearAnswerCaches();
+      if (areaName !== 'local') return;
+      const sensitiveKeys = ['cvText', 'cvLinkAnnotations', 'applicationFacts'];
+      if (changes.tailorCvDraft || sensitiveKeys.some(key => changes[key])) this.clearAnswerCaches();
+      if (sensitiveKeys.some(key => changes[key] && changes[key].newValue === undefined)) {
+        this.clearSensitiveAnswerState();
+      }
     };
     chrome.storage?.onChanged?.addListener(this._onStorageChanged);
   }
@@ -135,6 +140,7 @@ class DraftApplyExtension {
     if (this._onDraftApplyNavigation) window.removeEventListener('draftapply:navigation', this._onDraftApplyNavigation);
     if (this._onStorageChanged) chrome.storage?.onChanged?.removeListener(this._onStorageChanged);
     if (this._contextRefreshTimer) clearTimeout(this._contextRefreshTimer);
+    this.uninstallSpaNavigationWatchers();
     // Clean up overlay buttons
     document.querySelectorAll('.da-field-btn-overlay').forEach(btn => btn.remove());
     document.querySelectorAll('#draftapply-indicator').forEach(el => el.remove());
@@ -205,6 +211,21 @@ class DraftApplyExtension {
       .forEach(btn => btn.classList.remove('da-btn-ready', 'da-btn-prefetching'));
   }
 
+  clearSensitiveAnswerState() {
+    this.clearAnswerCaches();
+    this.cancelGeneration({ silent: true }).catch(() => {});
+    this.lastAnswer = null;
+    this.lastQuestion = null;
+    this.answerValidation = null;
+    this.validatedAnswer = null;
+    this.answerUserEdited = false;
+    if (this.modal) {
+      const output = this.modal.querySelector('#da-answer-output');
+      if (output) output.value = '';
+      this.modal.setAttribute('style', 'display:none !important;');
+    }
+  }
+
   clearSessionForNavigation() {
     this.clearAnswerCaches();
     this._iframeSourceFrameId = null;
@@ -222,16 +243,22 @@ class DraftApplyExtension {
   }
 
   installSpaNavigationWatchers() {
-    if (window.__draftapplyHistoryPatched) return;
-    window.__draftapplyHistoryPatched = true;
+    const existing = window.__draftapplyHistoryPatch;
+    if (existing) {
+      existing.owners.add(this);
+      this._historyPatch = existing;
+      return;
+    }
 
     const notify = () => {
       setTimeout(() => window.dispatchEvent(new Event('draftapply:navigation')), 0);
     };
 
+    const patch = { owners: new Set([this]), originals: {}, notify };
     for (const method of ['pushState', 'replaceState']) {
       const original = history[method];
       if (typeof original !== 'function') continue;
+      patch.originals[method] = original;
       history[method] = function patchedHistoryMethod(...args) {
         const result = original.apply(this, args);
         notify();
@@ -239,6 +266,23 @@ class DraftApplyExtension {
       };
     }
     window.addEventListener('hashchange', notify);
+    window.__draftapplyHistoryPatch = patch;
+    this._historyPatch = patch;
+  }
+
+  uninstallSpaNavigationWatchers() {
+    const patch = this._historyPatch;
+    if (!patch) return;
+    patch.owners.delete(this);
+    if (patch.owners.size === 0 && window.__draftapplyHistoryPatch === patch) {
+      for (const [method, original] of Object.entries(patch.originals)) {
+        // Restore only wrappers we own; another library may have patched later.
+        if (history[method]?.name === 'patchedHistoryMethod') history[method] = original;
+      }
+      window.removeEventListener('hashchange', patch.notify);
+      delete window.__draftapplyHistoryPatch;
+    }
+    this._historyPatch = null;
   }
 
   /**
@@ -384,24 +428,25 @@ class DraftApplyExtension {
     };
 
     // Live character counter — only active when field has a maxLength.
-    // A manual edit makes the answer the USER'S text: the grounding gate
+    // A genuine manual edit makes the answer the USER'S text: the grounding gate
     // exists to stop the model fabricating on their behalf, not to stop a
     // person typing their own answer. Edited answers are insertable (within
     // the field's character limit); only unedited ungrounded model output
     // stays blocked.
     modal.querySelector('#da-answer-output').addEventListener('input', () => {
-      this.answerUserEdited = true;
-      if (this.answerValidation) {
-        this.answerValidation = null;
-        this.reviewAcknowledged = false;
-        this.lastAnswer = null;
-      }
       const text = String(this.modal?.querySelector?.('#da-answer-output')?.value || '').trim();
+      // Derive authorship from the current text instead of latching on the
+      // input event. Undoing back to blocked model output must restore its
+      // original validation state rather than laundering it as a user edit.
+      this.answerUserEdited = Boolean(text && text !== this.validatedAnswer);
       const overLimit = Boolean(this.currentFieldMaxLength && text.length > this.currentFieldMaxLength);
       const insertButton = this.modal?.querySelector?.('#da-btn-insert');
       if (insertButton) {
-        insertButton.disabled = !text || overLimit;
-        insertButton.textContent = overLimit ? 'Over Character Limit' : 'Insert (Your Edit)';
+        const validatedPass = text === this.validatedAnswer && this.answerValidation?.status === 'pass';
+        insertButton.disabled = !text || overLimit || (!this.answerUserEdited && !validatedPass);
+        insertButton.textContent = overLimit
+          ? 'Over Character Limit'
+          : this.answerUserEdited ? 'Insert (Your Edit)' : 'Insert Answer';
       }
       this._updateCharCounter();
     });
@@ -1363,30 +1408,11 @@ class DraftApplyExtension {
         payload: structuredPayload
       });
 
-      // If streaming failed to start (SW sleeping, Chrome version quirk, etc.)
-      // fall back immediately to non-streaming rather than showing an error.
       if (!startResult?.started) {
         if (this.currentRequestId !== requestId) return;
         if (statusEl) statusEl.textContent = 'Generating answer...';
         loading.hidden = false; // re-show loading in case it was hidden
-        const fallback = await chrome.runtime.sendMessage({
-          type: 'CALL_API',
-          requestId,
-          payload: structuredPayload
-        });
-        if (this.currentRequestId !== requestId) return;
-        if (fallback?.answer) {
-          output.value = fallback.answer;
-          this._setAnswerValidation(fallback.validation, requestId);
-          this._updateCharCounter();
-          this._showFallbackNotice(fallback);
-          this.renderModelBadge(fallback);
-          this.renderAgentInsights(fallback.agentInsights || fallback);
-        } else if (fallback?.error) {
-          output.value = `Error: ${fallback.error}`;
-        } else {
-          output.value = 'Error: No answer received. Please try again.';
-        }
+        output.value = 'Error: Answer generation could not start. Please try again.';
         return;
       }
 
@@ -1405,7 +1431,7 @@ class DraftApplyExtension {
           try { await chrome.runtime.sendMessage({ type: 'CANCEL_API', requestId }); } catch (_) {}
           const resolver = this._streamResolvers.get(requestId);
           if (resolver) {
-            resolver.resolve(); // empty resolve → output.value is '' → CALL_API fallback triggers
+            resolver.reject(new Error('The connection was interrupted. Please generate again.'));
             this._streamResolvers.delete(requestId);
           }
         }
@@ -1421,28 +1447,7 @@ class DraftApplyExtension {
       if (answer && this.answerValidation) {
         this._updateCharCounter();
       } else {
-        // No chunks received — proxy may not support SSE or buffered the response.
-        // Fall back to non-streaming CALL_API and display the result normally.
-        const fallback = await chrome.runtime.sendMessage({
-          type: 'CALL_API',
-          requestId,
-          payload: structuredPayload
-        });
-
-        if (this.currentRequestId !== requestId) return; // cancelled while falling back
-
-        if (fallback?.answer) {
-          output.value = fallback.answer;
-          this._setAnswerValidation(fallback.validation, requestId);
-          this._updateCharCounter();
-          this._showFallbackNotice(fallback);
-          this.renderModelBadge(fallback);
-          this.renderAgentInsights(fallback.agentInsights || fallback);
-        } else if (fallback?.error) {
-          output.value = `Error: ${fallback.error}`;
-        } else {
-          output.value = 'Error: No answer received. Please try again.';
-        }
+        output.value = 'Error: The answer was not verified. Please generate again.';
       }
 
     } catch (error) {
@@ -1599,6 +1604,10 @@ class DraftApplyExtension {
     const output = this.modal?.querySelector?.('#da-answer-output');
     const text = output?.value?.trim();
     if (!text) return;
+    if (!this.answerUserEdited && (this.answerValidation?.status !== 'pass' || text !== this.validatedAnswer)) {
+      this.showNotification('This answer includes things DraftApply could not verify from your CV. Edit it before copying.', 'error');
+      return;
+    }
     try {
       await navigator.clipboard.writeText(text);
       const btn = this.modal.querySelector('#da-btn-copy');
@@ -1823,7 +1832,7 @@ class DraftApplyExtension {
     const modelStatus = this.answerValidation?.status;
     if (!isUserEdit
         && (!this.answerValidation || answerToInsert !== this.validatedAnswer
-          || (modelStatus !== 'pass' && modelStatus !== 'review'))) {
+          || modelStatus !== 'pass')) {
       this.showNotification('This answer includes things DraftApply could not verify from your CV. Edit it into your own words, or regenerate.', 'error');
       return;
     }
@@ -1908,12 +1917,12 @@ class DraftApplyExtension {
     const hasAnswer = Boolean(this.modal?.querySelector?.('#da-answer-output')?.value?.trim());
     // The button stays a plain "Insert Answer" in every state — validation
     // state lives in the compact badge, not in alarming button labels.
-    // Grounded and review-state answers insert directly (the user is looking
-    // at the text); only an ungrounded answer is stopped, at click time.
-    button.disabled = !hasAnswer;
+    // Only grounded model output is actionable. A manual input event unlocks
+    // the user's edited text via the explicit authorship path above.
+    button.disabled = !hasAnswer || status !== 'pass';
     button.textContent = 'Insert Answer';
     this._renderVerifyBadge(status);
-    this.lastAnswer = status === 'pass' || status === 'review'
+    this.lastAnswer = status === 'pass'
       ? String(this.modal?.querySelector?.('#da-answer-output')?.value || '')
       : null;
   }

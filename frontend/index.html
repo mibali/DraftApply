@@ -33,12 +33,12 @@
           </button>
         </div>
         <div class="modal-body">
-          <p class="settings-hint">Leave on <strong>Default (Groq)</strong> and the platform works out of the box. Choose a custom provider to use your own API key.</p>
+          <p class="settings-hint">The default is <strong>Ollama (local)</strong>. Cloud API keys are kept only for this browser tab/session, never persisted in local storage. Remote API overrides never receive your key.</p>
 
           <div class="form-group">
             <label for="setting-provider">Provider</label>
             <select id="setting-provider">
-              <option value="">Default (Groq)</option>
+              <option value="">Default (Ollama)</option>
               <option value="groq">Groq</option>
               <option value="openai">OpenAI</option>
               <option value="anthropic">Anthropic (Claude)</option>
@@ -211,7 +211,7 @@
     </main>
 
     <footer>
-      <p>CV data is processed locally. Powered by <span id="llm-provider">Ollama</span>.</p>
+      <p><span id="processing-notice">CV and job data are sent to Ollama on this device.</span> Powered by <span id="llm-provider">Ollama</span>.</p>
     </footer>
   </div>
 
