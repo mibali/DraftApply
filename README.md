@@ -25,9 +25,12 @@ DraftApply classifies each question and generates the right kind of answer — a
 
 The extension calls the hosted proxy at `https://draftapply.onrender.com`. No user API keys required.
 
-That checked-in configuration is the **official extension** and remains suitable for loading unpacked or packaging for the Chrome Web Store. To connect an extension to your own `render-proxy` deployment, generate a separate build (no bundler or dependencies are required):
+That checked-in configuration is the **official extension source**. Build it before loading unpacked or packaging so the maintained DOCX export library is included. To connect an extension to your own `render-proxy` deployment, provide its URL to the same build:
 
 ```bash
+npm install
+npm run build:extension
+# Or use your own proxy:
 npm run build:extension -- --proxy-url=https://draftapply.example.com
 # Load dist/extension/ as an unpacked extension.
 ```
@@ -39,7 +42,7 @@ The build validates the URL (HTTPS, except loopback HTTP for development), write
 1. Go to `chrome://extensions`
 2. Enable **Developer mode**
 3. Click **Load unpacked**
-4. Select the `extension-ready/` folder
+4. Run `npm install && npm run build:extension`, then select `dist/extension/`
 
 ### Supported sites
 
@@ -63,6 +66,7 @@ DraftApply works on **any web page**:
 See [`PRIVACY_POLICY.md`](PRIVACY_POLICY.md) and the [`privacy/provider matrix`](docs/privacy-provider-matrix.md). In short:
 
 - The extension stores the CV in `chrome.storage.local`; generation sends CV/job content through the selected proxy and model route.
+- Uploaded PDF/DOCX/TXT files are extracted in memory on the proxy. Scanned-PDF OCR runs locally inside the proxy process and is not sent to an OCR service.
 - Proxy application code does not intentionally persist request content or answers, but hosting infrastructure and providers may retain logs or data under their own settings.
 - The official operator must verify Groq account ZDR. OpenRouter fallback adds OpenRouter and its selected downstream provider. Open-source code and grounding validation cannot prove provider-account privacy settings.
 
@@ -97,7 +101,6 @@ See [`render-proxy/README.md`](render-proxy/README.md) for the full API contract
 | `/api/generate` | POST | Generate answer (structured payload preferred) |
 | `/api/cv/upload` | POST | Extract text from PDF/DOCX/TXT file |
 | `/api/jd/extract` | POST | Normalize pasted job-description text |
-| `/api/cv/analyze` | POST | Analyze CV fit against a job description |
 | `/api/cv/tailor` | POST | Generate a validated structured tailored CV |
 
 The extension sends a **structured payload** to `/api/generate`:

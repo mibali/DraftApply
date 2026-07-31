@@ -14,11 +14,11 @@ function getCvTailorRoute(source) {
 }
 
 describe('Tailor CV Groq budget', () => {
-  it('keeps the production Tailor CV route to one structured generation and audit path', () => {
+  it('keeps the production Tailor CV route to one structured generation call', () => {
     const route = getCvTailorRoute(renderProxyServer);
     const llmCalls = route.match(/callChatCompletionWithFallback/g) || [];
 
-    expect(llmCalls).toHaveLength(2);
+    expect(llmCalls).toHaveLength(1);
     expect(route).not.toContain('buildTailoringPrompt');
     expect(route).not.toContain('buildTailoredCvAuditPrompt');
     expect(route).toContain('buildRecruiterReview');
@@ -35,7 +35,10 @@ describe('Tailor CV Groq budget', () => {
     expect(route).toContain('buildStructuredTailoringPrompt');
     expect(route).toContain('validateStructuredContent');
     expect(route).toContain('renderTailoredCV');
-    expect(route).toContain('buildStructuredAuditPrompt');
+    expect(route).not.toContain('buildStructuredAuditPrompt');
+    expect(route).toContain('recoverStructuredContent');
+    expect(route).toContain("audit: { status: 'passed', recovered }");
+    expect(route).not.toContain('auditSkipped');
     expect(route).toContain("const generationMode = 'structured'");
     expect(route).toContain("code: 'structured_cv_generation_required'");
     expect(route).toContain("code: 'structured_cv_output_invalid'");
@@ -91,12 +94,12 @@ describe('Tailor CV Groq budget', () => {
     expect(renderProxyServer).toContain('llmErrorResponse(e, { allowFallback: OPENROUTER_TAILOR_FALLBACK })');
   });
 
-  it('keeps the local Tailor CV route to one fail-closed structured generation and audit path', () => {
+  it('keeps the local Tailor CV route to one validated structured generation path', () => {
     const route = getCvTailorRoute(backendServer);
     // Local dev uses the same structured-only safety boundary as production.
     const fallbackCalls = route.match(/await generateWithFallback\(FALLBACK_CHAIN/g) || [];
 
-    expect(fallbackCalls).toHaveLength(2);
+    expect(fallbackCalls).toHaveLength(1);
     expect(route).toContain('buildStructuredTailoringPrompt');
     expect(route).toContain('validateStructuredContent');
     expect(route).toContain('renderTailoredCV');
@@ -108,35 +111,36 @@ describe('Tailor CV Groq budget', () => {
     expect(route).not.toContain('buildSemanticMatchPrompt');
   });
 
-  it('validates structured audit output before replacing generated content in production', () => {
+  it('uses deterministic validation as the production audit authority', () => {
     const route = getCvTailorRoute(renderProxyServer);
     expect(route).toContain('tailor.validateStructuredContent');
-    expect(route).toContain('if (audited)');
-    expect(route).toContain('auditSkipped');
+    expect(route).toContain('recoverStructuredContent');
+    expect(route).not.toContain('auditSkipped');
   });
 
-  it('validates structured audit output before replacing generated content in local dev', () => {
+  it('uses deterministic validation as the local audit authority', () => {
     const route = getCvTailorRoute(backendServer);
     expect(route).toContain('tailor.validateStructuredContent');
-    expect(route).toContain('if (audited)');
-    expect(route).toContain('auditSkipped');
+    expect(route).toContain('recoverStructuredContent');
+    expect(route).not.toContain('auditSkipped');
   });
 
-  it('uses a bounded structured JSON budget for the production audit call', () => {
+  it('uses one bounded structured JSON budget', () => {
     const route = getCvTailorRoute(renderProxyServer);
-    expect(route.match(/maxTokens: 2500/g)).toHaveLength(2);
+    expect(route.match(/maxTokens: 2500/g)).toHaveLength(1);
     expect(route).not.toContain('maxTokens: 6500');
   });
 
-  it('rejects a truncated audit response instead of replacing the tailored CV with a cut-off rewrite', () => {
+  it('has no redundant LLM audit response', () => {
     const route = getCvTailorRoute(renderProxyServer);
-    expect(route).toContain("auditData?.choices?.[0]?.finish_reason !== 'length'");
+    expect(route).not.toContain('auditData');
   });
 
   it('rejects a truncated primary structured response', () => {
     const route = getCvTailorRoute(renderProxyServer);
     expect(route).toContain("structuredData?.choices?.[0]?.finish_reason === 'length'");
-    expect(route).toContain('structuredTruncated\n          ? null');
+    expect(route).toContain('structuredTruncated ? null');
+    expect(route).toContain('recoverStructuredContent');
   });
 
   it('exposes the deployed commit and process start time in /api/health so deploy state is verifiable', () => {

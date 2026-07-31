@@ -39,6 +39,31 @@ Built reliable services.`);
     );
     expect(result.status).toBe('pass');
   });
+
+  it('keeps uncertain ordinary prose reviewable while blocking unsupported protected facts', () => {
+    const cvData = {
+      experience: [{
+        title: 'Support Engineer', company: 'Acme',
+        responsibilities: ['Diagnosed production incidents and improved support documentation.'],
+      }],
+    };
+
+    const ordinary = validateApplicationAnswer(
+      'I communicate clearly with colleagues and solve difficult customer problems.',
+      { cvData, question: 'Give us a short introduction.', questionType: 'general' },
+    );
+    expect(ordinary.status).toBe('review');
+    expect(ordinary.claims.every(claim => claim.disposition !== 'unsupported')).toBe(true);
+
+    const protectedClaim = validateApplicationAnswer(
+      'I increased revenue by 40% at Globex.',
+      { cvData, question: 'Give us a short introduction.', questionType: 'general' },
+    );
+    expect(protectedClaim.status).toBe('block');
+    expect(protectedClaim.violations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ severity: 'block' }),
+    ]));
+  });
   const context = buildGroundingContext(groundingCv, { targetCompany: 'TargetCo' });
 
   it.each(groundingCases)('$id', fixture => {
@@ -69,6 +94,32 @@ Built reliable services.`);
     expect(report.claims.length).toBeGreaterThan(0);
   });
 
+  it.each([
+    'I led engineering at Globex.',
+    'I worked for Globex Corporation.',
+    'At Globex Corporation, I managed the migration.',
+  ])('blocks unsupported employer phrasing: %s', answer => {
+    const report = validateApplicationAnswer(answer, { context });
+    expect(report.status).toBe('block');
+    expect(report.claims).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'employment_history', disposition: 'unsupported' }),
+    ]));
+  });
+
+  it('does not mistake technologies or audiences for employers', () => {
+    const technologyContext = buildGroundingContext({
+      experience: [{
+        title: 'Engineer', company: 'Acme Corporation',
+        responsibilities: ['Built integrations with AWS and tools for React developers.'],
+      }],
+    });
+    for (const answer of ['I built integrations with AWS.', 'I built tools for React developers.']) {
+      const report = validateApplicationAnswer(answer, { context: technologyContext });
+      expect(report.status).not.toBe('block');
+      expect(report.claims.every(claim => claim.type !== 'employment_history')).toBe(true);
+    }
+  });
+
   it('passes a supported affirmative yes/no answer using the question proposition', () => {
     const report = validateApplicationAnswer('Yes.', {
       question: 'Do you have experience with AWS?',
@@ -78,11 +129,21 @@ Built reliable services.`);
     expect(report.status).toBe('pass');
   });
 
-  it('fails closed for malformed yes/no answers and non-first-person assertions', () => {
+  it('accepts an honest no without treating it as an unsupported affirmative claim', () => {
+    const report = validateApplicationAnswer('No.', {
+      question: 'Do you have experience with Rust?',
+      questionType: 'yes_no',
+      context,
+    });
+    expect(report.status).toBe('pass');
+    expect(report.claims.at(-1)).toMatchObject({ type: 'yes_no', value: 'no', disposition: 'supported' });
+  });
+
+  it('fails closed for malformed yes/no answers but keeps ordinary unsupported prose reviewable', () => {
     expect(validateApplicationAnswer('Absolutely.', {
       question: 'Do you have experience with Rust?', questionType: 'yes_no', context,
     }).status).toBe('block');
-    expect(validateApplicationAnswer('Built a payment platform in Rust.', { context }).status).toBe('block');
+    expect(validateApplicationAnswer('Built a payment platform in Rust.', { context }).status).toBe('review');
   });
 
   it('does not erase negation or treat credential preparation as completion', () => {
@@ -163,7 +224,7 @@ Built reliable services.`);
         ],
       }],
     }, skeleton, { cvData: groundingCv });
-    expect(content.summary).toBe('');
+    expect(content.summary).toBe(groundingCv.summary);
     expect(content.competencies).toEqual([]);
     expect(content.roles[0].focus).toBeNull();
     expect(content.roles[0].bullets).toEqual(groundingCv.experience[0].responsibilities);

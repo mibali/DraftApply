@@ -8,6 +8,7 @@ let providerBase;
 let proxyBase;
 let token;
 let malformedStructuredResponses = false;
+let truncatedStructuredResponses = false;
 
 const cvText = `Jane Example\nPlatform Engineer\n\nWORK EXPERIENCE\nPlatform Engineer | Acme Ltd | 2020-2025\n- Built Python automation for Kubernetes deployments and production diagnostics.\n- Led incident reviews and wrote operational runbooks.\n\nSKILLS\nPython, Kubernetes, production diagnostics`;
 
@@ -89,7 +90,10 @@ describe.sequential('Render proxy real HTTP routes', () => {
               })),
             })
         : answer;
-      res.end(JSON.stringify({ choices: [{ message: { content } }], model: `${provider}-model`, usage: { total_tokens: 321, cost: 0.0001 } }));
+      res.end(JSON.stringify({
+        choices: [{ message: { content }, ...(structuredCvRequest && truncatedStructuredResponses ? { finish_reason: 'length' } : {}) }],
+        model: `${provider}-model`, usage: { total_tokens: 321, cost: 0.0001 },
+      }));
     });
     providerBase = `http://127.0.0.1:${await listen(providerServer)}`;
     Object.assign(process.env, {
@@ -130,6 +134,19 @@ describe.sequential('Render proxy real HTTP routes', () => {
     expect(sent.messages.map(message => message.role)).toEqual(['system', 'user']);
     expect(sent).not.toHaveProperty('systemPrompt');
     expect(sent).not.toHaveProperty('userPrompt');
+  });
+
+  it('uses application facts the user saved for personal factual questions', async () => {
+    const { response } = await jsonRequest('/api/generate', {
+      question: 'What is your notice period?',
+      cvText,
+      confirmedFacts: ['notice: Four weeks'],
+      skipEvaluation: true,
+    });
+    expect(response.status).toBe(200);
+    const prompt = requests.at(-1).body.messages.map(message => message.content).join('\n');
+    expect(prompt).toContain('USER-CONFIRMED FACTS:');
+    expect(prompt).toContain('notice: Four weeks');
   });
 
   it('buffers provider streaming deltas and emits only meta, final, then DONE', async () => {
@@ -227,12 +244,15 @@ describe.sequential('Render proxy real HTTP routes', () => {
     });
     expect(response.status).toBe(200);
     expect(body.generationMode).toBe('structured');
+    expect(body.schemaVersion).toBe(1);
+    expect(body.audit).toEqual({ status: 'passed', recovered: false });
+    expect(body.analysis.matchReport).toBeTruthy();
     expect(body.structuredCv.content.roles[0].bulletEvidence[0].sourceIds[0]).toMatch(/^experience:/);
     expect(body.provider).toBe('groq');
     expect(body.tailoredCvText).toContain('PROFESSIONAL EXPERIENCE');
   });
 
-  it('fails closed when structured CV output is malformed', async () => {
+  it('recovers malformed structured CV output to source-backed content', async () => {
     const before = requests.length;
     malformedStructuredResponses = true;
     const { response, body } = await jsonRequest('/api/cv/tailor', {
@@ -242,8 +262,24 @@ describe.sequential('Render proxy real HTTP routes', () => {
         jobDescription: 'Platform role requiring Kubernetes automation, incident response, and reliable production diagnostics.',
       })
       .finally(() => { malformedStructuredResponses = false; });
-    expect(response.status).toBe(502);
-    expect(body.code).toBe('structured_cv_output_invalid');
+    expect(response.status).toBe(200);
+    expect(body.audit).toEqual({ status: 'passed', recovered: true });
+    expect(body.recoveryNotice).toMatch(/safely kept your original/i);
+    expect(body.content.roles[0].bulletEvidence[0].sourceIds[0]).toMatch(/^experience:/);
     expect(requests.slice(before).filter(request => request.body.max_tokens === 6000)).toHaveLength(0);
+  });
+
+  it('recovers truncated structured CV output without accepting its partial prose', async () => {
+    truncatedStructuredResponses = true;
+    const { response, body } = await jsonRequest('/api/cv/tailor', {
+      cvText,
+      jobTitle: 'Platform Engineer',
+      company: 'Example Co',
+      jobDescription: 'Platform role requiring Kubernetes automation, incident response, and reliable production diagnostics.',
+    }).finally(() => { truncatedStructuredResponses = false; });
+    expect(response.status).toBe(200);
+    expect(body.audit).toEqual({ status: 'passed', recovered: true });
+    expect(body.renderedText).toContain('Built Python automation for Kubernetes deployments and production diagnostics.');
+    expect(body.content.roles[0].bulletEvidence[0].sourceIds[0]).toMatch(/^experience:/);
   });
 });

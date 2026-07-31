@@ -12,7 +12,7 @@ This policy describes the checked-in official extension configured for `https://
 
 ## What we send over the network
 
-When you generate an answer, analyze a match, or tailor a CV:
+When you generate an answer or tailor a CV:
 
 - We send a request to the DraftApply proxy API at `https://draftapply.onrender.com`.
 - The request includes the content needed for that action: CV text, job-page or pasted job context, the question, and any confirmed facts or skills you supplied.
@@ -21,6 +21,7 @@ When you generate an answer, analyze a match, or tailor a CV:
 When you upload a **PDF/DOCX** CV file for text extraction:
 
 - The file is sent to the DraftApply proxy API for **in-memory** extraction and returned as text.
+- If a PDF contains no usable selectable text, bounded OCR runs inside the DraftApply proxy process. The file is not sent to a separate OCR provider and is not stored by the proxy application.
 
 ## What we do not do
 

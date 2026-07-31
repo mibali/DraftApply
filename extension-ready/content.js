@@ -21,7 +21,6 @@ class DraftApplyExtension {
     this.lastAnswer = null;
     this.lastQuestion = null;
     this.observer = null;
-    this._streamResolvers = new Map(); // requestId -> { resolve, reject }
     this._prefetchCache = new WeakMap(); // field -> { status, question, answer, promise }
     this._prefetchByQuestion = new Map(); // context-aware question key -> answer (survives React re-renders)
     this._buttonMap = new WeakMap();    // field -> overlay button
@@ -30,11 +29,14 @@ class DraftApplyExtension {
     this._prefetchField = null;
     this._contextRefreshTimer = null;
     this._pageContextKey = null;
-    this._lastChunkTime = 0; // epoch ms; updated on each STREAM_CHUNK for watchdog
     this.answerValidation = null;
     this.answerValidationRequestId = null;
     this.answerUserEdited = false;
     this.reviewAcknowledged = false;
+    this.documentNonce = globalThis.crypto?.randomUUID?.() ?? `doc_${Date.now()}_${Math.random()}`;
+    this.fieldTokens = new Map();
+    this.activeAnswerSession = null;
+    this.insertionPending = false;
 
     this.init();
   }
@@ -93,6 +95,13 @@ class DraftApplyExtension {
     this.observeFormFields();
     this.showPageContextIndicator();
     this.installSpaNavigationWatchers();
+    this._observedPageUrl = window.location.href;
+    this._urlWatchTimer = setInterval(() => {
+      if (window.location.href === this._observedPageUrl) return;
+      this._observedPageUrl = window.location.href;
+      this.clearSessionForNavigation();
+      this.scheduleContextRefresh('url', 100);
+    }, 250);
     
     // Re-extract context and re-scan fields after delay (for SPAs that load content async)
     setTimeout(() => {
@@ -139,7 +148,9 @@ class DraftApplyExtension {
     if (this._onPopState) window.removeEventListener('popstate', this._onPopState);
     if (this._onDraftApplyNavigation) window.removeEventListener('draftapply:navigation', this._onDraftApplyNavigation);
     if (this._onStorageChanged) chrome.storage?.onChanged?.removeListener(this._onStorageChanged);
+    if (this._onDelegatedFocusRescan) document.removeEventListener('focusin', this._onDelegatedFocusRescan, true);
     if (this._contextRefreshTimer) clearTimeout(this._contextRefreshTimer);
+    if (this._urlWatchTimer) clearInterval(this._urlWatchTimer);
     this.uninstallSpaNavigationWatchers();
     // Clean up overlay buttons
     document.querySelectorAll('.da-field-btn-overlay').forEach(btn => btn.remove());
@@ -170,12 +181,19 @@ class DraftApplyExtension {
     }
   }
 
-  setPageContext(ctx) {
+  setPageContext(ctx, { preserveSession = false } = {}) {
     const nextKey = this.contextCacheKey(ctx);
     const changed = this._pageContextKey && nextKey !== this._pageContextKey;
     this.pageContext = ctx;
     this._pageContextKey = nextKey;
-    if (changed) this.clearAnswerCaches();
+    if (changed) {
+      this.clearAnswerCaches();
+      if (!preserveSession && window === window.top) {
+        this.activeAnswerSession = null;
+        this.fieldTokens.clear();
+        this.recomputeInsertState();
+      }
+    }
   }
 
   contextCacheKey(ctx = this.pageContext || {}) {
@@ -200,8 +218,8 @@ class DraftApplyExtension {
     return String(hash);
   }
 
-  answerCacheKey(question, ctx = this.pageContext || {}) {
-    return `${this.contextCacheKey(ctx)}::${String(question || '').trim().toLowerCase()}`;
+  answerCacheKey(question, ctx = this.pageContext || {}, maxChars = null) {
+    return `${this.contextCacheKey(ctx)}::${String(question || '').trim().toLowerCase()}::limit:${maxChars || 'none'}`;
   }
 
   clearAnswerCaches() {
@@ -228,9 +246,41 @@ class DraftApplyExtension {
 
   clearSessionForNavigation() {
     this.clearAnswerCaches();
+    this.cancelGeneration({ silent: true }).catch(() => {});
     this._iframeSourceFrameId = null;
     this.currentField = null;
     this.lastFocusedField = null;
+    this.activeAnswerSession = null;
+    this.fieldTokens.clear();
+    this.lastAnswer = null;
+    this.lastQuestion = null;
+    this.answerValidation = null;
+    this.validatedAnswer = null;
+    this.answerUserEdited = false;
+    if (this.modal) {
+      const output = this.modal.querySelector('#da-answer-output');
+      if (output) output.value = '';
+      this.modal.setAttribute('style', 'display:none !important;');
+    }
+    this.recomputeInsertState();
+  }
+
+  createFieldSession(field, question) {
+    if (!this.isWritableField(field)) return null;
+    this.fieldTokens.clear();
+    const sessionId = globalThis.crypto?.randomUUID?.() ?? `session_${Date.now()}_${Math.random()}`;
+    const fieldToken = globalThis.crypto?.randomUUID?.() ?? `field_${Date.now()}_${Math.random()}`;
+    const contextSnapshot = Object.freeze(structuredClone(this.pageContext || {}));
+    const maxChars = this.resolveCharacterLimit(field);
+    const session = Object.freeze({
+      sessionId, sourceDocumentNonce: this.documentNonce, fieldToken, sourceFrameId: null, question,
+      jobContextSnapshot: contextSnapshot, contextFingerprint: this.contextCacheKey(contextSnapshot), maxChars,
+    });
+    this.fieldTokens.set(fieldToken, { element: field, sessionId });
+    this.activeAnswerSession = session;
+    this.currentField = field;
+    this.currentFieldMaxLength = maxChars;
+    return session;
   }
 
   scheduleContextRefresh(_reason = 'change', delay = 900) {
@@ -439,15 +489,7 @@ class DraftApplyExtension {
       // input event. Undoing back to blocked model output must restore its
       // original validation state rather than laundering it as a user edit.
       this.answerUserEdited = Boolean(text && text !== this.validatedAnswer);
-      const overLimit = Boolean(this.currentFieldMaxLength && text.length > this.currentFieldMaxLength);
-      const insertButton = this.modal?.querySelector?.('#da-btn-insert');
-      if (insertButton) {
-        const validatedPass = text === this.validatedAnswer && this.answerValidation?.status === 'pass';
-        insertButton.disabled = !text || overLimit || (!this.answerUserEdited && !validatedPass);
-        insertButton.textContent = overLimit
-          ? 'Over Character Limit'
-          : this.answerUserEdited ? 'Insert (Your Edit)' : 'Insert Answer';
-      }
+      this.recomputeInsertState();
       this._updateCharCounter();
     });
     
@@ -577,9 +619,10 @@ class DraftApplyExtension {
       }
 
       if (message.type === 'GENERATE_ANSWER') {
-        // Set currentField from lastFocusedField if not already set
-        if (!this.currentField && this.lastFocusedField) {
-          this.currentField = this.lastFocusedField;
+        const field = this.lastFocusedField?.isConnected ? this.lastFocusedField : this.currentField;
+        if (!this.createFieldSession(field, message.question)) {
+          this.showNotification('Click the application field, then try DraftApply again.', 'error');
+          return;
         }
         this.handleGenerateRequest(message.question);
       }
@@ -588,32 +631,46 @@ class DraftApplyExtension {
       if (message.type === 'GENERATE_FROM_IFRAME') {
         // Only handle in the top frame
         if (window !== window.top) return;
-        // Merge iframe context: only replace parent's context if the iframe's
-        // context is better quality. The parent's page often has richer
-        // structured data than the embedded form iframe.
-        if (message.iframePageContext) {
-          const parentQuality = this.pageContext?.contextQuality;
-          const iframeQuality = message.iframePageContext?.contextQuality;
-          const parentIsGood = parentQuality === 'structured' || parentQuality === 'heuristic';
-          const iframeIsGood = iframeQuality === 'structured' || iframeQuality === 'heuristic';
-          if (!parentIsGood || (iframeIsGood && iframeQuality === 'structured' && parentQuality !== 'structured')) {
-            this.pageContext = message.iframePageContext;
-            this.updateContextBadge();
-          }
-        }
-        this._iframeSourceFrameId = message.sourceFrameId;
+        const parentContext = structuredClone(this.pageContext || {});
+        const iframeContext = structuredClone(message.iframePageContext || {});
+        const parentQuality = parentContext.contextQuality;
+        const iframeQuality = iframeContext.contextQuality;
+        // The top page normally owns the actual job posting while an iframe
+        // owns only application controls. Prefer a reliable parent context;
+        // use iframe context only when it is structured and the parent is not.
+        const parentReliable = ['structured', 'heuristic', 'user_provided'].includes(parentQuality);
+        const iframeStructured = ['structured', 'user_provided'].includes(iframeQuality);
+        const contextSnapshot = Object.freeze(parentReliable || !iframeStructured ? parentContext : iframeContext);
+        this.fieldTokens.clear();
+        this.activeAnswerSession = Object.freeze({
+          sessionId: message.sessionId, sourceDocumentNonce: message.sourceDocumentNonce,
+          fieldToken: message.fieldToken, sourceFrameId: message.sourceFrameId,
+          question: message.question, jobContextSnapshot: contextSnapshot,
+          contextFingerprint: this.contextCacheKey(contextSnapshot), maxChars: message.maxChars || null,
+        });
+        this.currentFieldMaxLength = message.maxChars || null;
+        this.updateContextBadge(contextSnapshot);
         this.showModal(message.question);
-        this.generateAnswer(message.question);
+        this.generateAnswer(message.question, this.activeAnswerSession);
       }
       
       // Iframe receives this when the parent frame's user clicks "Insert Answer"
       if (message.type === 'INSERT_FROM_PARENT') {
         if (window === window.top) return; // Only handle in iframes
         (async () => {
-          const target = this.currentField || this.lastFocusedField;
-          if (!target?.isConnected) {
+          if (message.sourceDocumentNonce !== this.documentNonce) {
+            sendResponse({ success: false, error: 'Embedded form navigated' }); return;
+          }
+          const targetRecord = this.fieldTokens.get(message.fieldToken);
+          const target = targetRecord?.element;
+          if (!target?.isConnected || targetRecord.sessionId !== message.sessionId) {
             sendResponse({ success: false, error: 'Target field no longer exists' });
             return;
+          }
+          const liveLimit = this.resolveCharacterLimit(target);
+          const maxChars = this.stricterLimit(message.maxChars, liveLimit);
+          if (maxChars && String(message.answer || '').length > maxChars) {
+            sendResponse({ success: false, error: `Answer exceeds the ${maxChars} character limit` }); return;
           }
           try {
             const inserted = await this.writeAnswerToTarget(target, message.answer);
@@ -621,6 +678,7 @@ class DraftApplyExtension {
               sendResponse({ success: false, error: 'Field rejected inserted value' });
               return;
             }
+            this.fieldTokens.delete(message.fieldToken);
             this.showNotification('Answer inserted!');
             globalThis.DraftApplyStats?.track?.('answersInserted')?.catch?.(() => {});
             sendResponse({ success: true });
@@ -638,56 +696,6 @@ class DraftApplyExtension {
 
       if (message.type === 'GET_PAGE_CONTEXT') {
         sendResponse(this.pageContext);
-      }
-
-      if (message.type === 'STREAM_CHUNK') {
-        // Capability-v2 providers never expose unvalidated answer deltas.
-        return;
-      }
-
-      if (message.type === 'STREAM_META') {
-        if (this.currentRequestId === message.requestId) {
-          this._lastChunkTime = Date.now();
-          this.renderModelBadge(message);
-          this._showFallbackNotice(message);
-          this.renderAgentInsights(message.agentInsights || message);
-        }
-        return;
-      }
-
-      if (message.type === 'STREAM_PROGRESS') {
-        if (this.currentRequestId === message.requestId) this._lastChunkTime = Date.now();
-        return;
-      }
-
-      if (message.type === 'STREAM_DONE') {
-        const resolver = this._streamResolvers.get(message.requestId);
-        if (resolver) {
-          resolver.resolve();
-          this._streamResolvers.delete(message.requestId);
-        }
-        return;
-      }
-
-      if (message.type === 'STREAM_FINAL') {
-        if (this.currentRequestId !== message.requestId) return;
-        this._lastChunkTime = Date.now();
-        const output = this.modal?.querySelector?.('#da-answer-output');
-        if (output && typeof message.answer === 'string') output.value = message.answer;
-        this._setAnswerValidation(message.validation, message.requestId);
-        this.renderModelBadge(message);
-        this.renderAgentInsights(message.pipelineInsights || message.agentInsights || message);
-        this._updateCharCounter();
-        return;
-      }
-
-      if (message.type === 'STREAM_ERROR') {
-        const resolver = this._streamResolvers.get(message.requestId);
-        if (resolver) {
-          resolver.reject(new Error(message.error || 'Stream error'));
-          this._streamResolvers.delete(message.requestId);
-        }
-        return;
       }
     });
   }
@@ -723,6 +731,11 @@ class DraftApplyExtension {
       
       fields.forEach(field => {
         // Skip if already has button or is too small/hidden
+        if (!this.isWritableField(field)) {
+          buttonMap.get(field)?.remove();
+          buttonMap.delete(field);
+          return;
+        }
         if (buttonMap.has(field)) return;
         if (field.tagName === 'INPUT' && field.offsetWidth < 100) return;
         if (field.type === 'hidden') return;
@@ -755,18 +768,21 @@ class DraftApplyExtension {
           e.preventDefault();
           e.stopPropagation();
           clickPending = false;
-          this.currentField = field;
-          // maxLength is -1 when unset; treat anything <= 0 as "no limit"
-          this.currentFieldMaxLength = (field.maxLength > 0) ? field.maxLength : null;
 
           const label = this.findFieldLabel(field);
           const fieldHint = field.name || field.id || field.placeholder || null;
           const question = (label || fieldHint || 'Please describe your relevant experience and background').slice(0, 500);
+          this.createFieldSession(field, question);
 
           // Use prefetch cache if answer is ready for the same question.
           // Check WeakMap first (same element), then the question-keyed Map as
           // fallback for React re-renders that replaced the DOM element.
-          const cacheKey = this.answerCacheKey(question);
+          if (!this.isWritableField(field)) {
+            this.showNotification('This field is not editable. Choose a writable application field.', 'error');
+            return;
+          }
+          const maxChars = this.resolveCharacterLimit(field);
+          const cacheKey = this.answerCacheKey(question, this.pageContext, maxChars);
           const cached = this._prefetchCache.get(field);
           const cachedResult = (cached?.status === 'ready' && cached.question === question && cached.cacheKey === cacheKey)
             ? cached.result
@@ -834,6 +850,7 @@ class DraftApplyExtension {
           btn.remove();
         }
       });
+      this.recomputeInsertState();
     };
 
     // Debounce to avoid excessive calls
@@ -860,7 +877,15 @@ class DraftApplyExtension {
     // Expose for delayed re-scan from init()
     this._rescanFields = addButtons;
 
-    this.observer = new MutationObserver(debouncedAddButtons);
+    this.observer = new MutationObserver(() => {
+      // Keep the primary action honest even on mutation-heavy ATS pages. The
+      // expensive field rescan stays debounced, but a detached target must
+      // become a Copy fallback immediately.
+      this.recomputeInsertState();
+      debouncedAddButtons();
+    });
+    this._onDelegatedFocusRescan = () => debouncedAddButtons();
+    document.addEventListener('focusin', this._onDelegatedFocusRescan, true);
     this.observeAllRoots(debouncedAddButtons);
     
     // Reposition on scroll/resize (lightweight — only moves visible buttons)
@@ -873,6 +898,18 @@ class DraftApplyExtension {
       'input:not([type]),' +
       'input[type="text"],input[type="email"],input[type="tel"],input[type="search"],input[type="url"],' +
       '[contenteditable="true"],[role="textbox"]';
+  }
+
+  isWritableField(field) {
+    if (!field?.isConnected || field.closest?.('#draftapply-modal')) return false;
+    if (field.hidden || field.getAttribute?.('aria-hidden')?.toLowerCase() === 'true') return false;
+    if (typeof field.getClientRects === 'function' && field.getClientRects().length === 0) return false;
+    if (field.matches?.(':disabled') || field.hasAttribute?.('disabled') || field.hasAttribute?.('readonly')) return false;
+    if (field.getAttribute?.('aria-disabled')?.toLowerCase() === 'true'
+        || field.getAttribute?.('aria-readonly')?.toLowerCase() === 'true') return false;
+    if (field instanceof HTMLTextAreaElement) return !field.disabled && !field.readOnly;
+    if (field instanceof HTMLInputElement) return field.type !== 'hidden' && !field.disabled && !field.readOnly;
+    return field.isContentEditable === true;
   }
 
   fieldFromEvent(event, selector = this.fieldSelector()) {
@@ -919,7 +956,12 @@ class DraftApplyExtension {
       if (this._observedRoots.has(root)) continue;
       try {
         const target = root === document ? document.body : root;
-        this.observer.observe(target, { childList: true, subtree: true });
+        this.observer.observe(target, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ['hidden', 'type', 'disabled', 'readonly', 'contenteditable', 'aria-disabled', 'aria-readonly'],
+        });
         this._observedRoots.add(root);
       } catch (e) {
         // Some detached roots cannot be observed.
@@ -929,9 +971,9 @@ class DraftApplyExtension {
 
   // ── Field constraint helpers ─────────────────────────────────────────────
 
-  _inferLengthFromField(field) {
+  _inferLengthFromField(field, resolvedLimit = this.resolveCharacterLimit(field)) {
     if (!field) return null;
-    const maxLen = (field.maxLength > 0) ? field.maxLength : null;
+    const maxLen = resolvedLimit;
     const isSingleLine = field.tagName === 'INPUT';
     if (isSingleLine) return 'short';
     if (maxLen && maxLen <= 250) return 'short';
@@ -1094,7 +1136,7 @@ class DraftApplyExtension {
    * Uses the same structured payload as generateAnswer but non-streaming.
    */
   _jobDescriptionForPayload(ctx = this.pageContext || {}) {
-    const isReliableContext = ctx.contextQuality === 'structured' || ctx.contextQuality === 'heuristic';
+    const isReliableContext = ['structured', 'heuristic', 'user_provided'].includes(ctx.contextQuality);
     if (!isReliableContext) return undefined;
     return ctx.sectionedJobContext || ctx.jobDescription || undefined;
   }
@@ -1178,6 +1220,7 @@ class DraftApplyExtension {
   }
 
   async _startPrefetch(field) {
+    if (!this.isWritableField(field)) return;
     const label = this.findFieldLabel(field);
     const fieldHint = field.name || field.id || field.placeholder || null;
     const question = (label || fieldHint || 'Please describe your relevant experience and background').slice(0, 500);
@@ -1190,14 +1233,14 @@ class DraftApplyExtension {
 
     const btn = this._buttonMap.get(field);
     const ctx = this.pageContext || {};
-    const cacheKey = this.answerCacheKey(question, ctx);
+    const fieldMaxLen = this.resolveCharacterLimit(field);
+    const cacheKey = this.answerCacheKey(question, ctx, fieldMaxLen);
     const jobContextForPayload = await this._jobContextForPayload(ctx);
     this.updateContextBadge(jobContextForPayload);
     if (!jobContextForPayload.jobDescription && this._questionNeedsJobContext(question)) return;
-    const fieldMaxLen = (field.maxLength > 0) ? field.maxLength : null;
     const payload = {
       question,
-      length: this._inferLengthFromField(field) || 'medium',
+      length: this._inferLengthFromField(field, fieldMaxLen) || 'medium',
       tone:   'natural',
       cvText:         this._cvTextWithLinks(cvResponse),
       confirmedFacts: this._confirmedFacts(cvResponse),
@@ -1215,7 +1258,7 @@ class DraftApplyExtension {
 
     try {
       const result = await chrome.runtime.sendMessage({ type: 'CALL_API', requestId: null, payload });
-      if (cacheKey !== this.answerCacheKey(question)) {
+      if (cacheKey !== this.answerCacheKey(question, this.pageContext, this.resolveCharacterLimit(field))) {
         cacheEntry.status = 'stale';
         if (btn?.isConnected) btn.classList.remove('da-btn-prefetching', 'da-btn-ready');
         return;
@@ -1254,7 +1297,11 @@ class DraftApplyExtension {
         const response = await chrome.runtime.sendMessage({
           type: 'RELAY_GENERATE_TO_PARENT',
           question,
-          pageContext: this.pageContext
+          pageContext: this.activeAnswerSession?.jobContextSnapshot || this.pageContext,
+          sessionId: this.activeAnswerSession?.sessionId,
+          sourceDocumentNonce: this.documentNonce,
+          fieldToken: this.activeAnswerSession?.fieldToken,
+          maxChars: this.activeAnswerSession?.maxChars,
         });
         if (!response?.success) {
           this.showNotification('Could not open DraftApply from this embedded form. Try activating it from the main page.', 'error');
@@ -1265,9 +1312,8 @@ class DraftApplyExtension {
       return;
     }
     
-    this._iframeSourceFrameId = null;
     this.showModal(question);
-    await this.generateAnswer(question);
+    await this.generateAnswer(question, this.activeAnswerSession);
   }
 
   showModal(question) {
@@ -1316,9 +1362,12 @@ class DraftApplyExtension {
     if (this.modal) this.modal.setAttribute('style', 'display:none !important;');
   }
 
-  async generateAnswer(question) {
+  async generateAnswer(question, session = this.activeAnswerSession) {
+    const operation = {};
+    this._generationOperation = operation;
     if (this.currentRequestId) {
-      await this.cancelGeneration({ silent: true });
+      await this.cancelGeneration({ silent: true, nextOperation: operation });
+      if (this._generationOperation !== operation) return;
     }
 
     const loading = this.modal.querySelector('#da-loading');
@@ -1346,22 +1395,24 @@ class DraftApplyExtension {
       else if (elapsed > 5 && statusEl) statusEl.textContent = 'Connecting to AI service...';
     }, 2000);
 
-    // Hoist requestId and timeoutId so finally can access them regardless of where a throw occurs.
+    // Hoist requestId so cancellation and stale-response checks share one
+    // request identity across the content script and service worker.
     let requestId;
-    let timeoutId;
-    let noActivityWatchdog;
 
     try {
       const cvResponse = await chrome.runtime.sendMessage({ type: 'GET_CV' });
+      if (this._generationOperation !== operation) return;
 
       if (!cvResponse.cvText) {
         output.value = 'Please load your CV first. Click the DraftApply extension icon.';
         return;
       }
 
-      const ctx = this.pageContext || {};
+      if (!session || session !== this.activeAnswerSession) return;
+      const ctx = session.jobContextSnapshot || {};
       // Prefer reliable page context, then fall back to the user's saved Tailor JD.
       const jobContextForPayload = await this._jobContextForPayload(ctx);
+      if (this._generationOperation !== operation || session !== this.activeAnswerSession) return;
       this.updateContextBadge(jobContextForPayload);
       if (!jobContextForPayload.jobDescription && this._questionNeedsJobContext(question)) {
         output.value = 'A job description is required for a tailored answer. Paste the JD above, then generate again.';
@@ -1381,77 +1432,50 @@ class DraftApplyExtension {
         jdContextQuality: jobContextForPayload.contextQuality || 'none',
         pageUrl:        ctx.url || window.location.href,
         platform:       ctx.platform || undefined,
-        maxChars:       this.currentFieldMaxLength || undefined,
+        maxChars:       session.maxChars || undefined,
       };
 
       requestId = globalThis.crypto?.randomUUID?.() ?? `req_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+      if (this._generationOperation !== operation) return;
       this.currentRequestId = requestId;
 
-      // Promise bridge: resolves/rejects when STREAM_DONE/STREAM_ERROR arrives
-      const streamPromise = new Promise((resolve, reject) => {
-        this._streamResolvers.set(requestId, { resolve, reject });
-      });
-
-      const timeoutPromise = new Promise((_, reject) => {
-        timeoutId = setTimeout(() => {
-          const resolver = this._streamResolvers.get(requestId);
-          if (resolver) {
-            resolver.reject(new Error('Request timed out after 2 minutes'));
-            this._streamResolvers.delete(requestId);
-          }
-        }, 120000);
-      });
-
-      const startResult = await chrome.runtime.sendMessage({
-        type: 'CALL_API_STREAM',
+      // Answer deltas are never shown before validation, so streaming adds no
+      // user value. One JSON response keeps answer + validation atomic and
+      // avoids races between separate FINAL/DONE browser messages.
+      const result = await chrome.runtime.sendMessage({
+        type: 'CALL_API',
         requestId,
         payload: structuredPayload
       });
 
-      if (!startResult?.started) {
-        if (this.currentRequestId !== requestId) return;
-        if (statusEl) statusEl.textContent = 'Generating answer...';
-        loading.hidden = false; // re-show loading in case it was hidden
-        output.value = 'Error: Answer generation could not start. Please try again.';
-        return;
+      if (this.currentRequestId !== requestId || session !== this.activeAnswerSession) return;
+      if (result?.error) {
+        const error = new Error(result.error);
+        error.code = result.code;
+        error.status = result.status;
+        throw error;
       }
 
-      // No-activity watchdog: if the SW is terminated mid-stream, chunks stop
-      // arriving but STREAM_DONE never fires. After 45s with no chunk, cancel
-      // the stale stream and resolve the promise empty so the existing
-      // CALL_API fallback path kicks in automatically.
-      this._lastChunkTime = Date.now();
-      noActivityWatchdog = setInterval(async () => {
-        if (this.currentRequestId !== requestId) {
-          clearInterval(noActivityWatchdog);
-          return;
-        }
-        if (Date.now() - this._lastChunkTime > 45000) {
-          clearInterval(noActivityWatchdog);
-          try { await chrome.runtime.sendMessage({ type: 'CANCEL_API', requestId }); } catch (_) {}
-          const resolver = this._streamResolvers.get(requestId);
-          if (resolver) {
-            resolver.reject(new Error('The connection was interrupted. Please generate again.'));
-            this._streamResolvers.delete(requestId);
-          }
-        }
-      }, 5000);
-
-      // Wait for stream to finish — chunks arrive via STREAM_CHUNK messages
-      await Promise.race([streamPromise, timeoutPromise]);
-      clearInterval(noActivityWatchdog);
-
-      if (this.currentRequestId !== requestId) return; // Stale — newer request took over
-
-      const answer = output.value.trim();
-      if (answer && this.answerValidation) {
-        this._updateCharCounter();
-      } else {
-        output.value = 'Error: The answer was not verified. Please generate again.';
+      const answer = String(result?.answer || result?.text || result?.content || '').trim();
+      if (!answer) {
+        throw new Error('DraftApply received an empty answer. Please try again.');
       }
+      output.value = answer;
+
+      // Missing validation metadata is a response-contract problem, not proof
+      // that the draft is false. Preserve it for review/editing, but do not let
+      // untouched model text bypass protected-fact validation.
+      const validation = result.validation || {
+        status: 'block',
+        violations: [{ code: 'validation_metadata_missing', severity: 'block' }],
+      };
+      this._setAnswerValidation(validation, requestId);
+      this.renderModelBadge(result);
+      this.renderAgentInsights(result.pipelineInsights || result.agentInsights || result);
+      this._updateCharCounter();
 
     } catch (error) {
-      if (this.currentRequestId === requestId || !requestId) {
+      if (this._generationOperation === operation && (this.currentRequestId === requestId || !requestId)) {
         if (error.message.includes('Extension context invalidated')) {
           output.value = 'Extension was updated. Please refresh this page.';
         } else if (error.message === 'Cancelled') {
@@ -1462,22 +1486,19 @@ class DraftApplyExtension {
       }
     } finally {
       clearInterval(statusTimer);
-      clearInterval(noActivityWatchdog);
-      clearTimeout(timeoutId); // always cancel the 2-min timer, whether success, error, or cancel
-      if (this._streamResolvers.has(requestId)) {
-        this._streamResolvers.delete(requestId);
-      }
       if (this.currentRequestId === requestId) {
         this.currentRequestId = null;
       }
-      loading.hidden = true;
+      if (this._generationOperation === operation) {
+        this._generationOperation = null;
+        loading.hidden = true;
+      }
     }
   }
 
   async regenerate() {
     const question = this.modal.querySelector('#da-question-preview').value.trim();
     if (!question) return;
-    await this.cancelGeneration({ silent: true });
     await this.generateAnswer(question);
   }
 
@@ -1604,10 +1625,8 @@ class DraftApplyExtension {
     const output = this.modal?.querySelector?.('#da-answer-output');
     const text = output?.value?.trim();
     if (!text) return;
-    if (!this.answerUserEdited && (this.answerValidation?.status !== 'pass' || text !== this.validatedAnswer)) {
-      this.showNotification('This answer includes things DraftApply could not verify from your CV. Edit it before copying.', 'error');
-      return;
-    }
+    // Copying leaves submission under the user's control. Keep automatic
+    // insertion gated, but never trap a visible draft inside the modal.
     try {
       await navigator.clipboard.writeText(text);
       const btn = this.modal.querySelector('#da-btn-copy');
@@ -1631,13 +1650,7 @@ class DraftApplyExtension {
 
     const requestId = this.currentRequestId;
     this.currentRequestId = null;
-
-    // Reject the stream promise so generateAnswer's await unblocks immediately
-    const resolver = requestId && this._streamResolvers.get(requestId);
-    if (resolver) {
-      resolver.reject(new Error('Cancelled'));
-      this._streamResolvers.delete(requestId);
-    }
+    this._generationOperation = options.nextOperation || null;
 
     // Best-effort abort the network request (may fail if background was reloaded)
     try {
@@ -1656,16 +1669,17 @@ class DraftApplyExtension {
   }
 
   async writeAnswerToTarget(target, answerToInsert) {
-    if (!target?.isConnected || !answerToInsert) return false;
+    if (!this.isWritableField(target) || !answerToInsert) return false;
 
     const applyValue = () => {
+      if (!this.isWritableField(target)) return false;
       target.scrollIntoView?.({ block: 'center', inline: 'nearest' });
       target.focus?.();
 
-      if (target.isContentEditable || target.getAttribute?.('contenteditable') === 'true' || target.getAttribute?.('role') === 'textbox') {
+      if (target.isContentEditable) {
         this.setContentEditableValue(target, answerToInsert);
         this.dispatchInputEvents(target, answerToInsert);
-        return;
+        return true;
       }
 
       if (typeof target.setSelectionRange === 'function') {
@@ -1678,18 +1692,92 @@ class DraftApplyExtension {
 
       this.setNativeValue(target, answerToInsert);
       this.dispatchInputEvents(target, answerToInsert);
+      return true;
     };
 
-    applyValue();
+    if (!applyValue()) return false;
     await new Promise(resolve => setTimeout(resolve, 75));
     if (this.targetHasInsertedAnswer(target, answerToInsert)) return true;
 
     // Some controlled React/Vue inputs briefly roll back after the first event.
     // A second write after the page has processed the first input event catches
     // that common race without hiding the modal prematurely.
-    applyValue();
+    if (!applyValue()) return false;
     await new Promise(resolve => setTimeout(resolve, 75));
     return this.targetHasInsertedAnswer(target, answerToInsert);
+  }
+
+  stricterLimit(...limits) {
+    const valid = limits.flat().map(Number).filter(value => Number.isInteger(value) && value > 0);
+    return valid.length ? Math.min(...valid) : null;
+  }
+
+  resolveCharacterLimit(field) {
+    if (!field) return null;
+    const candidates = [];
+    if (field.maxLength > 0) candidates.push(field.maxLength);
+    for (const attr of field.attributes || []) {
+      if (/^data-/i.test(attr.name) && /(char|character).*(max|limit)|(max|limit).*(char|character)/i.test(attr.name)) {
+        const value = Number(String(attr.value).match(/^\s*(\d+)\s*$/)?.[1]);
+        if (value > 0) candidates.push(value);
+      }
+    }
+    const local = [];
+    const described = String(field.getAttribute?.('aria-describedby') || '').split(/\s+/).filter(Boolean);
+    const root = field.getRootNode?.() || document;
+    for (const id of described) { const el = root.getElementById?.(id) || document.getElementById(id); if (el) local.push(el.textContent); }
+    if (field.labels) for (const label of field.labels) local.push(label.textContent);
+    let owner = field.parentElement;
+    for (let depth = 0; owner && depth < 3; depth++, owner = owner.parentElement) {
+      if ((owner.querySelectorAll?.(this.fieldSelector()).length || 0) <= 1) local.push(owner.textContent);
+      if (owner.matches?.('form,body')) break;
+    }
+    for (const text of local) {
+      const clean = String(text || '').replace(/\b\d+\s*words?\b/gi, '');
+      const patterns = [
+        /(?:maximum|max(?:imum)?\.?|up to|limit(?:ed)? to)\s*(\d+)\s*(?:characters?|chars?)\b/gi,
+        /\b(\d+)\s*(?:characters?|chars?)\s*(?:maximum|max|limit)\b/gi,
+        /\b\d+\s*(?:\/|of)\s*(\d+)\s*(?:characters?|chars?)\b/gi,
+        /\b(\d+)\s*(?:characters?|chars?)\s*remaining\b/gi,
+      ];
+      for (const pattern of patterns) for (const match of clean.matchAll(pattern)) {
+        let value = Number(match[1]);
+        if (/remaining/i.test(match[0])) value += String(field.value || field.textContent || '').length;
+        if (value > 0) candidates.push(value);
+      }
+    }
+    return this.stricterLimit(candidates);
+  }
+
+  sessionTargetValid() {
+    const session = this.activeAnswerSession;
+    if (!session) return false;
+    if (session.sourceFrameId != null) return true; // iframe validates exact token and nonce on relay
+    const target = this.fieldTokens.get(session.fieldToken);
+    return target?.sessionId === session.sessionId && this.isWritableField(target.element);
+  }
+
+  recomputeInsertState() {
+    const button = this.modal?.querySelector?.('#da-btn-insert');
+    if (!button) return;
+    const text = String(this.modal?.querySelector?.('#da-answer-output')?.value || '').trim();
+    const withinLimit = !this.currentFieldMaxLength || text.length <= this.currentFieldMaxLength;
+    const validationUsable = text === this.validatedAnswer && ['pass', 'review'].includes(this.answerValidation?.status);
+    const blockedModelAnswer = Boolean(text && !this.answerUserEdited && !validationUsable);
+    const targetValid = this.sessionTargetValid();
+    const copyFallback = Boolean(this.activeAnswerSession
+      && this.activeAnswerSession.sourceFrameId == null && !targetValid);
+    const disabled = this.insertionPending || !text || !withinLimit || (!targetValid && !copyFallback)
+      || blockedModelAnswer;
+    const label = this.insertionPending ? 'Inserting…'
+      : !withinLimit ? 'Over Character Limit'
+        : blockedModelAnswer ? 'Edit Answer Above First'
+          : copyFallback ? 'Copy Answer'
+            : this.answerUserEdited ? 'Insert (Your Edit)' : 'Insert Answer';
+    // Idempotent writes are essential because this method also runs from the
+    // page MutationObserver; rewriting text would otherwise trigger itself.
+    if (button.disabled !== disabled) button.disabled = disabled;
+    if (button.textContent !== label) button.textContent = label;
   }
 
   setContentEditableValue(target, value) {
@@ -1722,7 +1810,7 @@ class DraftApplyExtension {
       return normalize(target.value) === expectedNorm;
     }
 
-    if (target.isContentEditable || target.getAttribute?.('contenteditable') === 'true' || target.getAttribute?.('role') === 'textbox') {
+    if (target.isContentEditable) {
       const actual = normalize(target.innerText || target.textContent || '');
       return actual === expectedNorm || actual.includes(expectedNorm);
     }
@@ -1739,12 +1827,12 @@ class DraftApplyExtension {
     ].filter(Boolean);
 
     for (const el of candidates) {
-      if (!el?.isConnected) continue;
+      if (!this.isWritableField(el)) continue;
       // Never target our own modal fields
       if (el.closest?.('#draftapply-modal')) continue;
 
       // Contenteditable or textbox-like
-      if (el.isContentEditable || el.getAttribute?.('contenteditable') === 'true' || el.getAttribute?.('role') === 'textbox') {
+      if (el.isContentEditable) {
         return el;
       }
 
@@ -1823,16 +1911,14 @@ class DraftApplyExtension {
     const answerToInsert = current || this.lastAnswer;
     const insertBtn = this.modal?.querySelector?.('#da-btn-insert');
 
-    // Text the user edited is their own answer — insertable as-is (within
-    // the field's character limit). For model output, grounded ('pass') and
-    // review-state answers insert directly; only an answer the validator
-    // found unsupported by the CV is stopped, with a plain explanation
-    // instead of a persistent blocked state.
+    // Text the user edited is their own answer — insertable as-is (within the
+    // field's character limit). Grounded and review-state model drafts remain
+    // usable; only protected facts the validator marked "block" are stopped.
     const isUserEdit = this.answerUserEdited && Boolean(current);
     const modelStatus = this.answerValidation?.status;
     if (!isUserEdit
         && (!this.answerValidation || answerToInsert !== this.validatedAnswer
-          || modelStatus !== 'pass')) {
+          || !['pass', 'review'].includes(modelStatus))) {
       this.showNotification('This answer includes things DraftApply could not verify from your CV. Edit it into your own words, or regenerate.', 'error');
       return;
     }
@@ -1842,21 +1928,33 @@ class DraftApplyExtension {
       return;
     }
 
-    if (isUserEdit && this.currentFieldMaxLength && answerToInsert.length > this.currentFieldMaxLength) {
+    const session = this.activeAnswerSession;
+    const localRecord = session?.sourceFrameId == null ? this.fieldTokens.get(session?.fieldToken) : null;
+    const localTarget = localRecord?.sessionId === session?.sessionId && localRecord.element?.isConnected
+      ? localRecord.element : null;
+    const liveLimit = localTarget ? this.resolveCharacterLimit(localTarget) : null;
+    this.currentFieldMaxLength = this.stricterLimit(session?.maxChars, this.currentFieldMaxLength, liveLimit);
+    if (this.currentFieldMaxLength && answerToInsert.length > this.currentFieldMaxLength) {
       this.showNotification(`Your answer is ${answerToInsert.length} characters; the field allows ${this.currentFieldMaxLength}. Shorten it to insert.`, 'error');
+      this.recomputeInsertState();
       return;
     }
 
     if (insertBtn?.disabled) return;
-    if (insertBtn) insertBtn.disabled = true;
+    this.insertionPending = true;
+    this.recomputeInsertState();
 
     // If this modal is serving an iframe, relay the answer back to the iframe for insertion
-    if (this._iframeSourceFrameId != null) {
+    if (session?.sourceFrameId != null) {
       try {
         const response = await chrome.runtime.sendMessage({
           type: 'RELAY_INSERT_TO_IFRAME',
           answer: answerToInsert,
-          targetFrameId: this._iframeSourceFrameId
+          targetFrameId: session.sourceFrameId,
+          sessionId: session.sessionId,
+          sourceDocumentNonce: session.sourceDocumentNonce,
+          fieldToken: session.fieldToken,
+          maxChars: session.maxChars,
         });
         if (!response?.success) {
           this.showNotification('Could not insert into the embedded form. The answer is still here to copy.', 'error');
@@ -1864,23 +1962,38 @@ class DraftApplyExtension {
         }
         this.hideModal();
         this.showNotification('Answer inserted!');
-        this._iframeSourceFrameId = null;
       } catch (e) {
         this.showNotification('Could not reach the embedded form. The answer is still here to copy.', 'error');
       } finally {
-        if (insertBtn) insertBtn.disabled = false;
+        this.insertionPending = false;
+        this.recomputeInsertState();
       }
       return;
     }
 
-    const target = this.getInsertionTarget();
+    const target = localTarget;
+
+    if (target && !this.isWritableField(target)) {
+      this.showNotification('This field is no longer editable. Your answer is still here to copy.', 'error');
+      this.insertionPending = false;
+      this.recomputeInsertState();
+      return;
+    }
 
     if (!target) {
       // Field is no longer in the DOM (React re-render between Generate and Insert).
-      // Copy to clipboard and tell the user explicitly so they aren't confused.
-      navigator.clipboard.writeText(answerToInsert).catch(() => {});
-      this.showNotification('Field no longer found — answer copied to clipboard instead.', 'error');
-      if (insertBtn) insertBtn.disabled = false;
+      // Copy only when the browser confirms success; otherwise leave the text
+      // visible and give the user an honest manual recovery path.
+      try {
+        if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
+        await navigator.clipboard.writeText(answerToInsert);
+        this.showNotification('Field no longer found — answer copied to clipboard instead.', 'error');
+      } catch (_) {
+        this.showNotification('Field no longer found. Select the answer above and copy it manually.', 'error');
+      } finally {
+        this.insertionPending = false;
+        this.recomputeInsertState();
+      }
       return;
     }
 
@@ -1892,6 +2005,7 @@ class DraftApplyExtension {
       }
 
       this.currentField = target;
+      this.fieldTokens.delete(session.fieldToken);
       this.hideModal();
       this.showNotification('Answer inserted!');
       globalThis.DraftApplyStats?.track?.('answersInserted')?.catch?.(() => {});
@@ -1899,7 +2013,8 @@ class DraftApplyExtension {
       console.warn('[DraftApply] Insert failed:', e);
       this.showNotification('Could not insert into that field. Try clicking the field and typing once, then Insert again.', 'error');
     } finally {
-      if (insertBtn) insertBtn.disabled = false;
+      this.insertionPending = false;
+      this.recomputeInsertState();
     }
   }
 
@@ -1915,14 +2030,12 @@ class DraftApplyExtension {
     if (!button) return;
     const status = validation?.status;
     const hasAnswer = Boolean(this.modal?.querySelector?.('#da-answer-output')?.value?.trim());
-    // The button stays a plain "Insert Answer" in every state — validation
-    // state lives in the compact badge, not in alarming button labels.
-    // Only grounded model output is actionable. A manual input event unlocks
-    // the user's edited text via the explicit authorship path above.
-    button.disabled = !hasAnswer || status !== 'pass';
-    button.textContent = 'Insert Answer';
+    // Review means the deterministic matcher could not prove ordinary prose;
+    // it is still a usable draft. Block is reserved for unsupported protected
+    // facts and remains non-actionable until the user edits or regenerates.
+    this.recomputeInsertState();
     this._renderVerifyBadge(status);
-    this.lastAnswer = status === 'pass'
+    this.lastAnswer = ['pass', 'review'].includes(status)
       ? String(this.modal?.querySelector?.('#da-answer-output')?.value || '')
       : null;
   }
@@ -1934,8 +2047,12 @@ class DraftApplyExtension {
       badge.textContent = '✓ Checked against your CV';
       badge.className = 'da-verify-badge da-verify-ok';
       badge.hidden = false;
-    } else if (status === 'review' || status === 'block') {
+    } else if (status === 'review') {
       badge.textContent = '⚠ Read this one before inserting';
+      badge.className = 'da-verify-badge da-verify-warn';
+      badge.hidden = false;
+    } else if (status === 'block') {
+      badge.textContent = '⚠ DraftApply could not verify part of this answer. Edit the answer above before inserting.';
       badge.className = 'da-verify-badge da-verify-warn';
       badge.hidden = false;
     } else {
@@ -1985,7 +2102,15 @@ class DraftApplyExtension {
       );
     }
     nextContext.contextQuality = 'user_provided';
-    this.setPageContext(nextContext);
+    this.setPageContext(nextContext, { preserveSession: true });
+    if (this.activeAnswerSession) {
+      const snapshot = Object.freeze(structuredClone(nextContext));
+      this.activeAnswerSession = Object.freeze({
+        ...this.activeAnswerSession,
+        jobContextSnapshot: snapshot,
+        contextFingerprint: this.contextCacheKey(snapshot),
+      });
+    }
     area.hidden = true;
     this.updateContextBadge();
   }
@@ -2021,8 +2146,21 @@ function initDraftApply() {
 }
 
 // Clean up on page unload
-window.addEventListener('pagehide', () => {
-  window.__draftapplyInstance?.destroy();
+window.addEventListener('pagehide', (event) => {
+  if (!event.persisted) {
+    window.__draftapplyInstance?.destroy();
+    window.__draftapplyInstance = null;
+  }
+});
+
+window.addEventListener('pageshow', (event) => {
+  if (!event.persisted) return;
+  if (!window.__draftapplyInstance) {
+    initDraftApply();
+    return;
+  }
+  window.__draftapplyInstance.clearSessionForNavigation();
+  window.__draftapplyInstance.scheduleContextRefresh('bfcache', 0);
 });
 
 // Initialize when DOM is ready

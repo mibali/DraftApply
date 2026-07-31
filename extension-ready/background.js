@@ -27,6 +27,13 @@ function currentGeneration(generation) {
   return generation === dataGeneration;
 }
 
+function textFingerprint(value) {
+  const text = String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  let hash = 5381;
+  for (let i = 0; i < text.length; i++) hash = ((hash << 5) + hash + text.charCodeAt(i)) | 0;
+  return text ? String(hash) : '';
+}
+
 function registerController(registry, id, controller) {
   registry.set(id, controller);
   return () => {
@@ -116,6 +123,8 @@ async function responseErrorMessage(response, fallback = `Error ${response?.stat
     return body.error;
   }
   if (response.status === 401 || response.status === 403) return 'Your DraftApply session expired. Please try again.';
+  if (response.status === 504) return 'DraftApply took too long to generate this answer. Please try again.';
+  if (response.status === 502 || response.status === 503) return 'DraftApply is temporarily unavailable. Please try again shortly.';
   if (response.status >= 500) return 'DraftApply could not complete this request. Please try again.';
   return fallback || 'DraftApply could not complete this request. Please try again.';
 }
@@ -244,24 +253,24 @@ async function ensureInstallToken(proxyUrl, generation = dataGeneration) {
  * On known ATS sites the manifest auto-injects; on any other page
  * we use chrome.scripting (requires 'activeTab' + 'scripting' permissions).
  */
-async function ensureContentScriptInjected(tabId) {
+async function ensureContentScriptInjected(tabId, frameId = null) {
+  const targetFrameId = frameId ?? 0;
   try {
     // Ping the content script to see if it's already there
-    const response = await chrome.tabs.sendMessage(tabId, { type: 'PING' });
-    if (response?.pong) return; // already injected in main frame
+    const response = await chrome.tabs.sendMessage(tabId, { type: 'PING' }, { frameId: targetFrameId });
+    if (response?.pong) return;
   } catch {
     // No listener → content script not present, inject it
   }
 
   try {
-    // Inject into all frames so DraftApply works inside ATS iframes
-    // (e.g. Greenhouse form embedded on a company careers page)
+    const target = frameId == null ? { tabId, allFrames: true } : { tabId, frameIds: [frameId] };
     await chrome.scripting.insertCSS({
-      target: { tabId, allFrames: true },
+      target,
       files: ['content.css']
     });
     await chrome.scripting.executeScript({
-      target: { tabId, allFrames: true },
+      target,
       files: ['stats.js', 'page-extractor.js', 'content.js']
     });
   } catch (err) {
@@ -269,17 +278,6 @@ async function ensureContentScriptInjected(tabId) {
     throw new Error('Cannot activate DraftApply on this page.');
   }
 }
-
-/**
- * Auto-inject on company career pages that embed ATS forms
- * (e.g. lattice.com/job?gh_jid=..., stripe.com/jobs/..., etc.)
- */
-const ATS_URL_PATTERNS = [
-  /[?&]gh_jid=/,           // Greenhouse embedded (e.g. lattice.com/job?gh_jid=...)
-  /\/jobs?\//i,             // Generic /job/ or /jobs/ paths on company sites
-  /\/careers?\//i,          // Generic /career/ or /careers/ paths
-  /\/apply\//i,             // Apply pages
-];
 
 function normalizeDraftMatchText(value) {
   return String(value || '')
@@ -289,18 +287,12 @@ function normalizeDraftMatchText(value) {
     .trim();
 }
 
-function urlHost(value) {
-  try {
-    return new URL(value).hostname.replace(/^www\./, '').toLowerCase();
-  } catch {
-    return '';
-  }
-}
-
-function urlWithoutHash(value) {
+function normalizedJobUrl(value) {
   try {
     const url = new URL(value);
-    url.hash = '';
+    for (const key of [...url.searchParams.keys()]) {
+      if (/^(utm_|ref$|source$)/i.test(key)) url.searchParams.delete(key);
+    }
     return url.href;
   } catch {
     return '';
@@ -313,8 +305,8 @@ function hasSameJobIdentity(draft = {}, pageContext = {}) {
   const draftCompany = normalizeDraftMatchText(draft.company);
   const pageCompany = normalizeDraftMatchText(pageContext.company);
 
-  const titleMatches = draftTitle && pageTitle && (draftTitle.includes(pageTitle) || pageTitle.includes(draftTitle));
-  const companyMatches = draftCompany && pageCompany && (draftCompany.includes(pageCompany) || pageCompany.includes(draftCompany));
+  const titleMatches = draftTitle && pageTitle && draftTitle === pageTitle;
+  const companyMatches = draftCompany && pageCompany && draftCompany === pageCompany;
 
   if (draftTitle && pageTitle && !titleMatches) return false;
   if (draftCompany && pageCompany && !companyMatches) return false;
@@ -325,31 +317,29 @@ function hasSameJobIdentity(draft = {}, pageContext = {}) {
   return Boolean(titleMatches);
 }
 
-function isFreshDraft(draft = {}, maxAgeMs = 30 * 60 * 1000) {
-  const updated = Date.parse(draft.updatedAt || '');
-  return Number.isFinite(updated) && Date.now() - updated <= maxAgeMs;
-}
-
 function isTailorDraftRelevant(draft, { pageContext = {}, url = '', tabId = null } = {}) {
   if (!draft?.jobDescription?.trim()) return false;
 
-  const pageHasIdentity = Boolean(pageContext.jobTitle || pageContext.company);
-  if (pageHasIdentity) return hasSameJobIdentity(draft, pageContext);
+  const completeIdentity = draft.jobTitle && pageContext.jobTitle && draft.company && pageContext.company;
+  if (completeIdentity) return hasSameJobIdentity(draft, pageContext);
+  const draftTitle = normalizeDraftMatchText(draft.jobTitle);
+  const pageTitle = normalizeDraftMatchText(pageContext.jobTitle);
+  const draftCompany = normalizeDraftMatchText(draft.company);
+  const pageCompany = normalizeDraftMatchText(pageContext.company);
+  if (draftTitle && pageTitle && draftTitle !== pageTitle) return false;
+  if (draftCompany && pageCompany && draftCompany !== pageCompany) return false;
 
-  const currentUrl = urlWithoutHash(url || pageContext.url);
-  const sourceUrl = urlWithoutHash(draft.sourceUrl);
+  const currentUrl = normalizedJobUrl(url || pageContext.url);
+  const sourceUrl = normalizedJobUrl(draft.sourceUrl);
   if (currentUrl && sourceUrl && currentUrl === sourceUrl) return true;
 
   // Preserve the common flow: paste JD on the source page, click through in
   // the same tab to an ATS form where title/company/JD are no longer visible.
   // Same host alone is deliberately not enough: refreshing or moving between
   // different jobs on the same ATS/company site must not inherit stale context.
-  const currentHost = urlHost(url || pageContext.url);
-  const sourceHost = urlHost(draft.sourceUrl);
-  const movedToDifferentHost = currentHost && sourceHost && currentHost !== sourceHost;
-  if (movedToDifferentHost && draft.sourceTabId != null && tabId != null && draft.sourceTabId === tabId && isFreshDraft(draft)) {
-    return true;
-  }
+  // Cross-host navigation is not identity. Redirects into an ATS may reuse a
+  // tab, but without a matching title or exact source URL attaching a saved JD
+  // risks silently answering for the previous role.
 
   // Legacy drafts did not store source metadata; only use them when identity
   // matched above, never as a blind global fallback.
@@ -380,31 +370,6 @@ async function getActiveTabSnapshot() {
     pageContext,
   };
 }
-
-chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-  if (changeInfo.status !== 'complete' || !tab.url) return;
-  // Skip if it's already a known ATS domain (content script auto-injects)
-  const knownDomains = [
-    'indeed.com', 'otta.com', 'hiringcafe.com', 'greenhouse.io',
-    'lever.co', 'workable.com', 'linkedin.com', 'ashbyhq.com',
-    'breezy.hr', 'smartrecruiters.com', 'icims.com',
-    'myworkdayjobs.com', 'taleo.net', 'jobvite.com',
-    'glassdoor.com', 'glassdoor.co.uk'
-  ];
-  try {
-    const host = new URL(tab.url).hostname;
-    if (knownDomains.some(d => host.includes(d))) return;
-  } catch { return; }
-
-  // Check if URL matches ATS embed patterns
-  if (!ATS_URL_PATTERNS.some(re => re.test(tab.url))) return;
-
-  try {
-    await ensureContentScriptInjected(tabId);
-  } catch {
-    // Not injectable (e.g. chrome:// pages) — ignore
-  }
-});
 
 chrome.runtime.onStartup.addListener(() => {
   failWorkerOwnedTailorJob().catch(() => {});
@@ -445,11 +410,11 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     
     if (!cvText) {
       // Try to inject first so the notification can be shown
-      try { await ensureContentScriptInjected(tab.id); } catch {}
+      try { await ensureContentScriptInjected(tab.id, info.frameId ?? 0); } catch {}
       chrome.tabs.sendMessage(tab.id, {
         type: 'SHOW_NOTIFICATION',
         message: 'Please load your CV first (click the extension icon)'
-      }, () => {
+      }, { frameId: info.frameId ?? 0 }, () => {
         if (chrome.runtime.lastError) {
           console.warn('sendMessage failed:', chrome.runtime.lastError.message);
         }
@@ -459,7 +424,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 
     // Ensure content script is present (injects on-demand for non-listed sites)
     try {
-      await ensureContentScriptInjected(tab.id);
+      await ensureContentScriptInjected(tab.id, info.frameId ?? 0);
     } catch (err) {
       console.warn('Cannot inject on this page:', err.message);
       return;
@@ -471,7 +436,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     chrome.tabs.sendMessage(tab.id, {
       type: 'GENERATE_ANSWER',
       question
-    }, () => {
+    }, { frameId: info.frameId ?? 0 }, () => {
       if (chrome.runtime.lastError) {
         console.warn('sendMessage failed:', chrome.runtime.lastError.message);
       }
@@ -484,29 +449,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'CALL_API') {
     handleAPICall(message.payload, message.requestId)
       .then(sendResponse)
-      .catch(error => sendResponse({ error: error.message }));
+      .catch(error => sendResponse({
+        error: error.message,
+        code: error.code,
+        status: error.status,
+      }));
     return true;
-  }
-
-  if (message.type === 'CALL_API_STREAM') {
-    const tabId = sender.tab?.id;
-    const frameId = sender.frameId ?? 0;
-    if (!tabId) {
-      sendResponse({ error: 'No tab context' });
-      return;
-    }
-    sendResponse({ started: true }); // Acknowledge immediately
-    handleStreamingAPICall(message.payload, message.requestId, tabId, frameId)
-      .catch(err => {
-        try {
-          chrome.tabs.sendMessage(tabId, {
-            type: 'STREAM_ERROR',
-            requestId: message.requestId,
-            error: err.message
-          }, { frameId });
-        } catch (e) {}
-      });
-    return true; // Keep channel open — ensures sendResponse is delivered reliably
   }
 
   if (message.type === 'CANCEL_API') {
@@ -530,8 +478,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'GET_TOKEN') {
     // Returns the cached/refreshed install token via the shared ensureInstallToken path.
     // Popup uses this for CV upload so we don't mint a fresh token on every file.
+    const generation = dataGeneration;
     getProxyUrl()
-      .then(async proxyUrl => ({ token: await ensureInstallToken(proxyUrl), proxyUrl }))
+      .then(async proxyUrl => {
+        if (message.forceRefresh) {
+          const staleToken = typeof message.staleToken === 'string' ? message.staleToken : null;
+          if (staleToken) await clearInstallTokenIfCurrent(staleToken, generation);
+        }
+        return { token: await ensureInstallToken(proxyUrl, generation), proxyUrl };
+      })
       .then(sendResponse)
       .catch(err => sendResponse({ error: err.message }));
     return true;
@@ -635,6 +590,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const stored = await chrome.storage.local.get('cvText');
         cvText = stored.cvText;
         if (!cvText) { sendResponse({ error: 'No CV loaded — please save your CV first' }); return; }
+        jobSnapshot.sourceCvFingerprint = textFingerprint(cvText);
+        jobSnapshot.jdFingerprint = textFingerprint(jobSnapshot.jobDescription);
         await mutateTailorRecord(async () => {
           if (!currentGeneration(generation)) throw new DOMException('Deleted', 'AbortError');
           await chrome.storage.local.set({ [TAILOR_JOB_KEY]: jobSnapshot });
@@ -753,66 +710,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (message.type === 'ANALYZE_CV_MATCH') {
-    (async () => {
-      const generation = dataGeneration;
-      const requestId = `analyse_${Date.now()}_${Math.random()}`;
-      const controller = new AbortController();
-      const unregister = registerController(dataRequests, requestId, controller);
-      try {
-        const { cvText } = await chrome.storage.local.get('cvText');
-        if (!cvText) { sendResponse({ error: 'No CV loaded — please save your CV first' }); return; }
-
-        const proxyUrl = await getProxyUrl();
-        let token = await ensureInstallToken(proxyUrl, generation);
-        const timeout = setTimeout(() => controller.abort(), 45000);
-        const keepAlive = setInterval(() => chrome.storage.local.get('_sw_keepalive'), 20000);
-
-        try {
-          const body = JSON.stringify({
-            cvText,
-            jobDescription: message.jobDescription,
-            jobTitle: message.jobTitle || '',
-            company: message.company || '',
-            confirmedSkills: message.confirmedSkills || [],
-          });
-
-          let response = await fetch(`${proxyUrl}/api/cv/analyze`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            signal: controller.signal,
-            body,
-          });
-
-          if (response.status === 401) {
-            await clearInstallTokenIfCurrent(token, generation);
-            token = await ensureInstallToken(proxyUrl, generation);
-            response = await fetch(`${proxyUrl}/api/cv/analyze`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-              signal: controller.signal,
-              body,
-            });
-          }
-
-          if (!response.ok) {
-            throw new Error(await responseErrorMessage(response));
-          }
-
-          const data = await response.json();
-          if (currentGeneration(generation)) sendResponse({ success: true, ...data });
-        } finally {
-          clearTimeout(timeout);
-          clearInterval(keepAlive);
-        }
-      } catch (e) {
-        if (e?.name === 'AbortError') sendResponse({ error: 'Analysis timed out — please try again' });
-        else sendResponse({ error: e.message });
-      } finally { unregister(); }
-    })();
-    return true;
-  }
-
   if (message.type === 'CHECK_PROXY') {
     checkProxy()
       .then(sendResponse)
@@ -915,7 +812,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         type: 'GENERATE_FROM_IFRAME',
         question: message.question,
         iframePageContext: message.pageContext,
-        sourceFrameId
+        sourceFrameId,
+        sessionId: message.sessionId,
+        sourceDocumentNonce: message.sourceDocumentNonce,
+        fieldToken: message.fieldToken,
+        maxChars: message.maxChars,
       }, { frameId: 0 }, () => {
         if (chrome.runtime.lastError) {
           console.warn('Relay to main frame failed:', chrome.runtime.lastError.message);
@@ -931,10 +832,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Relay: parent frame sends generated answer back to the iframe for insertion
   if (message.type === 'RELAY_INSERT_TO_IFRAME') {
     const tabId = sender.tab?.id;
-    if (tabId && message.targetFrameId != null) {
+    if (tabId && sender.frameId === 0 && message.targetFrameId != null) {
       chrome.tabs.sendMessage(tabId, {
         type: 'INSERT_FROM_PARENT',
-        answer: message.answer
+        answer: message.answer,
+        sessionId: message.sessionId,
+        sourceDocumentNonce: message.sourceDocumentNonce,
+        fieldToken: message.fieldToken,
+        maxChars: message.maxChars,
       }, { frameId: message.targetFrameId }, (response) => {
         if (chrome.runtime.lastError) {
           console.warn('Relay to iframe failed:', chrome.runtime.lastError.message);
@@ -979,140 +884,6 @@ async function checkProxy() {
 }
 
 /**
- * Streaming API call: relay SSE chunks to the content script tab.
- * Chunks are forwarded via chrome.tabs.sendMessage as STREAM_CHUNK messages.
- */
-async function handleStreamingAPICall(payload, requestId, tabId, frameId) {
-  const generation = dataGeneration;
-  const proxyUrl = await getProxyUrl();
-  const controller = new AbortController();
-  const effectiveRequestId = requestId || `req_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-  const unregister = registerController(answerRequests, effectiveRequestId, controller);
-
-  const timeout = setTimeout(() => controller.abort(), 120000);
-
-  // MV3 service workers can be terminated after ~30s of inactivity.
-  // Touching chrome.storage every 20s keeps the SW alive during long streams.
-  const keepAlive = setInterval(() => chrome.storage.local.get('_sw_keepalive'), 20000);
-
-  const enrichedPayload = { ...payload, stream: true };
-  const idempotencyKey = `answer:${effectiveRequestId}`;
-
-  try {
-    let token = await ensureInstallToken(proxyUrl, generation);
-
-    const doRequest = () => fetch(`${proxyUrl}/api/generate`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-        'Idempotency-Key': idempotencyKey
-      },
-      signal: controller.signal,
-      body: JSON.stringify(enrichedPayload)
-    });
-
-    let response = await doRequest();
-
-    if (response.status === 401) {
-      await clearInstallTokenIfCurrent(token, generation);
-      token = await ensureInstallToken(proxyUrl, generation);
-      response = await doRequest();
-    }
-
-    if (!response.ok) {
-      throw new Error(await responseErrorMessage(response, `Proxy error: ${response.status}`));
-    }
-
-    const provider = response.headers.get('X-DraftApply-Provider');
-    const model = response.headers.get('X-DraftApply-Model');
-    const fallbackFrom = response.headers.get('X-DraftApply-Fallback-From');
-    const workflow = response.headers.get('X-DraftApply-Workflow');
-    const agentChain = response.headers.get('X-DraftApply-Agent-Chain');
-    if (provider || fallbackFrom) {
-      chrome.tabs.sendMessage(tabId, {
-        type: 'STREAM_META',
-        requestId: effectiveRequestId,
-        provider,
-        model,
-        fallbackFrom,
-        workflow,
-        agentChain
-      }, { frameId }).catch(() => {});
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let receivedFinal = false;
-    let receivedError = false;
-    const consumeEvent = (event) => {
-      const data = event.split(/\r?\n/)
-        .filter(line => line.startsWith('data:'))
-        .map(line => line.slice(5).trimStart()).join('\n').trim();
-      if (!data || data === '[DONE]') return;
-      try {
-        const json = JSON.parse(data);
-        if (json.draftapplyMeta) {
-          chrome.tabs.sendMessage(tabId, { type: 'STREAM_META', requestId: effectiveRequestId, ...json.draftapplyMeta }, { frameId }).catch(() => {});
-          return;
-        }
-        if (json.draftapplyFinal) {
-          receivedFinal = true;
-          chrome.tabs.sendMessage(tabId, { type: 'STREAM_FINAL', requestId: effectiveRequestId, ...json.draftapplyFinal }, { frameId }).catch(() => {});
-          return;
-        }
-        if (json.draftapplyError) {
-          receivedError = true;
-          chrome.tabs.sendMessage(tabId, {
-            type: 'STREAM_ERROR', requestId: effectiveRequestId,
-            error: json.draftapplyError.error || 'Answer generation failed.',
-            code: json.draftapplyError.code,
-          }, { frameId }).catch(() => {});
-        }
-        // Provider deltas are deliberately ignored: only the validated final
-        // event is usable application-answer output.
-      } catch (_) { /* malformed or incomplete provider event */ }
-    };
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      chrome.tabs.sendMessage(tabId, {
-        type: 'STREAM_PROGRESS', requestId: effectiveRequestId,
-      }, { frameId }).catch(() => {});
-      const events = buffer.split(/\r?\n\r?\n/);
-      buffer = events.pop() || '';
-      events.forEach(consumeEvent);
-    }
-    buffer += decoder.decode(); // flush a split UTF-8 sequence
-    if (buffer.trim()) consumeEvent(buffer); // final unterminated event
-
-    if (!receivedFinal && !receivedError) chrome.tabs.sendMessage(tabId, {
-      type: 'STREAM_ERROR', requestId: effectiveRequestId,
-      error: 'The connection ended before the answer was verified. Please generate again.',
-      code: 'incomplete_response',
-    }, { frameId }).catch(() => {});
-
-    chrome.tabs.sendMessage(tabId, { type: 'STREAM_DONE', requestId: effectiveRequestId }, { frameId }).catch(() => {});
-
-  } catch (e) {
-    if (e?.name === 'AbortError') {
-      // Cancelled — notify so the promise bridge resolves cleanly
-      chrome.tabs.sendMessage(tabId, { type: 'STREAM_DONE', requestId: effectiveRequestId }, { frameId }).catch(() => {});
-      return;
-    }
-    throw e;
-  } finally {
-    clearInterval(keepAlive);
-    clearTimeout(timeout);
-    unregister();
-  }
-}
-
-/**
  * Make API call to proxy for answer generation.
  * If the user has configured a custom LLM provider in chrome.storage,
  * it is forwarded to the proxy as `llmConfig` so the proxy uses it
@@ -1125,8 +896,18 @@ async function handleAPICall(payload, requestId) {
   const effectiveRequestId = requestId || `req_${Date.now()}_${Math.random().toString(16).slice(2)}`;
   const unregister = registerController(answerRequests, effectiveRequestId, controller);
 
-  // Hard timeout so the UI never spins forever
-  const timeout = setTimeout(() => controller.abort(), 120000);
+  // Hard timeout so the UI never spins forever. Track whether this controller
+  // was aborted by the timer or by the user's Stop action so the UI can offer
+  // the correct recovery instead of calling both cases "Cancelled".
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, 120000);
+  // Chrome may stop an MV3 worker during a long fetch. Calling a trivial
+  // extension API every 20 seconds is Chrome's documented way to keep the
+  // worker alive only until this user-initiated operation settles.
+  const keepAlive = setInterval(() => chrome.storage.local.get('_sw_keepalive'), 20000);
 
   const enrichedPayload = payload;
   const idempotencyKey = `answer:${effectiveRequestId}`;
@@ -1156,16 +937,43 @@ async function handleAPICall(payload, requestId) {
     }
 
     if (!response.ok) {
-      throw new Error(await responseErrorMessage(response, `Proxy error: ${response.status}`));
+      const body = await response.clone().json().catch(() => ({}));
+      const error = new Error(await responseErrorMessage(response, `Proxy error: ${response.status}`));
+      error.code = body?.code || `http_${response.status}`;
+      error.status = response.status;
+      throw error;
     }
 
-    return await response.json();
+    let result;
+    try {
+      result = await response.json();
+    } catch (_) {
+      const error = new Error('DraftApply received an invalid response. Please try again.');
+      error.code = 'invalid_response';
+      throw error;
+    }
+    if (!result || typeof result !== 'object' || Array.isArray(result)) {
+      const error = new Error('DraftApply received an invalid response. Please try again.');
+      error.code = 'invalid_response';
+      throw error;
+    }
+    return result;
   } catch (e) {
     if (e?.name === 'AbortError') {
-      throw new Error('Cancelled');
+      const error = new Error(timedOut
+        ? 'DraftApply took too long to generate this answer. Please try again.'
+        : 'Cancelled');
+      error.code = timedOut ? 'request_timeout' : 'cancelled';
+      throw error;
+    }
+    if (e instanceof TypeError && /fetch|network|load failed/i.test(e.message)) {
+      const error = new Error('Could not reach DraftApply. Check your connection and try again.');
+      error.code = 'network_error';
+      throw error;
     }
     throw e;
   } finally {
+    clearInterval(keepAlive);
     clearTimeout(timeout);
     unregister();
   }

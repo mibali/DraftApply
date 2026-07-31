@@ -601,6 +601,19 @@
   outline-offset: 2px;
 }
 
+.da-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  transform: none;
+  box-shadow: none;
+}
+
+.da-btn:disabled:hover {
+  opacity: 0.55;
+  transform: none;
+  box-shadow: none;
+}
+
 .da-length-pill:focus-visible,
 .da-tone-pill:focus-visible {
   outline: 2px solid #2563eb;
@@ -647,6 +660,14 @@
 .da-btn-insert:active {
   transform: translateY(0);
   box-shadow: none;
+}
+
+.da-btn-insert:disabled,
+.da-btn-insert:disabled:hover {
+  background: #e2e8f0;
+  color: #64748b;
+  border: 1.5px solid #cbd5e1;
+  opacity: 1;
 }
 
 .da-btn-stop {
@@ -746,7 +767,9 @@
   border-radius: 8px;
   font-size: 14px;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  z-index: 1000000;
+  /* The modal uses the maximum z-index. Notifications are appended after it,
+     so matching that level keeps feedback above the modal backdrop. */
+  z-index: 2147483647;
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.22);
   animation: da-slide-in 0.3s ease-out;
 }

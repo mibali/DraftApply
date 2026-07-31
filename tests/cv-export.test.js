@@ -16,6 +16,8 @@ function loadFormatter() {
     },
     document: { getElementById() { return { ...fakeEl, addEventListener() {} }; } },
     window: { print() {}, close() {} },
+    location: { search: '' },
+    URLSearchParams,
     URL,
     console,
   };
@@ -34,10 +36,12 @@ function loadStructuredFormatter() {
     },
     document: { getElementById() { return { ...fakeEl, addEventListener() {} }; } },
     window: { print() {}, close() {} },
+    location: { search: '' },
+    URLSearchParams,
     URL,
     console,
   };
-  vm.runInNewContext(`${code}\nglobalThis.__formatStructuredCvToHtml = formatStructuredCvToHtml;`, sandbox);
+  vm.runInNewContext(`${code}\nglobalThis.__formatStructuredCvToHtml = formatStructuredCvToHtml;\nglobalThis.__formatReviewedTextToHtml = formatReviewedTextToHtml;`, sandbox);
   return sandbox.__formatStructuredCvToHtml;
 }
 
@@ -61,21 +65,35 @@ function loadExportHelpers() {
       getElementById() { return fakeEl; },
     },
     window: { print() {}, close() {} },
+    location: { search: '' },
+    URLSearchParams,
     Blob,
     URL,
     console,
   };
 
   vm.runInNewContext(`${code}
-globalThis.__buildWordDocument = buildWordDocument;
 globalThis.__safeDownloadName = safeDownloadName;`, sandbox);
   return {
-    buildWordDocument: sandbox.__buildWordDocument,
     safeDownloadName: sandbox.__safeDownloadName,
   };
 }
 
 describe('cv-export formatter', () => {
+  it('does not start export-page initialization when URLSearchParams is unavailable', () => {
+    const code = fs.readFileSync(new URL('../extension-ready/cv-export.js', import.meta.url), 'utf8');
+    let storageReads = 0;
+    const sandbox = {
+      chrome: { storage: { local: { async get() { storageReads++; return {}; } } } },
+      document: { getElementById() { return { addEventListener() {} }; } },
+      location: { search: '?documentId=x&revision=1' },
+      window: {}, URL, console,
+    };
+
+    expect(() => vm.runInNewContext(code, sandbox)).not.toThrow();
+    expect(storageReads).toBe(0);
+  });
+
   it('turns a LinkedIn label into a link and suppresses the duplicate raw URL', () => {
     const formatCvToHtml = loadFormatter();
     const html = formatCvToHtml(`Michael T Bali
@@ -621,16 +639,9 @@ Certified Kubernetes Administrator (CKA)`);
     expect(html).not.toContain('cv-company">EDUCATION');
   });
 
-  it('builds an editable Word-compatible document from the rendered CV HTML', () => {
-    const { buildWordDocument, safeDownloadName } = loadExportHelpers();
-    const doc = buildWordDocument('<h1 class="cv-name">Jane Doe</h1><p class="cv-body">Cloud engineer</p>', 'Jane Doe CV');
-
-    expect(doc).toMatch(/xmlns:w="urn:schemas-microsoft-com:office:word"/);
-    expect(doc).toContain('<w:WordDocument>');
-    expect(doc).toContain('.cv-name');
-    expect(doc).toContain('Jane Doe');
-    expect(doc).toContain('Cloud engineer');
-    expect(safeDownloadName('Jane / Doe: CV')).toBe('Jane Doe CV.doc');
+  it('uses the real OOXML filename extension', () => {
+    const { safeDownloadName } = loadExportHelpers();
+    expect(safeDownloadName('Jane / Doe: CV')).toBe('Jane Doe CV.docx');
   });
 });
 

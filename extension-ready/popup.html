@@ -540,32 +540,41 @@
     }
 
     .match-report-header {
-      display: flex;
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
       align-items: center;
-      justify-content: space-between;
-      margin-bottom: 11px;
+      gap: 7px;
+      cursor: pointer;
+      list-style: none;
+    }
+
+    .match-report-header::-webkit-details-marker { display: none; }
+    .match-report-header::before { content: '›'; color: #64748b; font-size: 16px; line-height: 1; }
+    .match-report[open] .match-report-header::before { transform: rotate(90deg); }
+
+    .match-report-explanation {
+      margin: 9px 0 11px;
+      color: #64748b;
+      font-size: 11px;
+      line-height: 1.45;
     }
 
     .match-report-title {
       font-size: 11px;
       font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.7px;
-      color: #8493aa;
+      color: #475569;
     }
 
-    .match-score-badge {
-      font-size: 18px;
+    .match-report-action {
+      color: #64748b;
+      font-size: 10px;
+      font-weight: 600;
+    }
+
+    .match-score {
+      color: #334155;
       font-weight: 700;
-      color: #2563eb;
-      padding: 3px 8px;
-      border-radius: 8px;
-      background: #eff6ff;
     }
-
-    .match-score-badge.score-high  { color: #166534; background: #f0fdf4; }
-    .match-score-badge.score-mid   { color: #92400e; background: #fffbeb; }
-    .match-score-badge.score-low   { color: #64748b; background: #f8fafc; }
 
     .match-group { margin-top: 8px; }
 
@@ -1031,7 +1040,7 @@
     <div id="cv-input-section">
       <div class="da-section-label">Your CV</div>
       <div class="upload-area" id="upload-area">
-        <input type="file" id="cv-file" accept=".pdf,.doc,.docx,.txt" hidden>
+        <input type="file" id="cv-file" accept=".pdf,.docx,.txt" hidden>
         <div class="upload-icon-wrap">
           <svg width="18" height="18" viewBox="0 0 20 20" fill="none">
             <path d="M10 13V3M10 3L7 6M10 3L13 6" stroke="#64748b" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
@@ -1187,9 +1196,7 @@
         <input id="tailor-company"   type="text" class="tailor-input" placeholder="Company (optional)">
       </div>
 
-      <button class="btn btn-primary" id="tailor-analyze-btn">Analyze JD</button>
-      <button class="btn-reanalyze" id="tailor-reanalyze-btn">Re-analyze with updated JD</button>
-      <button class="btn btn-primary" id="tailor-generate-btn" hidden>Generate Tailored CV</button>
+      <button class="btn btn-primary" id="tailor-generate-btn">Generate Tailored CV</button>
 
       <!-- Loading -->
       <div id="tailor-loading" hidden>
@@ -1203,11 +1210,12 @@
       <!-- Results -->
       <div id="tailor-results" hidden>
 
-        <div class="match-report">
-          <div class="match-report-header">
-            <span class="match-report-title">Match report</span>
-            <span class="match-score-badge" id="match-score">–</span>
-          </div>
+        <details class="match-report">
+          <summary class="match-report-header">
+            <span class="match-report-title">How your original CV informed this version</span>
+            <span class="match-report-action">View evidence</span>
+          </summary>
+          <p class="match-report-explanation"><span class="match-score" id="match-score">Original CV evidence unavailable.</span> This is not a score for the tailored CV. DraftApply uses this evidence while tailoring and does not invent missing experience.</p>
           <div class="match-group" id="match-strong" hidden>
             <div class="match-group-label match-label-green">Matched from your CV</div>
             <div class="match-chips" id="match-strong-chips"></div>
@@ -1230,7 +1238,7 @@
             <div class="missing-skill-help">Tools widely used in this type of role that aren't in your CV or the JD. Tick any you genuinely have.</div>
             <div class="match-chips" id="match-domain-chips"></div>
           </div>
-        </div>
+        </details>
 
         <div id="tailor-agent-insights" class="agent-insights" hidden></div>
 
@@ -1260,6 +1268,7 @@
   </div><!-- /tailor-view -->
 
   <script src="stats.js"></script>
+  <script src="tailored-document.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

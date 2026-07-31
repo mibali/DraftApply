@@ -48,12 +48,12 @@ Then retry `npm run test:unit`.
 
 ## Extension Smoke Test
 
-1. Open `chrome://extensions`.
-2. Enable Developer mode.
-3. Load `extension-ready/` as an unpacked extension.
+1. Run `npm install && npm run build:extension`.
+2. Open `chrome://extensions` and enable Developer mode.
+3. Load `dist/extension/` as an unpacked extension.
 4. Save a CV in the popup.
 5. Test one application-answer flow on any form field.
-6. Test Tailor CV by pasting a JD, analyzing it, and generating a CV.
+6. Test Tailor CV by pasting a JD, generating a CV, reviewing it, and downloading DOCX.
 
 Before release, confirm:
 

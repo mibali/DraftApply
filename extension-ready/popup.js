@@ -61,8 +61,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     tailorJd:              document.getElementById('tailor-jd'),
     tailorJobTitle:        document.getElementById('tailor-job-title'),
     tailorCompany:         document.getElementById('tailor-company'),
-    tailorAnalyzeBtn:      document.getElementById('tailor-analyze-btn'),
-    tailorReanalyzeBtn:    document.getElementById('tailor-reanalyze-btn'),
     tailorGenerateBtn:     document.getElementById('tailor-generate-btn'),
     tailorLoading:         document.getElementById('tailor-loading'),
     tailorLoadingText:     document.getElementById('tailor-loading-text'),
@@ -96,9 +94,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   let proxyUrl = null;
 
-  // Stale-response guard: incremented on every new analyze call.
-  // If the value changes while a request is in flight, the response is discarded.
-  let analyzeToken = 0;
   let tailorToken = 0;
   let savingDraftTimer = null;
   let tailorJobPollTimer = null;
@@ -112,6 +107,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   let blockedTailorText = null;
   let popupDataGeneration = 0;
   let uploadController = null;
+  let uploadGeneration = 0;
+  let currentCvFingerprint = '';
+  let activeTailoredDocument = null;
+  let reviewedTextDesired = null;
+  let reviewedTextSavePromise = Promise.resolve(null);
 
   // ── Event listeners ──────────────────────────────────────────────────────
 
@@ -124,8 +124,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   elements.tailorOpenBtn.addEventListener('click', openTailorView);
   elements.tailorBackBtn.addEventListener('click', closeTailorView);
-  elements.tailorAnalyzeBtn.addEventListener('click', runAnalyzeCV);
-  elements.tailorReanalyzeBtn.addEventListener('click', runAnalyzeCV);
   elements.tailorGenerateBtn.addEventListener('click', runTailorCV);
   elements.tailorRedoBtn.addEventListener('click', runTailorCV);
   elements.tailorCopyBtn.addEventListener('click', copyTailoredCV);
@@ -134,17 +132,24 @@ document.addEventListener('DOMContentLoaded', async () => {
   elements.statsResetBtn.addEventListener('click', resetStatsWithConfirm);
   elements.deleteDataBtn.addEventListener('click', deleteAllUserData);
   elements.tailorOutput.addEventListener('input', () => {
-    if (blockedTailorText === null) return;
-    tailorAccuracyBlocked = elements.tailorOutput.value === blockedTailorText;
-    elements.tailorCopyBtn.disabled = tailorAccuracyBlocked;
-    elements.tailorPdfBtn.disabled = tailorAccuracyBlocked;
-    if (!tailorAccuracyBlocked) showTailorMessage('Your edit is now treated as your own CV text. Check it before exporting.');
+    if (blockedTailorText !== null) {
+      tailorAccuracyBlocked = elements.tailorOutput.value === blockedTailorText;
+      elements.tailorCopyBtn.disabled = tailorAccuracyBlocked;
+      elements.tailorPdfBtn.disabled = tailorAccuracyBlocked;
+      if (!tailorAccuracyBlocked) showTailorMessage('Your edit is now treated as your own CV text. Check it before exporting.');
+    }
+    scheduleReviewedTextSave();
   });
+  elements.tailorOutput.addEventListener('blur', () => flushReviewedTextSave().catch(() => {}));
 
   // Reset analysis when JD inputs change
   elements.tailorJd.addEventListener('input', handleTailorDraftInput);
   elements.tailorJobTitle.addEventListener('input', handleTailorDraftInput);
   elements.tailorCompany.addEventListener('input', handleTailorDraftInput);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) flushReviewedTextSave().catch(() => {});
+  });
+  window.addEventListener('pagehide', () => flushReviewedTextSave().catch(() => {}));
 
   // File upload handling
   elements.uploadArea.addEventListener('click', () => elements.cvFile.click());
@@ -179,7 +184,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   async function deleteAllUserData() {
     if (!confirm('Delete all DraftApply data on this browser? This cannot be undone.')) return;
     popupDataGeneration++;
-    analyzeToken++;
     tailorToken++;
     uploadController?.abort();
     uploadController = null;
@@ -194,6 +198,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     pendingCvLinkAnnotations = [];
     activeTabSnapshot = null;
+    activeTailoredDocument = null;
+    reviewedTextDesired = null;
+    reviewedTextSavePromise = Promise.resolve(null);
     tailorAccuracyBlocked = false;
     blockedTailorText = null;
     elements.cvText.value = '';
@@ -223,6 +230,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const generation = popupDataGeneration;
     const response = await chrome.runtime.sendMessage({ type: 'GET_CV' });
     if (generation !== popupDataGeneration) return;
+    currentCvFingerprint = textFingerprint(response.cvText);
     if (response.cvText) showCVLoaded(response.cvText);
     try {
       const { userProfileLinks, applicationFacts } = await chrome.storage.local.get(['userProfileLinks', 'applicationFacts']);
@@ -309,31 +317,38 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   async function processFile(file) {
     const generation = popupDataGeneration;
+    const myUploadGeneration = ++uploadGeneration;
+    if (/\.doc$/i.test(file.name) || file.type === 'application/msword') {
+      showMessage('Legacy .doc files are not supported. Re-save as .docx or PDF, or paste your CV text.', 'error');
+      return;
+    }
     const validTypes = [
       'application/pdf',
-      'application/msword',
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       'text/plain',
     ];
 
-    if (!validTypes.includes(file.type) && !file.name.match(/\.(pdf|docx?|txt)$/i)) {
+    if (!validTypes.includes(file.type) && !file.name.match(/\.(pdf|docx|txt)$/i)) {
       showMessage('Please upload a PDF, DOCX, or TXT file', 'error');
       return;
     }
 
     elements.uploadArea.classList.add('has-file');
     elements.uploadArea.querySelector('.upload-text').textContent = file.name;
-    elements.uploadArea.querySelector('.upload-hint').textContent = 'Extracting text…';
+    elements.uploadArea.querySelector('.upload-hint').textContent = file.type === 'application/pdf' || /\.pdf$/i.test(file.name)
+      ? 'Extracting text… scanned PDFs may take longer'
+      : 'Extracting text…';
 
     try {
       const extracted = await extractTextFromFile(file);
-      if (generation !== popupDataGeneration) return;
+      if (generation !== popupDataGeneration || myUploadGeneration !== uploadGeneration) return;
       const text = typeof extracted === 'string' ? extracted : extracted?.text || '';
       pendingCvLinkAnnotations = Array.isArray(extracted?.linkAnnotations) ? extracted.linkAnnotations : [];
       elements.cvText.value = text;
       elements.uploadArea.querySelector('.upload-hint').textContent = 'Text extracted — click Save CV';
       showMessage('File loaded. Review and click Save CV.');
     } catch (err) {
+      if (generation !== popupDataGeneration || myUploadGeneration !== uploadGeneration) return;
       elements.uploadArea.classList.remove('has-file');
       elements.uploadArea.querySelector('.upload-text').innerHTML = 'Drop file or <span class="upload-link">browse</span>';
       elements.uploadArea.querySelector('.upload-hint').textContent = 'PDF, DOCX, or TXT';
@@ -357,22 +372,30 @@ document.addEventListener('DOMContentLoaded', async () => {
     const controller = new AbortController();
     uploadController?.abort();
     uploadController = controller;
-    const timer = setTimeout(() => controller.abort(), 30000);
+    const timer = setTimeout(() => controller.abort(), 60000);
 
     try {
-      const formData = new FormData();
-      formData.append('cv', file);
-
       const tokenResult = await chrome.runtime.sendMessage({ type: 'GET_TOKEN' });
-      const token = tokenResult?.token;
+      let token = tokenResult?.token;
       if (!token) throw new Error(tokenResult?.error || 'Could not get proxy token');
 
-      const response = await fetch(`${proxyUrl}/api/cv/upload`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: formData,
-        signal: controller.signal,
-      });
+      const upload = () => {
+        // Multipart bodies are one-shot in some fetch implementations. Always
+        // rebuild the body for an authentication retry.
+        const formData = new FormData();
+        formData.append('cv', file);
+        return fetch(`${proxyUrl}/api/cv/upload`, {
+          method: 'POST', headers: { Authorization: `Bearer ${token}` },
+          body: formData, signal: controller.signal,
+        });
+      };
+      let response = await upload();
+      if (response.status === 401) {
+        const refreshed = await chrome.runtime.sendMessage({ type: 'GET_TOKEN', forceRefresh: true, staleToken: token });
+        token = refreshed?.token;
+        if (!token) throw new Error(refreshed?.error || 'Could not refresh proxy token');
+        response = await upload();
+      }
 
       if (!response.ok) {
         const err = await response.json().catch(() => ({}));
@@ -386,7 +409,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       };
     } catch (e) {
       if (e?.name === 'AbortError') {
-        throw new Error('Timed out — the service may be starting up. Please try again in a few seconds.');
+        throw new Error('Timed out while reading the file. For a scan, try fewer pages or a text-based PDF/DOCX; otherwise try again.');
       }
       throw e;
     } finally {
@@ -446,7 +469,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (!saved?.success) return;
       if (generation !== popupDataGeneration) return;
       pendingCvLinkAnnotations = linkAnnotations;
-      if (cvChanged) await resetTailorStateForCvChange();
+      currentCvFingerprint = textFingerprint(text);
+      if (cvChanged) await resetTailorStateForCvChange({ invalidateDocument: true });
       showCVLoaded(text);
       showMessage(cvChanged ? 'CV saved. Re-analyze any saved JD before generating a new tailored CV.' : 'CV saved successfully');
     } finally {
@@ -455,12 +479,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  async function resetTailorStateForCvChange() {
-    analyzeToken++;
+  async function resetTailorStateForCvChange({ invalidateDocument = false } = {}) {
     tailorToken++;
     stopTailorJobPolling();
     stopTailorLoadingHint();
     await chrome.runtime.sendMessage({ type: 'CANCEL_TAILOR_JOB' }).catch(() => {});
+    if (invalidateDocument) await TailoredDocumentStore.clearActive().catch(() => {});
+    activeTailoredDocument = null;
+    reviewedTextDesired = null;
+    reviewedTextSavePromise = Promise.resolve(null);
+    lastStructuredCv = null;
+    lastStructuredText = '';
+    tailorAccuracyBlocked = false;
+    blockedTailorText = null;
     elements.tailorOutput.value = '';
     elements.tailorOutputWrap.hidden = true;
     elements.tailorActionRow.hidden = true;
@@ -470,10 +501,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       elements.tailorAgentInsights.textContent = '';
     }
     elements.tailorResults.hidden = true;
-    elements.tailorAnalyzeBtn.hidden = false;
-    elements.tailorAnalyzeBtn.disabled = false;
-    elements.tailorAnalyzeBtn.textContent = 'Analyze JD';
-    elements.tailorReanalyzeBtn.style.display = 'none';
     elements.tailorGenerateBtn.hidden = true;
     elements.tailorGenerateBtn.disabled = false;
     elements.tailorGenerateBtn.textContent = 'Generate Tailored CV';
@@ -559,7 +586,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   // ── Tailor CV flow ────────────────────────────────────────────────────────
 
   async function openTailorView() {
-    analyzeToken++; // discard any in-flight response from a previous session
     stopTailorJobPolling();
     stopTailorLoadingHint();
     elements.mainView.hidden = true;
@@ -567,11 +593,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.tailorResults.hidden = true;
     elements.tailorLoading.hidden = true;
     elements.tailorMessage.hidden = true;
-    elements.tailorAnalyzeBtn.hidden = false;
-    elements.tailorAnalyzeBtn.disabled = false;
-    elements.tailorAnalyzeBtn.textContent = 'Analyze JD';
-    elements.tailorReanalyzeBtn.style.display = 'none';
-    elements.tailorGenerateBtn.hidden = true;
+    elements.tailorGenerateBtn.hidden = false;
     elements.tailorGenerateBtn.disabled = false;
     elements.tailorGenerateBtn.textContent = 'Generate Tailored CV';
     setStep('paste');
@@ -579,6 +601,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function closeTailorView() {
+    flushReviewedTextSave().catch(() => {});
     stopTailorJobPolling();
     stopTailorLoadingHint();
     elements.tailorView.hidden = true;
@@ -590,15 +613,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   async function restoreTailorDraft(options = {}) {
     const generation = popupDataGeneration;
     try {
-      const [draftResult, jobResult] = await Promise.all([
+      const [draftResult, jobResult, cvResult] = await Promise.all([
         chrome.runtime.sendMessage({ type: 'GET_TAILOR_DRAFT_FOR_ACTIVE_PAGE' }).catch(() => null),
         chrome.runtime.sendMessage({ type: 'GET_TAILOR_JOB_FOR_ACTIVE_PAGE' }).catch(() => null),
+        chrome.runtime.sendMessage({ type: 'GET_CV' }).catch(() => null),
       ]);
       if (generation !== popupDataGeneration) return;
       const draft = draftResult?.draft;
       if (draftResult?.snapshot) activeTabSnapshot = draftResult.snapshot;
       if (jobResult?.snapshot) activeTabSnapshot = jobResult.snapshot;
       const job = jobResult?.job;
+      currentCvFingerprint = textFingerprint(cvResult?.cvText);
 
       if (draft) {
         elements.tailorJd.value = draft.jobDescription || '';
@@ -606,7 +631,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         elements.tailorCompany.value = draft.company || '';
       }
 
-      if (options.restoreJob && job) {
+      const document = await TailoredDocumentStore.loadActive();
+      if (generation !== popupDataGeneration) return;
+      const relevantDocument = document && tailoredDocumentMatchesPage(document, draft, activeTabSnapshot);
+      activeTailoredDocument = relevantDocument ? document : null;
+      if (options.restoreJob && relevantDocument) {
+        restoreTailoredDocument(document);
+        showTailorMessage('Restored your reviewed tailored CV.');
+      } else if (options.restoreJob && job) {
         restoreTailorJob(job);
       }
     } catch (e) {
@@ -614,7 +646,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  function restoreTailorJob(job, { inline = false } = {}) {
+  async function restoreTailorJob(job, { inline = false } = {}) {
     if (!job || !['running', 'done', 'error'].includes(job.status)) return;
 
     const startedAt = Date.parse(job.startedAt || '');
@@ -632,14 +664,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
 
-    elements.tailorJd.value = job.jobDescription || elements.tailorJd.value;
-    elements.tailorJobTitle.value = job.jobTitle || elements.tailorJobTitle.value;
-    elements.tailorCompany.value = job.company || elements.tailorCompany.value;
-
     if (job.status === 'running') {
+      elements.tailorJd.value = job.jobDescription || elements.tailorJd.value;
+      elements.tailorJobTitle.value = job.jobTitle || elements.tailorJobTitle.value;
+      elements.tailorCompany.value = job.company || elements.tailorCompany.value;
       startTailorLoadingHint(job.startedAt);
-      elements.tailorAnalyzeBtn.hidden = true;
-      elements.tailorReanalyzeBtn.style.display = 'none';
       elements.tailorGenerateBtn.hidden = false;
       elements.tailorGenerateBtn.disabled = true;
       elements.tailorGenerateBtn.textContent = 'Generating…';
@@ -662,7 +691,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.tailorRedoBtn.disabled = false;
 
     if (job.status === 'done' && job.result) {
-      displayTailorResults(job.result);
+      if (!tailorJobMatchesCurrent(job)) {
+        elements.tailorGenerateBtn.hidden = false;
+        setStep('paste');
+        return;
+      }
+      const completionToken = tailorToken;
+      await displayTailorResults(job.result, { sourceJob: job, expectedTailorToken: completionToken });
+      if (completionToken !== tailorToken) return;
       if (inline) {
         saveTailorDraft();
         window.DraftApplyStats?.track?.('cvsTailored').catch?.(() => {});
@@ -680,11 +716,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   function startTailorJobPolling(jobId, inline = false) {
     stopTailorJobPolling();
     const generation = popupDataGeneration;
+    const reviewToken = tailorToken;
     tailorJobPollStartedAt = Date.now();
     tailorJobPollTimer = setInterval(async () => {
       try {
         const stored = await chrome.storage.local.get(TAILOR_JOB_KEY);
-        if (generation !== popupDataGeneration) return;
+        if (generation !== popupDataGeneration || reviewToken !== tailorToken) return;
         const job = stored?.[TAILOR_JOB_KEY];
         const startedAt = Date.parse(job?.startedAt || '');
         const jobAgeMs = Number.isFinite(startedAt) ? Date.now() - startedAt : Date.now() - tailorJobPollStartedAt;
@@ -703,6 +740,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
         if (!job || (jobId && job.id !== jobId)) return;
         if (job.status === 'done' || job.status === 'error') {
+          if (reviewToken !== tailorToken) return;
           restoreTailorJob(job, { inline });
         }
       } catch (e) {
@@ -797,16 +835,39 @@ document.addEventListener('DOMContentLoaded', async () => {
     };
   }
 
-  function resetTailorReview() {
-    // Invalidate any in-flight analyze/tailor responses
-    analyzeToken++;
-    tailorToken++;
+  function tailorJdFingerprint(value) {
+    return textFingerprint(value);
+  }
 
-    elements.tailorAnalyzeBtn.hidden = false;
-    elements.tailorAnalyzeBtn.disabled = false;
-    elements.tailorAnalyzeBtn.textContent = 'Analyze JD';
-    elements.tailorReanalyzeBtn.style.display = 'none';
-    elements.tailorGenerateBtn.hidden = true;
+  function textFingerprint(value) {
+    const text = String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    let hash = 5381;
+    for (let i = 0; i < text.length; i++) hash = ((hash << 5) + hash + text.charCodeAt(i)) | 0;
+    return text ? String(hash) : '';
+  }
+
+  function tailoredDocumentMatchesPage(document, draft, snapshot) {
+    const source = document?.metadata?.source;
+    if (!source) return false;
+    const normalize = value => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    if (!source.jdFingerprint || source.jdFingerprint !== tailorJdFingerprint(draft?.jobDescription)) return false;
+    if (!source.cvFingerprint || source.cvFingerprint !== currentCvFingerprint) return false;
+    const currentUrl = draft?.sourceUrl || snapshot?.url || '';
+    if (source.sourceUrl && currentUrl && source.sourceUrl !== currentUrl) return false;
+    const currentTitle = draft?.jobTitle || snapshot?.pageContext?.jobTitle || '';
+    const currentCompany = draft?.company || snapshot?.pageContext?.company || '';
+    if (source.jobTitle && currentTitle && normalize(source.jobTitle) !== normalize(currentTitle)) return false;
+    if (source.company && currentCompany && normalize(source.company) !== normalize(currentCompany)) return false;
+    return Boolean(source.sourceUrl && currentUrl && source.sourceUrl === currentUrl)
+      || Boolean(source.jobTitle && currentTitle && normalize(source.jobTitle) === normalize(currentTitle));
+  }
+
+  function resetTailorReview() {
+    // Invalidate any in-flight tailor response.
+    tailorToken++;
+    stopTailorJobPolling();
+
+    elements.tailorGenerateBtn.hidden = false;
     elements.tailorGenerateBtn.disabled = false;
     elements.tailorGenerateBtn.textContent = 'Generate Tailored CV';
     elements.tailorResults.hidden = true;
@@ -816,88 +877,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.tailorOutput.value = '';
     chrome.runtime.sendMessage({ type: 'CANCEL_TAILOR_JOB' }).catch(() => {});
     setStep('paste');
-  }
-
-  async function runAnalyzeCV() {
-    const rawJd = elements.tailorJd.value.trim();
-    if (rawJd.length < 50) {
-      showTailorMessage('Please paste a job description (at least a few lines)', 'error');
-      return;
-    }
-
-    // Stamp this request so stale responses can be detected
-    analyzeToken++;
-    const myToken = analyzeToken;
-
-    elements.tailorAnalyzeBtn.disabled = true;
-    elements.tailorAnalyzeBtn.textContent = 'Analyzing…';
-    elements.tailorReanalyzeBtn.disabled = true;
-    elements.tailorReanalyzeBtn.style.display = 'none';
-    elements.tailorLoading.hidden = false;
-    elements.tailorResults.hidden = true;
-    elements.tailorMessage.hidden = true;
-    setStep('paste');
-
-    // For full job postings, strip boilerplate before analyzing
-    let jd = rawJd;
-    if (rawJd.length > 500) {
-      elements.tailorLoadingText.textContent = 'Extracting job requirements…';
-      elements.tailorLoadingSub.textContent = 'Filtering out company blurb and boilerplate';
-      try {
-        const extracted = await chrome.runtime.sendMessage({ type: 'EXTRACT_JD', text: rawJd });
-        if (myToken !== analyzeToken) return;
-        if (extracted?.extractedText?.trim()) {
-          jd = extracted.extractedText;
-          elements.tailorJd.value = jd;
-          await saveTailorDraft();
-        }
-      } catch {
-        // Fall back to raw text silently
-      }
-    }
-
-    elements.tailorLoadingText.textContent = 'Analyzing job description…';
-    elements.tailorLoadingSub.textContent = 'Matching against your CV';
-
-    try {
-      const result = await chrome.runtime.sendMessage({
-        type: 'ANALYZE_CV_MATCH',
-        jobDescription: jd,
-        jobTitle: elements.tailorJobTitle.value.trim(),
-        company:  elements.tailorCompany.value.trim(),
-      });
-
-      // Discard if the JD was edited while this request was in flight
-      if (myToken !== analyzeToken) return;
-
-      if (result?.error) {
-        showTailorMessage(result.error, 'error');
-        return;
-      }
-
-      displayMatchReport(result.matchReport, { reviewMode: true, domainSuggestions: result.domainSuggestions || [] });
-      renderTailorAgentInsights(result.agentInsights || result);
-      await saveTailorDraft();
-      elements.tailorAnalyzeBtn.hidden = true;
-      elements.tailorReanalyzeBtn.style.display = 'block';
-      elements.tailorGenerateBtn.hidden = false;
-      elements.tailorOutputWrap.hidden = true;
-      elements.tailorActionRow.hidden = true;
-      elements.tailorOutput.value = '';
-      elements.tailorResults.hidden = false;
-      elements.tailorResults.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      setStep('review');
-    } catch (e) {
-      if (myToken !== analyzeToken) return;
-      showTailorMessage('Something went wrong: ' + e.message, 'error');
-    } finally {
-      if (myToken === analyzeToken) {
-        elements.tailorLoading.hidden = true;
-        elements.tailorAnalyzeBtn.disabled = false;
-        elements.tailorAnalyzeBtn.textContent = 'Analyze JD';
-        elements.tailorReanalyzeBtn.disabled = false;
-      }
-    }
   }
 
   async function runTailorCV() {
@@ -952,7 +931,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         return;
       }
 
-      displayTailorResults(result);
+      await displayTailorResults(result);
       await saveTailorDraft();
       await window.DraftApplyStats?.track?.('cvsTailored');
       await refreshStatsUI();
@@ -978,14 +957,69 @@ document.addEventListener('DOMContentLoaded', async () => {
   let lastStructuredCv = null;
   let lastStructuredText = '';
 
-  function displayTailorResults(result) {
-    const { tailoredCvText, matchReport, warnings, provider, fallbackFrom, model, auditSkipped } = result;
-    tailorAccuracyBlocked = shouldBlockTailorExport({ warnings, auditSkipped });
+  function tailorJobMatchesCurrent(job) {
+    return Boolean(job?.sourceCvFingerprint)
+      && job.sourceCvFingerprint === currentCvFingerprint
+      && job.jdFingerprint === tailorJdFingerprint(elements.tailorJd.value);
+  }
+
+  async function displayTailorResults(result, { persist = true, sourceJob = null, expectedTailorToken = tailorToken } = {}) {
+    const tailoredCvText = result.renderedText || result.tailoredCvText;
+    const matchReport = result.analysis?.matchReport || result.matchReport;
+    const warnings = result.analysis?.warnings || result.warnings;
+    const { provider, fallbackFrom, model } = result;
+    const blockedTextFingerprint = result.blockedTextFingerprint
+      || (shouldBlockTailorExport({ warnings }) ? textFingerprint(tailoredCvText) : '');
+    tailorAccuracyBlocked = shouldBlockTailorExport({ warnings })
+      && (!result.audit?.edited || textFingerprint(tailoredCvText) === blockedTextFingerprint);
     blockedTailorText = tailorAccuracyBlocked ? (tailoredCvText || '') : null;
-    lastStructuredCv = result.structuredCv || null;
+    lastStructuredCv = result.skeleton && result.content
+      ? { skeleton: result.skeleton, content: result.content }
+      : result.structuredCv || null;
     lastStructuredText = tailoredCvText || '';
+    if (persist && lastStructuredCv && tailoredCvText) {
+      const document = TailoredDocumentStore.create(result, {
+        contactUrls: {},
+        linkAnnotations: [],
+        source: {
+          ...buildTailorSourceMetadata(),
+          jobTitle: sourceJob?.jobTitle || elements.tailorJobTitle.value.trim(),
+          company: sourceJob?.company || elements.tailorCompany.value.trim(),
+          jdFingerprint: sourceJob?.jdFingerprint || tailorJdFingerprint(elements.tailorJd.value),
+          cvFingerprint: sourceJob?.sourceCvFingerprint || currentCvFingerprint,
+        },
+        review: {
+          analysis: result.analysis || null,
+          matchReport: result.matchReport || null,
+          warnings: result.warnings || null,
+          agentInsights: result.agentInsights || null,
+          provider: result.provider || null,
+          fallbackFrom: result.fallbackFrom || null,
+          model: result.model || null,
+          recoveryNotice: result.recoveryNotice || null,
+          blockedTextFingerprint,
+        },
+      });
+      elements.tailorOutput.disabled = true;
+      elements.tailorCopyBtn.disabled = true;
+      elements.tailorPdfBtn.disabled = true;
+      try {
+        const saved = await TailoredDocumentStore.saveNew(document);
+        if (expectedTailorToken !== tailorToken || (sourceJob && !tailorJobMatchesCurrent(sourceJob))) {
+          await TailoredDocumentStore.clearActive(saved.documentId, saved.revision).catch(() => {});
+          return;
+        }
+        activeTailoredDocument = saved;
+        reviewedTextDesired = saved.renderedText;
+      } catch {
+        showTailorMessage('Could not save this tailored CV. Keep the popup open and try again.', 'error');
+        return;
+      } finally {
+        elements.tailorOutput.disabled = false;
+      }
+    }
     displayMatchReport(matchReport, { reviewMode: false, domainSuggestions: [] });
-    renderTailorAgentInsights(result.agentInsights || result);
+    renderTailorAgentInsights(result.analysis?.agentInsights || result.agentInsights || result);
 
     const badge = document.getElementById('tailor-provider-badge');
     if (badge) {
@@ -1007,7 +1041,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     const auditBadge = document.getElementById('tailor-audit-badge');
-    if (auditBadge) auditBadge.style.display = auditSkipped ? 'inline-block' : 'none';
+    if (auditBadge) {
+      auditBadge.textContent = result.audit?.recovered ? 'Original content safely retained' : '';
+      auditBadge.style.display = result.audit?.recovered ? 'inline-block' : 'none';
+    }
 
     if (warnings?.length > 0) {
       elements.tailorWarningsBox.innerHTML = formatTailorWarnings(warnings);
@@ -1020,13 +1057,63 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.tailorOutput.value = tailoredCvText || '';
     elements.tailorOutputWrap.hidden = false;
     elements.tailorActionRow.hidden = false;
-    elements.tailorCopyBtn.disabled = tailorAccuracyBlocked;
-    elements.tailorPdfBtn.disabled = tailorAccuracyBlocked;
+    elements.tailorCopyBtn.disabled = tailorAccuracyBlocked || !activeTailoredDocument;
+    elements.tailorPdfBtn.disabled = tailorAccuracyBlocked || !activeTailoredDocument;
     elements.tailorResults.hidden = false;
     elements.tailorGenerateBtn.hidden = true;
 
     elements.tailorResults.scrollIntoView({ behavior: 'smooth', block: 'start' });
     setStep('export');
+  }
+
+  function restoreTailoredDocument(document) {
+    const review = document.metadata?.review || {};
+    displayTailorResults({
+      ...review,
+      blockedTextFingerprint: review.blockedTextFingerprint || '',
+      schemaVersion: document.schemaVersion,
+      skeleton: document.skeleton,
+      content: document.content,
+      renderedText: document.renderedText,
+      audit: document.audit,
+    }, { persist: false });
+    reviewedTextDesired = document.renderedText;
+  }
+
+  function scheduleReviewedTextSave() {
+    reviewedTextDesired = elements.tailorOutput.value;
+    queueReviewedTextSave().catch(() => {});
+  }
+
+  function queueReviewedTextSave() {
+    const generation = popupDataGeneration;
+    reviewedTextSavePromise = reviewedTextSavePromise.catch(() => null).then(async () => {
+      while (generation === popupDataGeneration) {
+        const current = activeTailoredDocument;
+        const desired = reviewedTextDesired;
+        if (!current || desired == null || current.renderedText === desired) return current;
+        const saved = await TailoredDocumentStore.saveReviewedText(
+          current.documentId,
+          current.revision,
+          desired,
+        );
+        if (generation !== popupDataGeneration) return null;
+        if (saved) {
+          activeTailoredDocument = saved;
+          continue;
+        }
+        const latest = await TailoredDocumentStore.loadActive();
+        if (!latest || latest.documentId !== current.documentId) return null;
+        activeTailoredDocument = latest;
+      }
+      return null;
+    });
+    return reviewedTextSavePromise;
+  }
+
+  async function flushReviewedTextSave() {
+    reviewedTextDesired = elements.tailorOutput.value;
+    return queueReviewedTextSave();
   }
 
   function formatTailorWarnings(warnings = []) {
@@ -1133,8 +1220,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     return /^(?:Company name|Job title|Employment|Education|Education institution|Email address|Phone number|LinkedIn|GitHub|Website|Twitter|Full name|New metric|Unsupported JD skill)|without original CV evidence|evidence from the original CV is not visible|not read credibly|under-positioned|implementation-only|skills rather than supported experience|High-risk/i.test(String(warning || ''));
   }
 
-  function shouldBlockTailorExport({ warnings = [], auditSkipped = false } = {}) {
-    return Boolean(auditSkipped) || (Array.isArray(warnings) && warnings.some(isUnsafeTailorWarning));
+  function shouldBlockTailorExport({ warnings = [] } = {}) {
+    return Array.isArray(warnings) && warnings.some(isUnsafeTailorWarning);
   }
 
   function isParserArtefactWarning(warning) {
@@ -1147,9 +1234,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   function displayMatchReport(matchReport, { reviewMode, domainSuggestions = [] } = {}) {
     const score = matchReport?.score ?? null;
-    elements.matchScore.textContent = score != null ? `${score}%` : '–';
-    elements.matchScore.className = 'match-score-badge' +
-      (score >= 70 ? ' score-high' : score >= 40 ? ' score-mid' : ' score-low');
+    elements.matchScore.textContent = score != null
+      ? `Before tailoring, your original CV directly supported ${score}% of the job requirements identified.`
+      : 'Original CV evidence unavailable.';
 
     const strong = matchReport?.strongMatches || [];
     if (strong.length > 0) {
@@ -1373,6 +1460,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const text = elements.tailorOutput.value;
     if (!text) return;
     try {
+      const saved = await flushReviewedTextSave();
+      if (!saved) throw new Error('Could not save reviewed text');
       await navigator.clipboard.writeText(text);
       const orig = elements.tailorCopyBtn.textContent;
       elements.tailorCopyBtn.textContent = 'Copied!';
@@ -1404,16 +1493,18 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       if (generation !== popupDataGeneration) return;
 
-      const structuredForExport =
-        (lastStructuredCv && text === lastStructuredText) ? lastStructuredCv : null;
-      await chrome.storage.local.set({
-        tailoredCvExport: text,
-        tailoredCvContactUrls: contactUrls,
-        tailoredCvLinkAnnotations: linkAnnotations,
-        tailoredCvStructured: structuredForExport,
-      });
+      let document = await flushReviewedTextSave();
+      if (!document) throw new Error('The reviewed CV changed elsewhere. Reopen it before exporting.');
+      if (Object.keys(contactUrls).length || linkAnnotations.length) {
+        document = await TailoredDocumentStore.saveRevision(document.documentId, document.revision, {
+          metadata: { ...document.metadata, contactUrls, linkAnnotations },
+        });
+        if (!document) throw new Error('The tailored CV changed elsewhere.');
+      }
+      activeTailoredDocument = document;
       if (generation !== popupDataGeneration) return;
-      await chrome.tabs.create({ url: chrome.runtime.getURL('cv-export.html') });
+      const query = new URLSearchParams({ documentId: document.documentId, revision: String(document.revision) });
+      await chrome.tabs.create({ url: `${chrome.runtime.getURL('cv-export.html')}?${query}` });
       await window.DraftApplyStats?.track?.('cvExports');
       await refreshStatsUI();
     } catch (e) {

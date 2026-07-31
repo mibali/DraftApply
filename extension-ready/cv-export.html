@@ -7,10 +7,10 @@
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
-      font-family: 'Calibri', 'Georgia', serif;
-      font-size: 10pt;
-      line-height: 1.35;
-      color: #111;
+      font-family: Arial, Helvetica, sans-serif;
+      font-size: 9.5pt;
+      line-height: 1.32;
+      color: #1f2937;
       background: #e5e7eb;
     }
 
@@ -56,40 +56,40 @@
       max-width: 840px;
       background: white;
       box-shadow: 0 4px 32px rgba(0,0,0,0.12);
-      padding: 18mm 18mm 20mm;
+      padding: 16mm 18mm 18mm;
       min-height: 297mm;
     }
 
-    /* ══════════════════════════════════
-       HARVARD CV TEMPLATE
-    ══════════════════════════════════ */
+    /* Clean, single-column and ATS-safe: hierarchy comes from weight and
+       spacing rather than decorative type or oversized headings. */
 
     /* Name — centered, large, spaced caps */
     .cv-name {
-      font-size: 16pt;
+      font-size: 15pt;
       font-weight: 700;
       text-align: center;
       text-transform: uppercase;
-      letter-spacing: 2px;
-      color: #0a0a0a;
-      margin-bottom: 3px;
+      letter-spacing: 1.2px;
+      color: #111827;
+      margin-bottom: 2px;
     }
 
-    /* Professional headline — centered italic */
+    /* Professional headline — centered and restrained */
     .cv-headline {
-      font-size: 10pt;
-      font-style: italic;
+      font-size: 9.5pt;
+      font-style: normal;
+      font-weight: 600;
       text-align: center;
-      color: #444;
-      margin-bottom: 2px;
+      color: #374151;
+      margin-bottom: 3px;
     }
 
     /* Contact line — centered, subdued */
     .cv-contact {
-      font-size: 8.8pt;
+      font-size: 8.5pt;
       text-align: center;
-      color: #555;
-      line-height: 1.35;
+      color: #4b5563;
+      line-height: 1.3;
     }
     .cv-contact a {
       color: #1a1a1a;
@@ -101,21 +101,21 @@
     /* Horizontal rule after header block */
     .cv-header-rule {
       border: none;
-      border-top: 1.5px solid #0a0a0a;
-      margin: 7px 0 0;
+      border-top: 1px solid #374151;
+      margin: 6px 0 0;
     }
 
     /* Section heading — ALL CAPS bold with full underline */
     .cv-section-header {
-      font-size: 9.2pt;
+      font-size: 9pt;
       font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: 1.5px;
-      color: #0a0a0a;
-      border-bottom: 2px solid #0a0a0a;
+      letter-spacing: 1px;
+      color: #111827;
+      border-bottom: 1px solid #6b7280;
       padding-bottom: 2px;
-      margin-top: 11px;
-      margin-bottom: 5px;
+      margin-top: 10px;
+      margin-bottom: 4px;
     }
 
     /* Entry: company (left) + dates (right) on one row */
@@ -123,51 +123,52 @@
       display: flex;
       justify-content: space-between;
       align-items: baseline;
-      margin-top: 7px;
+      margin-top: 6px;
     }
     .cv-company {
-      font-size: 10.4pt;
-      font-weight: 800;
-      color: #0a0a0a;
+      font-size: 9.8pt;
+      font-weight: 700;
+      color: #111827;
+      min-width: 0;
     }
     .cv-entry-dates {
-      font-size: 8.8pt;
-      color: #444;
+      font-size: 8.5pt;
+      color: #4b5563;
       white-space: nowrap;
       margin-left: 12px;
       flex-shrink: 0;
     }
 
-    /* Job title / degree — italic, below company row */
+    /* Job title / degree — below company row */
     .cv-job-title {
-      font-size: 9.6pt;
-      font-style: italic;
+      font-size: 9.3pt;
+      font-style: normal;
       font-weight: 600;
-      color: #333;
-      margin-bottom: 3px;
+      color: #374151;
+      margin: 1px 0 2px;
     }
     .cv-role-focus {
-      font-size: 9pt;
-      font-style: italic;
+      font-size: 8.8pt;
+      font-style: normal;
       color: #4b5563;
-      margin: -1px 0 5px;
+      margin: 0 0 3px;
     }
 
     /* Bullet list */
     .cv-bullets {
-      padding-left: 15px;
-      margin: 2px 0 3px;
+      padding-left: 16px;
+      margin: 1px 0 2px;
     }
     .cv-bullets li {
-      font-size: 9.4pt;
-      line-height: 1.3;
-      margin-bottom: 1px;
+      font-size: 9.2pt;
+      line-height: 1.28;
+      margin-bottom: 1.5px;
     }
     .cv-bullets li a { color: #111; text-decoration: underline; }
 
     .cv-skill-row {
-      font-size: 9.4pt;
-      line-height: 1.3;
+      font-size: 9.2pt;
+      line-height: 1.28;
       margin-bottom: 2px;
       color: #111;
     }
@@ -175,8 +176,8 @@
 
     /* Body paragraph (summaries, skills lists, etc.) */
     .cv-body {
-      font-size: 9.7pt;
-      line-height: 1.35;
+      font-size: 9.3pt;
+      line-height: 1.32;
       margin-bottom: 2px;
       color: #111;
     }
@@ -184,7 +185,7 @@
 
     /* Generic date-only line (fallback) */
     .cv-date-line {
-      font-size: 8.8pt;
+      font-size: 8.5pt;
       color: #555;
       margin-bottom: 2px;
     }
@@ -243,9 +244,9 @@
 <body>
 
   <div id="toolbar">
-    <span id="toolbar-title">DraftApply — Harvard CV</span>
+    <span id="toolbar-title">DraftApply — Tailored CV</span>
     <button id="print-btn">Save as PDF / Print</button>
-    <button id="word-btn">Download Word (.doc)</button>
+    <button id="word-btn">Download Word (.docx)</button>
     <button class="btn-close" id="close-btn">Close</button>
   </div>
 
@@ -254,6 +255,8 @@
     <div id="cv-content" hidden></div>
   </div>
 
+  <script src="vendor/docx.iife.js"></script>
+  <script src="tailored-document.js"></script>
   <script src="cv-export.js"></script>
 </body>
 </html>

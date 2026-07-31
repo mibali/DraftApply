@@ -33,7 +33,6 @@ Extension  ──(structured JSON)──▶  Proxy Engine  ──▶  Recipe Mod
 | `POST` | `/api/generate` | `Bearer <token>` | Generate an answer (structured or legacy payload) |
 | `POST` | `/api/cv/upload` | `Bearer <token>` | Upload CV file (PDF/DOCX/TXT) → extracted text |
 | `POST` | `/api/jd/extract` | `Bearer <token>` | Normalize pasted job-description text |
-| `POST` | `/api/cv/analyze` | `Bearer <token>` | Analyze CV/JD fit without generating a CV |
 | `POST` | `/api/cv/tailor` | `Bearer <token>` | Generate a validated structured tailored CV |
 
 ### `POST /api/generate` – Structured Payload (preferred)
@@ -279,6 +278,7 @@ npm run verify:architecture
 ## Privacy and operator responsibilities
 
 - **No logging of CV text, job descriptions, or generated answers** in the proxy engine.
+- PDF/DOCX/TXT extraction is in memory. Scanned-PDF OCR is bounded and runs inside the proxy process without an external OCR service or server-side CV persistence.
 - **GROQ_API_KEY**, **OPENROUTER_API_KEY**, and **TOKEN_SECRET** are read from env vars only — never committed.
 - **Rate limiting** and **token auth** are built into the engine.
 - The extension stores the CV in `chrome.storage.local`; proxy application code does not intentionally persist CV/job payloads or answers. Hosting, Redis, reverse proxies, and security systems may still retain operational metadata according to operator configuration.

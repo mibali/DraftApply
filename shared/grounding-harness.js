@@ -7,6 +7,11 @@ const PREPARATION = /\b(prepar(?:ing|ation)|studying|pursuing|working towards?|e
 const METRIC = /(?:[$£€]\s*\d[\d,.]*|\b\d+(?:\.\d+)?\s*(?:%|x\b|×|k\b|m\b|million\b|billion\b|users?\b|customers?\b|months?\b|years?\b))/gi;
 const SUBJECTIVE = /\b(?:want|would like|interested|drawn|excited|motivated|value|believe|hope|enjoy|appeal)\b/i;
 const FIRST_PERSON = /\b(?:i|my|we|our)\b/i;
+// "Worked for/with" and performing work "at" an organisation are strong
+// employment signals. Do not treat "built X for Y" or "integrated with AWS"
+// as employment: Y is often a customer, audience, or technology.
+const EMPLOYMENT_ACTION = /\b(?:(?:[Ww]ork(?:ed)?|[Ee]mployed|[Ss]erved)\b.{0,50}\b(?:at|for|with)|(?:[Ll]ed|[Bb]uilt|[Dd]elivered|[Mm]anaged|[Dd]eveloped|[Ii]mplemented)\b.{0,50}\bat)\s+[A-Z][\w&.-]*/;
+const EMPLOYMENT_AT_START = /(?:^|[.!?]\s+)At\s+[A-Z][^,.;!?]{0,59},/;
 // The contraction branch must REQUIRE the apostrophe (plus an explicit list
 // of apostrophe-less typed forms): an optional apostrophe made every word
 // ending in "nt" (experiment, deployment, environment, management) count as
@@ -120,15 +125,19 @@ export function isTextSupported(text, context, { roleSourceId = null, allowedSou
   }
   const claimMetrics = metrics(text);
   const claimTokens = tokens(text);
-  const employerClaim = /\b(?:worked|work|employed|served|role)\b.{0,35}\b(?:at|for|with)\s+([A-Z][\w&.-]+)/i.exec(String(text || ''))?.[1]
-    || /(?:^|[.!?]\s+)At\s+([A-Z][\w&.-]+)/.exec(String(text || ''))?.[1];
+  const employerClaim = EMPLOYMENT_AT_START.test(String(text || ''))
+    || EMPLOYMENT_ACTION.test(String(text || ''));
   const supported = candidates.some(record => {
     const evidence = normalise(`${record.text} ${record.company || ''} ${record.title || ''} ${record.dates || ''}`);
     if (NEGATION.test(text) !== NEGATION.test(record.text)) return false;
     if (claimMetrics.some(metric => !metrics(evidence).includes(metric))) return false;
     if (CREDENTIAL.test(text) && !CREDENTIAL.test(evidence)) return false;
     if (CREDENTIAL.test(text) && !PREPARATION.test(text) && PREPARATION.test(record.text)) return false;
-    if (employerClaim && (!record.company || !normalise(record.company).includes(normalise(employerClaim)))) return false;
+    // Require the claim to name a known employer. The first distinctive token
+    // permits common suffix omission ("Acme" for "Acme Ltd") while avoiding
+    // extraction of AWS/React as employers from unrelated prose.
+    const employerToken = tokens(record.company || '')[0];
+    if (employerClaim && (!employerToken || !claimTokens.includes(employerToken))) return false;
     const evidenceTokens = new Set(tokens(evidence));
     const overlap = claimTokens.filter(token => evidenceTokens.has(token)).length;
     return claimTokens.length > 0 && overlap >= Math.max(1, Math.ceil(claimTokens.length * minOverlapRatio));
@@ -145,7 +154,7 @@ export function extractGroundingClaims(answer, { question = '', questionType = '
     if (foundMetrics.length) claims.push({ type: 'metric', text: sentence, values: foundMetrics });
     if (PERSONAL_STATE.test(sentence)) claims.push({ type: 'personal_state', text: sentence });
     if (CREDENTIAL.test(sentence)) claims.push({ type: 'credential', text: sentence });
-    if (/\b(?:worked|work|employed|served|role)\b.{0,35}\b(?:at|for|with)\s+[A-Z][\w&.-]+/i.test(sentence)) claims.push({ type: 'employment_history', text: sentence });
+    if (EMPLOYMENT_ACTION.test(sentence) || EMPLOYMENT_AT_START.test(sentence)) claims.push({ type: 'employment_history', text: sentence });
     if (/\b(?:19|20)\d{2}\b|\b\d+\s+years?\b/i.test(sentence) && !foundMetrics.length) claims.push({ type: 'date_tenure', text: sentence });
     if (claims.length === before && SUBJECTIVE.test(sentence)) {
       claims.push({ type: 'subjective', text: sentence });
@@ -200,16 +209,27 @@ export function validateApplicationAnswer(answer, options = {}) {
     if (claim.type === 'employment_history' && options.questionType === 'why_company' && context.targetCompany
       && normalise(claim.text).includes(normalise(context.targetCompany)) && !/\b(worked|employed|served)\b/i.test(claim.text)) supported = true;
     if (claim.type === 'credential' && PREPARATION.test(claim.text)) supported = isTextSupported(claim.text, context).supported;
-    if (claim.type === 'yes_no' && claim.value !== 'yes') supported = false;
-    // Model-authored factual prose must fail closed. `review` is reserved for
-    // non-factual structure/style validators; looking at an unsupported fact
-    // is not the same as correcting it. The UI still lets a person edit the
-    // draft, at which point it is explicitly treated as user-authored text.
-    const disposition = supported ? 'supported' : 'unsupported';
-    if (disposition !== 'supported') violations.push({
+    // A direct "No" does not assert that the candidate has the experience or
+    // status in the question. Any explanatory sentence is checked separately.
+    // Malformed yes/no answers remain blocked because their meaning is unknown.
+    if (claim.type === 'yes_no' && claim.value === 'no') supported = true;
+
+    // Hard blocking is reserved for protected facts: metrics, personal state,
+    // credentials, employers, dates/tenure, and unsupported affirmative
+    // yes/no answers. Ordinary prose can paraphrase a CV in ways lexical
+    // matching cannot prove, so uncertainty there is reviewable rather than
+    // making the whole draft unusable.
+    const reviewable = !supported && claim.type === 'factual_assertion';
+    const disposition = supported ? 'supported' : reviewable ? 'review' : 'unsupported';
+    if (disposition === 'unsupported') violations.push({
       claimId: claim.id,
       code: personalUnknown ? 'unknown_personal_state' : `unsupported_${claim.type}`,
       severity: 'block',
+    });
+    if (disposition === 'review') violations.push({
+      claimId: claim.id,
+      code: 'unconfirmed_factual_paraphrase',
+      severity: 'review',
     });
     return { ...claim, disposition };
   });

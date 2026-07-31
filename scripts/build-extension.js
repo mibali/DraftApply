@@ -41,6 +41,9 @@ export function buildExtension({ proxyUrl = OFFICIAL_PROXY_URL, outputDir = join
     recursive: true,
     filter: (src) => !/(^|\/)(\.DS_Store|Thumbs\.db|desktop\.ini|.*~|\.swp)$/i.test(src.slice(SOURCE_DIR.length)),
   });
+  const vendorDir = join(resolvedOutput, 'vendor');
+  mkdirSync(vendorDir, { recursive: true });
+  cpSync(join(ROOT, 'node_modules', 'docx', 'dist', 'index.iife.js'), join(vendorDir, 'docx.iife.js'));
 
   const manifestPath = join(resolvedOutput, 'manifest.json');
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));

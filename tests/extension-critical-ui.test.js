@@ -8,6 +8,23 @@ const popupHtml = fs.readFileSync(new URL('../extension-ready/popup.html', impor
 const popupJs = fs.readFileSync(new URL('../extension-ready/popup.js', import.meta.url), 'utf8');
 const backgroundJs = fs.readFileSync(new URL('../extension-ready/background.js', import.meta.url), 'utf8');
 
+describe('production upload reliability contracts', () => {
+  it('refreshes a rejected upload token once and reconstructs its multipart body', () => {
+    expect(popupJs).toContain("if (response.status === 401)");
+    expect(popupJs).toContain("{ type: 'GET_TOKEN', forceRefresh: true, staleToken: token }");
+    expect(popupJs.match(/response = await upload\(\)/g)).toHaveLength(2);
+    expect(popupJs).toMatch(/const upload = \(\) => \{[\s\S]*?const formData = new FormData\(\)/);
+    expect(backgroundJs).toContain('clearInstallTokenIfCurrent(staleToken, generation)');
+    expect(backgroundJs).toContain('ensureInstallToken(proxyUrl, generation)');
+  });
+
+  it('does not claim generic career-page auto-injection without host permission', () => {
+    expect(backgroundJs).not.toContain('chrome.tabs.onUpdated.addListener');
+    expect(backgroundJs).not.toContain('ATS_URL_PATTERNS');
+    expect(backgroundJs).toContain('ensureContentScriptInjected');
+  });
+});
+
 describe('extension critical modal behavior', () => {
   it('does not block modal button target handlers with capture-phase propagation stops', () => {
     expect(contentJs).toContain("bindModalAction('#da-btn-insert', (event) => this.insertAnswer(event))");
@@ -28,9 +45,13 @@ describe('extension critical modal behavior', () => {
   it('does not let stale iframe targets or overlapping requests leak across modal sessions', () => {
     expect(contentJs).toContain('this._iframeSourceFrameId = null;');
     expect(contentJs).toContain('if (this.currentRequestId) {');
-    expect(contentJs).toContain('await this.cancelGeneration({ silent: true });');
+    expect(contentJs).toContain('await this.cancelGeneration({ silent: true, nextOperation: operation });');
     expect(contentJs).toContain('clearSessionForNavigation()');
     expect(contentJs).toContain('this.clearAnswerCaches();');
+    expect(contentJs).toContain('this.activeAnswerSession = null;');
+    expect(contentJs).toContain('this.fieldTokens.clear();');
+    expect(contentJs).toContain('targetRecord.sessionId !== message.sessionId');
+    expect(backgroundJs).toContain('sender.frameId === 0');
   });
 
   it('uses target-scoped contenteditable insertion and keeps copy non-destructive', () => {
@@ -45,6 +66,9 @@ describe('extension critical modal behavior', () => {
     expect(contentJs).toContain('Could not open DraftApply from this embedded form');
     expect(backgroundJs).toContain('Relay to main frame failed');
     expect(backgroundJs).toContain('sendResponse({ success: false, error: chrome.runtime.lastError.message })');
+    expect(backgroundJs).toContain('{ frameId: info.frameId ?? 0 }');
+    expect(backgroundJs).toContain('ensureContentScriptInjected(tab.id, info.frameId ?? 0)');
+    expect(backgroundJs).toContain('{ tabId, frameIds: [frameId] }');
   });
 
   it('does not bypass answer quality checks for prefetches', () => {
@@ -78,6 +102,8 @@ describe('extension critical modal behavior', () => {
     expect(contentJs).toContain("history[method] = function patchedHistoryMethod");
     expect(contentJs).toContain("window.addEventListener('draftapply:navigation'");
     expect(contentJs).toContain("this.scheduleContextRefresh('mutation'");
+    expect(contentJs).toContain('if (!preserveSession && window === window.top)');
+    expect(contentJs).toContain('this.recomputeInsertState();');
   });
 
   it('scopes Tailor JD fallback to the active job page instead of using a global stale draft', () => {
@@ -90,7 +116,10 @@ describe('extension critical modal behavior', () => {
     expect(backgroundJs).toContain('function isTailorDraftRelevant');
     expect(backgroundJs).toContain('hasSameJobIdentity');
     expect(backgroundJs).toContain('currentUrl && sourceUrl && currentUrl === sourceUrl');
-    expect(backgroundJs).toContain('movedToDifferentHost');
+    expect(backgroundJs).toContain('draftTitle === pageTitle');
+    expect(backgroundJs).toContain('draftCompany === pageCompany');
+    expect(backgroundJs).not.toContain('urlWithoutHash');
+    expect(backgroundJs).toContain('Cross-host navigation is not identity');
     expect(backgroundJs).toContain('Same host alone is deliberately not enough');
     expect(backgroundJs).toContain('Legacy drafts did not store source metadata');
   });
@@ -144,13 +173,43 @@ describe('extension critical modal behavior', () => {
     expect(contentJs).toContain("display:none !important;");
   });
 
-  it('exports benign gaps but blocks unsafe or unaudited text until it is genuinely edited', () => {
-    expect(popupJs).toContain('shouldBlockTailorExport({ warnings, auditSkipped })');
+  it('exports deterministically audited output and blocks unsafe warnings until genuinely edited', () => {
+    expect(popupJs).toContain('shouldBlockTailorExport({ warnings })');
     expect(popupJs).not.toContain('normalizeMissingSkills(matchReport).length > 0');
-    expect(popupJs).toContain('Boolean(auditSkipped)');
+    expect(popupJs).not.toContain('auditSkipped');
     expect(popupJs).toContain('warnings.some(isUnsafeTailorWarning)');
+    expect(popupJs).toContain('!source.jdFingerprint || source.jdFingerprint !== tailorJdFingerprint(draft?.jobDescription)');
     expect(popupJs).toContain('blockedTailorText = tailorAccuracyBlocked');
     expect(popupJs).toContain('elements.tailorOutput.value === blockedTailorText');
+  });
+
+  it('binds restored tailored CVs to their source CV and preserves review warnings', () => {
+    expect(popupJs).toContain('source.cvFingerprint !== currentCvFingerprint');
+    expect(popupJs).toContain('cvFingerprint: sourceJob?.sourceCvFingerprint || currentCvFingerprint');
+    expect(popupJs).toContain('TailoredDocumentStore.clearActive()');
+    expect(popupJs).toContain('review: {');
+    expect(popupJs).toContain('displayTailorResults({');
+  });
+
+  it('prevents an older CV extraction from replacing a newer file selection', () => {
+    expect(popupJs).toContain('const myUploadGeneration = ++uploadGeneration');
+    expect(popupJs).toContain('myUploadGeneration !== uploadGeneration');
+  });
+
+  it('has one Tailor action and no obsolete analyze route or message', () => {
+    expect(popupJs).not.toContain('ANALYZE_CV_MATCH');
+    expect(backgroundJs).not.toContain('ANALYZE_CV_MATCH');
+    expect(backgroundJs).not.toContain('/api/cv/analyze');
+    expect(popupJs).toContain("type: 'TAILOR_CV'");
+  });
+
+  it('labels the post-generation match report as original-CV evidence rather than a generated-CV score', () => {
+    expect(popupHtml).toContain('How your original CV informed this version');
+    expect(popupHtml).toContain('This is not a score for the tailored CV');
+    expect(popupHtml).toContain('<details class="match-report">');
+    expect(popupJs).toContain('Before tailoring, your original CV directly supported ${score}% of the job requirements identified.');
+    expect(popupHtml).not.toContain('source-backed');
+    expect(popupHtml).not.toContain('>Match report<');
   });
 
   it('fails worker-owned running Tailor jobs on restart without deleting saved CV data', () => {
@@ -171,35 +230,33 @@ describe('extension critical modal behavior', () => {
     expect(backgroundJs).not.toContain('if (response.status === 429) throw new Error(rateLimitError(response))');
   });
 
-  it('buffers SSE stream fragments across network chunk boundaries', () => {
-    expect(backgroundJs).toContain("let buffer = ''");
-    expect(backgroundJs).toContain("buffer += decoder.decode(value, { stream: true })");
-    expect(backgroundJs).toContain('buffer.split(/\\r?\\n\\r?\\n/)');
-    expect(backgroundJs).toContain('buffer += decoder.decode()');
-    expect(backgroundJs).toContain('if (buffer.trim()) consumeEvent(buffer)');
-    expect(backgroundJs).toContain("type: 'STREAM_FINAL'");
-    expect(backgroundJs).toContain("type: 'STREAM_PROGRESS'");
-    expect(backgroundJs).not.toContain("type: 'STREAM_CHUNK', requestId: effectiveRequestId");
+  it('receives answer and validation atomically instead of racing stream terminal messages', () => {
+    expect(contentJs).toContain("type: 'CALL_API'");
+    expect(contentJs).not.toContain("type: 'CALL_API_STREAM'");
+    expect(contentJs).not.toContain("if (message.type === 'STREAM_DONE')");
+    expect(contentJs).not.toContain('The answer was not verified. Please generate again.');
+    expect(contentJs).toContain("status: 'block'");
+    expect(contentJs).toContain("code: 'validation_metadata_missing'");
   });
 
-  it('gates every non-passing model answer while preserving explicit user editing', () => {
+  it('allows reviewable drafts while blocking unsupported protected facts', () => {
     expect(contentJs).toContain('id="da-btn-insert" disabled');
-    expect(contentJs).toContain("if (message.type === 'STREAM_FINAL')");
-    expect(contentJs).toContain('if (this.currentRequestId !== message.requestId) return');
-    expect(contentJs).toContain("modelStatus !== 'pass'");
-    expect(contentJs).toContain("button.disabled = !hasAnswer || status !== 'pass'");
+    expect(contentJs).toContain("['pass', 'review'].includes(modelStatus)");
+    expect(contentJs).toContain("blockedModelAnswer ? 'Edit Answer Above First'");
+    expect(contentJs).toContain("copyFallback ? 'Copy Answer'");
+    expect(contentJs).toContain('this.recomputeInsertState()');
     expect(contentJs).toContain('could not verify from your CV');
     // No alarming persistent button states; validation lives in the badge.
     expect(contentJs).not.toContain('Review Required');
     expect(contentJs).not.toContain('Insertion Blocked');
     expect(contentJs).toContain('_renderVerifyBadge');
     expect(contentJs).toContain('Checked against your CV');
+    expect(contentJs).toContain('never trap a visible draft inside the modal');
+    expect(contentJs).not.toContain('Edit it before copying');
   });
 
-  it('keeps provider fallback invisible to the user while metadata still flows for telemetry', () => {
-    expect(backgroundJs).toContain("response.headers.get('X-DraftApply-Model')");
-    expect(backgroundJs).toContain("type: 'STREAM_META'");
-    expect(contentJs).toContain("if (message.type === 'STREAM_META')");
+  it('keeps provider fallback invisible to the user while response metadata remains available', () => {
+    expect(contentJs).toContain('this.renderAgentInsights(result.pipelineInsights || result.agentInsights || result)');
     // No provider/model names in any user-facing notification.
     expect(contentJs).not.toContain('OpenRouter fallback');
     expect(contentJs).not.toContain('Groq is busy');
@@ -219,12 +276,9 @@ describe('extension critical modal behavior', () => {
     expect(popupJs).toContain("item?.skill || item?.requirement || item?.name");
   });
 
-  it('passes through workflow metadata from streamed proxy responses without changing modal behavior', () => {
-    expect(backgroundJs).toContain("response.headers.get('X-DraftApply-Workflow')");
-    expect(backgroundJs).toContain("response.headers.get('X-DraftApply-Agent-Chain')");
-    expect(backgroundJs).toContain('json.draftapplyMeta');
-    expect(backgroundJs).toContain('workflow,');
-    expect(backgroundJs).toContain('agentChain');
+  it('passes supporting metadata from the atomic response without changing modal behavior', () => {
+    expect(contentJs).toContain('this.renderModelBadge(result)');
+    expect(contentJs).toContain('result.pipelineInsights || result.agentInsights || result');
   });
 
   it('keeps supporting detail behind collapsed disclosures with no internal vocabulary', () => {

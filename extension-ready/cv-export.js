@@ -1,10 +1,10 @@
-(async () => {
+async function initializeExportPage() {
   document.getElementById('print-btn')?.addEventListener('click', () => window.print());
   document.getElementById('word-btn')?.addEventListener('click', () => {
     const content = document.getElementById('cv-content');
     const title = document.title || 'Tailored CV';
     if (!content?.innerHTML?.trim()) return;
-    downloadWordDocument(content.innerHTML, title);
+    downloadWordDocument(content, title);
   });
   document.getElementById('close-btn')?.addEventListener('click', async () => {
     try {
@@ -18,42 +18,72 @@
     window.close();
   });
 
-  const stored = await chrome.storage.local.get(['tailoredCvExport', 'tailoredCvContactUrls', 'tailoredCvLinkAnnotations', 'tailoredCvStructured']);
-  const tailoredCvExport = stored.tailoredCvExport;
-  const originalContactUrls = stored.tailoredCvContactUrls || {};
-  const linkAnnotations = Array.isArray(stored.tailoredCvLinkAnnotations) ? stored.tailoredCvLinkAnnotations : [];
-  const structuredCv = stored.tailoredCvStructured || null;
+  const params = new URLSearchParams(location.search);
+  const documentId = params.get('documentId');
+  const revision = Number(params.get('revision'));
   const loading = document.getElementById('loading');
   const content = document.getElementById('cv-content');
 
-  if (!tailoredCvExport) {
-    loading.textContent = 'No CV found — please generate a tailored CV first.';
+  if (!documentId || !Number.isInteger(revision) || revision < 1) {
+    loading.textContent = 'This export link is invalid — reopen it from your tailored CV.';
     return;
   }
-
-  await chrome.storage.local.remove(['tailoredCvExport', 'tailoredCvContactUrls', 'tailoredCvLinkAnnotations', 'tailoredCvStructured']);
+  const tailoredDocument = await TailoredDocumentStore.loadRevision(documentId, revision);
+  if (!tailoredDocument) {
+    loading.textContent = 'This tailored CV revision is unavailable — reopen the current version from the popup.';
+    return;
+  }
+  const linkAnnotations = Array.isArray(tailoredDocument.metadata?.linkAnnotations)
+    ? tailoredDocument.metadata.linkAnnotations : [];
 
   // Set page title (and therefore PDF filename) to "Full Name CV"
-  const candidateName = structuredCv?.skeleton?.name
-    || tailoredCvExport.split('\n').map(l => l.trim()).find(l => l.length > 0);
+  const candidateName = tailoredDocument.skeleton?.name
+    || tailoredDocument.renderedText.split('\n').map(l => l.trim()).find(l => l.length > 0);
   if (candidateName) document.title = `${candidateName} CV`;
 
-  // Structured payload renders directly from data - no text re-parsing, so
-  // none of the text-parsing failure modes apply. Any defect in the payload
-  // falls back to the legacy text renderer.
-  let html = '';
-  if (structuredCv) {
-    try {
-      html = formatStructuredCvToHtml(structuredCv, linkAnnotations);
-    } catch (e) {
-      console.warn('Structured render failed; falling back to text parsing:', e);
-      html = '';
-    }
+  // Unchanged generated blocks retain the structured renderer. Once the user
+  // edits the free-text review surface, the explicit reviewed-text projection
+  // is authoritative; it is never heuristically parsed back into evidence-
+  // bearing roles or claims.
+  const html = tailoredDocument.audit?.provenance === 'user-authored-reviewed-text'
+    ? formatReviewedTextToHtml(tailoredDocument.renderedText, linkAnnotations)
+    : formatStructuredCvToHtml(tailoredDocument, linkAnnotations);
+  if (!html) {
+    loading.textContent = 'This tailored CV is invalid — generate a new version before exporting.';
+    return;
   }
-  content.innerHTML = html || formatCvToHtml(tailoredCvExport, originalContactUrls, linkAnnotations);
+  content.innerHTML = html;
   loading.hidden = true;
   content.hidden = false;
-})();
+}
+
+// Formatter unit tests evaluate this file in a minimal VM without a browser
+// location. Keep page startup at the browser boundary so importing the pure
+// formatters cannot create an unhandled asynchronous rejection.
+if (typeof document !== 'undefined' && typeof location !== 'undefined'
+    && typeof URLSearchParams !== 'undefined') {
+  initializeExportPage().catch(error => {
+    const loading = document.getElementById('loading');
+    if (loading) loading.textContent = 'Could not open this tailored CV. Reopen it from the popup.';
+    console.error('[DraftApply] Export initialization failed:', error?.message || error);
+  });
+}
+
+function formatReviewedTextToHtml(text, linkAnnotations = []) {
+  const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+  let html = '<div class="cv-reviewed-text">';
+  for (const line of lines) {
+    const bullet = line.match(/^\s*[•*●▪◦–—-]\s+(.*)$/);
+    if (bullet) {
+      html += `<ul class="cv-bullets"><li>${renderInline(bullet[1], linkAnnotations)}</li></ul>`;
+    } else if (!line.trim()) {
+      html += '<div class="cv-spacer" aria-hidden="true"></div>';
+    } else {
+      html += `<p class="cv-body">${renderInline(line, linkAnnotations)}</p>`;
+    }
+  }
+  return `${html}</div>`;
+}
 
 // ── Structured CV → HTML (no text parsing) ───────────────────────────────────
 // Renders directly from the locked skeleton + validated content produced by
@@ -489,140 +519,58 @@ function safeDownloadName(title) {
     .replace(/[\\/:*?"<>|]+/g, '')
     .replace(/\s+/g, ' ')
     .trim();
-  return `${clean || 'Tailored CV'}.doc`;
+  return `${clean || 'Tailored CV'}.docx`;
 }
 
-function buildWordDocument(cvHtml, title = 'Tailored CV') {
-  const cleanTitle = esc(String(title || 'Tailored CV'));
-  return `<!DOCTYPE html>
-<html xmlns:o="urn:schemas-microsoft-com:office:office"
-      xmlns:w="urn:schemas-microsoft-com:office:word"
-      xmlns="http://www.w3.org/TR/REC-html40">
-<head>
-  <meta charset="utf-8">
-  <title>${cleanTitle}</title>
-  <!--[if gte mso 9]>
-  <xml>
-    <w:WordDocument>
-      <w:View>Print</w:View>
-      <w:Zoom>100</w:Zoom>
-      <w:DoNotOptimizeForBrowser/>
-    </w:WordDocument>
-  </xml>
-  <![endif]-->
-  <style>
-    @page { margin: 0.7in; }
-    body {
-      font-family: Calibri, Georgia, serif;
-      font-size: 10pt;
-      line-height: 1.35;
-      color: #111;
+function inlineWordRuns(element) {
+  if (!element) return [new docx.TextRun('')];
+  const runs = [];
+  for (const node of element.childNodes) {
+    if (node.nodeType === Node.TEXT_NODE && node.textContent) {
+      runs.push(new docx.TextRun({ text: node.textContent, bold: element.tagName === 'STRONG' }));
+    } else if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'A') {
+      runs.push(new docx.ExternalHyperlink({
+        link: node.href,
+        children: [new docx.TextRun({ text: node.textContent, style: 'Hyperlink' })],
+      }));
+    } else if (node.nodeType === Node.ELEMENT_NODE) {
+      runs.push(...inlineWordRuns(node));
     }
-    .cv-name {
-      font-size: 16pt;
-      font-weight: 700;
-      text-align: center;
-      text-transform: uppercase;
-      letter-spacing: 2px;
-      margin-bottom: 3px;
-    }
-    .cv-headline {
-      font-size: 10pt;
-      font-style: italic;
-      text-align: center;
-      color: #444;
-      margin-bottom: 3px;
-    }
-    .cv-contact {
-      font-size: 8.8pt;
-      text-align: center;
-      color: #555;
-      line-height: 1.35;
-      margin: 0;
-    }
-    .cv-contact a, .cv-body a, .cv-bullets li a, .cv-skill-row a {
-      color: #111;
-      text-decoration: underline;
-    }
-    .cv-header-rule {
-      border: none;
-      border-top: 1.5pt solid #0a0a0a;
-      margin: 7pt 0 0;
-    }
-    .cv-section-header {
-      font-size: 9.2pt;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 1.5px;
-      border-bottom: 1.5pt solid #0a0a0a;
-      padding-bottom: 2pt;
-      margin-top: 11pt;
-      margin-bottom: 5pt;
-    }
-    .cv-entry-row {
-      margin-top: 7pt;
-      width: 100%;
-      clear: both;
-    }
-    .cv-company {
-      font-size: 10.4pt;
-      font-weight: 800;
-    }
-    .cv-entry-dates {
-      font-size: 8.8pt;
-      color: #444;
-      float: right;
-      margin-left: 12pt;
-    }
-    .cv-job-title {
-      font-size: 9.6pt;
-      font-style: italic;
-      font-weight: 600;
-      color: #333;
-      margin: 0 0 3pt;
-    }
-    .cv-role-focus {
-      font-size: 9pt;
-      font-style: italic;
-      color: #4b5563;
-      margin: 0 0 5pt;
-    }
-    .cv-bullets {
-      padding-left: 15pt;
-      margin: 2pt 0 3pt;
-    }
-    .cv-bullets li {
-      font-size: 9.4pt;
-      line-height: 1.3;
-      margin-bottom: 1pt;
-    }
-    .cv-skill-row {
-      font-size: 9.4pt;
-      line-height: 1.3;
-      margin: 0 0 2pt;
-    }
-    .cv-skill-row strong {
-      font-weight: 700;
-    }
-    .cv-body {
-      font-size: 9.7pt;
-      line-height: 1.35;
-      margin: 0 0 2pt;
-    }
-    .cv-date-line {
-      font-size: 8.8pt;
-      color: #555;
-      margin-bottom: 2pt;
-    }
-    .cv-spacer { height: 3pt; }
-  </style>
-</head>
-<body>${cvHtml}</body>
-</html>`;
+  }
+  return runs.length ? runs : [new docx.TextRun(element.textContent || '')];
 }
 
-function downloadWordDocument(cvHtml, title = 'Tailored CV') {
-  const blob = new Blob(['\ufeff', buildWordDocument(cvHtml, title)], { type: 'application/msword' });
+function buildWordDocument(content, title = 'Tailored CV') {
+  const children = [];
+  for (const element of content.querySelectorAll('h1, h2, p, li, .cv-entry-row')) {
+    if (element.closest('.cv-entry-row') && !element.matches('.cv-entry-row')) continue;
+    const options = { children: inlineWordRuns(element), spacing: { after: 80 } };
+    if (element.matches('h1')) options.heading = docx.HeadingLevel.TITLE;
+    if (element.matches('h2')) options.heading = docx.HeadingLevel.HEADING_1;
+    if (element.matches('li')) options.bullet = { level: 0 };
+    if (element.matches('.cv-name, .cv-headline, .cv-contact')) options.alignment = docx.AlignmentType.CENTER;
+    if (element.matches('.cv-entry-row')) {
+      const noBorder = { style: docx.BorderStyle.NONE, size: 0, color: 'FFFFFF' };
+      children.push(new docx.Table({
+        borders: { top: noBorder, bottom: noBorder, left: noBorder, right: noBorder, insideHorizontal: noBorder, insideVertical: noBorder },
+        width: { size: 100, type: docx.WidthType.PERCENTAGE },
+        rows: [new docx.TableRow({ children: [
+          new docx.TableCell({ children: [new docx.Paragraph({ children: inlineWordRuns(element.querySelector('.cv-company')) })] }),
+          new docx.TableCell({ children: [new docx.Paragraph({ children: inlineWordRuns(element.querySelector('.cv-entry-dates')), alignment: docx.AlignmentType.RIGHT })] }),
+        ] })],
+      }));
+    } else children.push(new docx.Paragraph(options));
+  }
+  return new docx.Document({
+    creator: 'DraftApply',
+    title,
+    styles: { default: { document: { run: { font: 'Arial', size: 19 } } } },
+    sections: [{ properties: {}, children }],
+  });
+}
+
+async function downloadWordDocument(content, title = 'Tailored CV') {
+  const blob = await docx.Packer.toBlob(buildWordDocument(content, title));
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;

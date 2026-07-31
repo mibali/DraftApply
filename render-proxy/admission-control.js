@@ -48,7 +48,7 @@ export async function connectRedisAtStartup(client, timeoutMs = 30_000) {
 export class MemoryAdmissionStore {
   constructor({
     maxConcurrent = 8, maxRequests = 1000, maxTokens = 20_000_000, maxSpendMicros = 100_000_000,
-    maxConcurrentPerSubject = 1, maxRequestsPerSubject = 100, maxTokensPerSubject = 5_000_000,
+    maxConcurrentPerSubject = 2, maxRequestsPerSubject = 100, maxTokensPerSubject = 5_000_000,
     maxSpendMicrosPerSubject = 5_000_000, windowSeconds = 86400, leaseSeconds = 120, now = Date.now,
   } = {}) {
     this.limits = {
@@ -118,7 +118,7 @@ export class RedisAdmissionStore {
   constructor(client, {
     key = 'draftapply:quota', maxConcurrent = 100, maxRequests = 10000,
     maxTokens = 20_000_000, maxSpendMicros = 1_000_000_000,
-    maxConcurrentPerSubject = 1, maxRequestsPerSubject = 100,
+    maxConcurrentPerSubject = 2, maxRequestsPerSubject = 100,
     maxTokensPerSubject = 5_000_000, maxSpendMicrosPerSubject = 5_000_000,
     windowSeconds = 86400, leaseSeconds = 120,
   } = {}) {
@@ -166,14 +166,11 @@ export class RedisAdmissionStore {
 
 export function admissionMiddleware(store, estimate = req => {
   const inputTokens = Math.ceil(JSON.stringify(req.body || {}).length / 3);
-  // Charge a conservative worst-case reservation for every provider stage and
-  // retry. We intentionally over-reserve rather than let fallback or audit
-  // calls bypass token/spend caps when a provider omits usage metadata.
+  // Charge a conservative worst-case reservation for provider retries. We
+  // intentionally over-reserve when a provider omits usage metadata.
   const { inputMultiplier, outputReserve } = req.path === '/api/cv/tailor'
-    ? { inputMultiplier: 8, outputReserve: 30_000 }
-    : req.path === '/api/cv/analyze'
-      ? { inputMultiplier: 5, outputReserve: 15_000 }
-      : { inputMultiplier: 4, outputReserve: 12_000 };
+    ? { inputMultiplier: 5, outputReserve: 15_000 }
+    : { inputMultiplier: 4, outputReserve: 12_000 };
   const tokens = inputTokens * inputMultiplier
     + Math.max(outputReserve, Math.max(0, Number(req.body?.maxTokens) || 0));
   const microsPerThousandTokens = Math.max(0, Number(process.env.ESTIMATED_COST_MICROS_PER_1K_TOKENS) || 1000);
@@ -186,8 +183,12 @@ export function admissionMiddleware(store, estimate = req => {
     try { id = await store.reserve(estimate(req)); } catch (error) {
       const denied = error instanceof AdmissionDeniedError;
       if (denied) console.warn(`[admission] denied ${req.path}: ${error.code}`);
+      const concurrencyDenied = denied && (error.code === 'quota_subject_concurrency' || error.code === 'quota_global_concurrency');
+      if (concurrencyDenied) res.set('Retry-After', '5');
       return res.status(denied ? 429 : 503).json({
-        error: denied ? 'Request quota exceeded' : 'Quota service unavailable',
+        error: concurrencyDenied
+          ? 'DraftApply is already handling the maximum number of requests. Please retry in a few seconds.'
+          : denied ? 'Request quota exceeded' : 'Quota service unavailable',
         code: denied ? error.code : 'quota_store_unavailable',
       });
     }

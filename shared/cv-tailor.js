@@ -2899,12 +2899,35 @@ Return the corrected JSON object now.`;
     }
   }
 
+  assessSubstantiveEvidence(cvData = {}, skeleton = this.buildCvSkeleton(cvData)) {
+    const roleEvidence = (skeleton.roles || []).some(role => (role.originalBullets || []).some(text => String(text).length >= 20));
+    const projectEvidence = (skeleton.projects || []).some(project =>
+      (project.originalBullets || []).some(text => String(text).length >= 20)
+      || (project.skills || []).length >= 2);
+    const extraEvidence = (skeleton.extraSections || []).some(section =>
+      (section.items || []).some(text => String(text).length >= 20));
+    const summaryEvidence = String(cvData?.summary || '').trim().length >= 80;
+    const educationEvidence = (skeleton.educationLines || []).some(line => String(line).trim().length >= 12);
+    const skillsEvidence = (cvData?.skills || []).length >= 3
+      || (skeleton.skillCategories || []).reduce((count, category) => count + (category.items || []).length, 0) >= 3;
+    const admitted = roleEvidence || projectEvidence || extraEvidence || summaryEvidence
+      || (educationEvidence && skillsEvidence);
+    return { admitted, roleEvidence, projectEvidence, extraEvidence, summaryEvidence, educationEvidence, skillsEvidence };
+  }
+
+  recoverStructuredContent(skeleton, options = {}) {
+    // An empty candidate document deliberately contributes no model prose.
+    // The normal validator then performs its existing deterministic backfill
+    // from source summary, role bullets, skills, and locked sections.
+    return this.validateStructuredContent({}, skeleton, options);
+  }
+
   // Deterministic validation of model-returned mutable content against the
   // locked skeleton. Returns a normalised content object, or null when the
   // output is unsalvageable (caller falls back to the legacy text path).
   validateStructuredContent(content, skeleton, { matchMap = [], confirmedSkills = [], cvData = {} } = {}) {
     if (!content || typeof content !== 'object' || Array.isArray(content)) return null;
-    if (!skeleton || !Array.isArray(skeleton.roles) || skeleton.roles.length === 0) return null;
+    if (!skeleton || !Array.isArray(skeleton.roles)) return null;
 
     const safeConfirmedSkills = this._normaliseConfirmedSkills(confirmedSkills);
     const groundingContext = buildGroundingContext(cvData, { confirmedFacts: safeConfirmedSkills });
@@ -2940,11 +2963,12 @@ Return the corrected JSON object now.`;
     const summaryFellBelowSourceShape = originalSummarySentences.length > 1
       && (groundedSummarySentences.length < 2
         || groundedSummarySentences.length < suppliedSummarySentences.length / 2);
-    const summary = summaryFellBelowSourceShape
+    const recoverOriginalSummary = !acceptedSummary && originalSummarySentences.length > 0;
+    const summary = summaryFellBelowSourceShape || recoverOriginalSummary
       ? this._clampInline(originalSummarySentences.join(' '), 1200)
       : acceptedSummary;
     const summaryEvidence = summary
-      ? summaryFellBelowSourceShape
+      ? (summaryFellBelowSourceShape || recoverOriginalSummary)
         ? ['summary:0'].filter(id => groundingContext.sourceIndex[id])
         : [...summaryEvidenceIds]
       : [];
@@ -3034,7 +3058,11 @@ Return the corrected JSON object now.`;
       return { id: skel.id, focus: focus || null, focusEvidence, bullets, bulletEvidence };
     });
 
-    if (!summary && roles.every(r => r.bullets.length === 0)) return null;
+    if (!summary && roles.every(r => r.bullets.length === 0)
+      && !(skeleton.projects || []).length
+      && !(skeleton.extraSections || []).length
+      && !(skeleton.educationLines || []).length
+      && competencies.length === 0) return null;
     const competencyEvidence = competencies.map(category => ({
       label: category.label,
       items: category.items.map(item => ({

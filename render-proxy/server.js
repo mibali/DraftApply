@@ -4,8 +4,6 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import crypto from 'crypto';
 import multer from 'multer';
-import pdfParse from 'pdf-parse/lib/pdf-parse.js';
-import mammoth from 'mammoth';
 import { resolve } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { createClient } from 'redis';
@@ -25,9 +23,7 @@ import { evaluateAnswer, buildRegenerationFeedback } from '../shared/answer-eval
 import { buildGroundingContext, validateApplicationAnswer } from '../shared/grounding-harness.js';
 import { extractProfileUrl } from '../shared/profile-url-extractor.js';
 import { validateAnswerStructure } from '../shared/answer-structure-validator.js';
-import {
-  extractLinkAnnotationsFromHtml, extractAnnotationLabel, linkLabelFromUrl,
-} from './link-annotations.js';
+import { extractCvFile, CvExtractionError } from './cv-file-extractor.js';
 import {
   rebuildTailoredCvAgentContext,
   runApplicationAnswerAgents,
@@ -118,7 +114,7 @@ const SUBJECT_QUOTA_OPTIONS = {
   maxRequests: coercePositiveInteger(process.env.QUOTA_MAX_REQUESTS, 10000),
   maxTokens: coercePositiveInteger(process.env.QUOTA_MAX_TOKENS, 20_000_000),
   maxSpendMicros: coercePositiveInteger(process.env.QUOTA_MAX_SPEND_MICROS, 1_000_000_000),
-  maxConcurrentPerSubject: coercePositiveInteger(process.env.QUOTA_MAX_CONCURRENT_PER_SUBJECT, 1),
+  maxConcurrentPerSubject: coercePositiveInteger(process.env.QUOTA_MAX_CONCURRENT_PER_SUBJECT, 2),
   maxRequestsPerSubject: coercePositiveInteger(process.env.QUOTA_MAX_REQUESTS_PER_SUBJECT, 100),
   maxTokensPerSubject: coercePositiveInteger(process.env.QUOTA_MAX_TOKENS_PER_SUBJECT, 5_000_000),
   maxSpendMicrosPerSubject: coercePositiveInteger(process.env.QUOTA_MAX_SPEND_MICROS_PER_SUBJECT, 5_000_000),
@@ -1679,6 +1675,9 @@ app.post('/api/generate', authRequired, generateLimiter, validateCostlyText, cos
         pageUrl:        body.pageUrl || undefined,
         platform:       body.platform || undefined,
         maxChars:       Number.isFinite(Number(body.maxChars)) ? Number(body.maxChars) : undefined,
+        confirmedFacts: Array.isArray(body.confirmedFacts)
+          ? body.confirmedFacts.filter(value => typeof value === 'string' && value.trim()).slice(0, 20)
+          : [],
       });
       systemPrompt = result.systemPrompt;
       userPrompt   = result.userPrompt;
@@ -1911,126 +1910,20 @@ const upload = multer({
 app.post('/api/cv/upload', authRequired, generateLimiter, parserAdmission, upload.single('cv'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file provided' });
-    const buffer = req.file.buffer;
-    const mimetype = req.file.mimetype;
-    const pdfMagic = buffer.subarray(0, 5).toString() === '%PDF-';
-    const zipMagic = buffer[0] === 0x50 && buffer[1] === 0x4b;
-    if ((mimetype === 'application/pdf' && !pdfMagic) ||
-        (mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' && !zipMagic) ||
-        !['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain'].includes(mimetype)) {
-      return res.status(400).json({ error: 'Unsupported or invalid CV file', code: 'invalid_cv_file' });
-    }
-
-    let text = '';
-    let linkAnnotations = [];
-    if (mimetype === 'application/pdf') {
-      // Extract text AND hyperlink annotations (e.g. LinkedIn URL hidden behind hyperlinked text)
-      const collectedLinks = [];
-      let pdfData;
-      try {
-        pdfData = await pdfParse(buffer, {
-          pagerender: async function(pageData) {
-            // Fetch text content BEFORE processing annotations so each link's
-            // rectangle can be correlated with the text sitting inside it -
-            // a PDF link annotation carries only a URL and a bounding box,
-            // never the underlying words, so without this the label is just
-            // a domain guess ("sourcegraph.com") that never matches the
-            // CV's actual prose ("How Support Engineers Use Deep Search...").
-            const textContent = await pageData.getTextContent();
-            try {
-              const annotations = await pageData.getAnnotations();
-              for (const ann of annotations) {
-                const url = ann.url || ann.unsafeUrl;
-                if (url) collectedLinks.push({ url, label: extractAnnotationLabel(ann.rect, textContent.items) });
-              }
-            } catch (_) { /* annotations unavailable, ignore */ }
-            // Standard text rendering (matches pdf-parse default)
-            let lastY = '';
-            let pageText = '';
-            for (const item of textContent.items) {
-              if (lastY === item.transform[5] || !lastY) {
-                pageText += item.str;
-              } else {
-                pageText += '\n' + item.str;
-              }
-              lastY = item.transform[5];
-            }
-            return pageText;
-          }
-        });
-      } catch (annotatedParseError) {
-        // The annotation-aware render path can fail on PDFs the default
-        // parser still reads. Never let link extraction cost the upload.
-        try {
-          pdfData = await pdfParse(buffer);
-        } catch (parseError) {
-          console.error('CV upload: PDF unreadable:', parseError.message);
-          return res.status(422).json({
-            error: 'This PDF could not be read — it may be scanned, password-protected, or use a format this tool cannot parse. Try exporting it as a .docx instead, or paste your CV text directly.',
-          });
-        }
-      }
-      text = pdfData.text;
-      if (collectedLinks.length > 0) {
-        // linkAnnotations already carries every collected URL back to the
-        // client for hyperlinking and answer generation - appending them as
-        // a visible "Links:" text block duplicates that information as bare
-        // URLs, and (since a PDF's annotations include ordinary reference
-        // links inside body bullets, not just the candidate's own profile
-        // links) gets misread as extra contact fields or extra CV content.
-        const byUrl = new Map();
-        for (const { url, label } of collectedLinks) {
-          if (!byUrl.has(url)) byUrl.set(url, label);
-        }
-        linkAnnotations = [...byUrl.entries()].map(([url, label]) => ({ text: label || linkLabelFromUrl(url), url }));
-      }
-    } else if (mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-      // Extract text + hyperlink URLs (e.g. LinkedIn linked behind display text)
-      let rawResult, htmlResult;
-      try {
-        [rawResult, htmlResult] = await Promise.all([
-          mammoth.extractRawText({ buffer }),
-          mammoth.convertToHtml({ buffer })
-        ]);
-      } catch (docxError) {
-        console.error('CV upload: DOCX unreadable:', docxError.message);
-        return res.status(422).json({
-          error: 'This Word file could not be read — it may be corrupted or not a real .docx. Re-save it as .docx or PDF, or paste your CV text instead.',
-        });
-      }
-      text = rawResult.value;
-      linkAnnotations = extractLinkAnnotationsFromHtml(htmlResult.value);
-    } else if (mimetype === 'text/plain') {
-      text = buffer.toString('utf-8');
-    } else {
-      return res.status(400).json({
-        error: 'Unsupported file type — upload a PDF, DOCX, or TXT. Legacy .doc files are not supported: re-save as .docx or PDF.',
-      });
-    }
-
-    text = String(text)
-      .replace(/\r\n/g, '\n')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
-
-    if (!text) {
-      return res.status(422).json({
-        error: 'No selectable text found in this file — it looks like a scanned or image-based document. Export a text-based version, or paste your CV text instead.',
-      });
-    }
-    if (text.length > MAX_CV_CHARS) return res.status(413).json({
-      error: 'Extracted CV text is too large', code: 'cv_too_large_for_complete_context',
+    const result = await extractCvFile({ buffer: req.file.buffer, mimetype: req.file.mimetype, filename: req.file.originalname }, {
+      signal: requestSignal(),
+      maxChars: MAX_CV_CHARS,
     });
 
     res.json({
       success: true,
-      text,
-      linkAnnotations,
+      ...result,
       filename: req.file.originalname,
       size: req.file.size
     });
   } catch (e) {
-    console.error('CV upload error:', e);
+    if (e instanceof CvExtractionError) return res.status(e.status).json({ error: e.message, code: e.code });
+    console.error('CV upload error:', e?.message);
     res.status(500).json({ error: 'Could not process this file.', code: 'cv_parse_failed' });
   }
 });
@@ -2242,103 +2135,6 @@ async function enrichJdData(jdParser, regexParsed, jdText) {
   }
 }
 
-app.post('/api/cv/analyze', authRequired, generateLimiter, validateCostlyText, networkPaidLimit, costlyAdmission, async (req, res) => {
-  const { cvText, jobTitle = '', company = '', jobDescription, confirmedSkills = [] } = req.body || {};
-
-  if (!cvText || cvText.length < 100) {
-    return res.status(400).json({ error: 'cvText must be at least 100 characters' });
-  }
-  if (!jobDescription || jobDescription.length < 50) {
-    return res.status(400).json({ error: 'jobDescription must be at least 50 characters' });
-  }
-
-  try {
-    const jdParser = new JDParser();
-
-    // CV parse and regex JD parse are independent — run in parallel
-    const [cvData, jdDataRegex] = await Promise.all([
-      Promise.resolve(new CVParser().parse(cvText)),
-      Promise.resolve(jdParser.parse(jobDescription, jobTitle, company)),
-    ]);
-
-    // LLM JD enrichment runs in parallel with domain suggestions
-    const [{ jdData, source: jdAnalysisSource }, llmSuggestionsResult] = await Promise.all([
-      enrichJdData(jdParser, jdDataRegex, jobDescription),
-      fetchLLMDomainSuggestions(jdDataRegex.jobTitle, jdDataRegex.tools).catch(() => null),
-    ]);
-
-    const tailor = new CVTailor();
-    let tailorAgentContext = runTailoredCvAgents({
-      cvText,
-      jobDescription,
-      jobTitle,
-      company,
-      confirmedSkills,
-      cvData,
-      jdData,
-      tailor,
-    });
-    tailorAgentContext = await applyEmbeddingRetrieval(tailorAgentContext, tailor);
-    const staticFallback = tailor.suggestDomainSkills(jdData, cvData);
-    const llmRaw = llmSuggestionsResult;
-
-    // Filter LLM suggestions against what's already in the JD or CV
-    let domainSuggestions = staticFallback;
-    if (llmRaw?.length > 0) {
-      const inJd = new Set([
-        ...(jdData.tools          || []).map(t => t.toLowerCase()),
-        ...(jdData.requiredSkills  || []).map(s => s.toLowerCase()),
-        ...(jdData.preferredSkills || []).map(s => s.toLowerCase()),
-      ]);
-      const cvLower = cvText.toLowerCase();
-
-      const filtered = llmRaw.filter(tool => {
-        const low = tool.toLowerCase();
-        // Skip if tool (or any 4+ char word of it) already appears in the JD
-        if (inJd.has(low)) return false;
-        if (low.split(/\s+/).some(w => w.length >= 4 && inJd.has(w))) return false;
-        // Skip if already in the candidate's CV
-        if (cvLower.includes(low)) return false;
-        return true;
-      });
-
-      if (filtered.length > 0) domainSuggestions = filtered;
-    }
-
-    assertBudget();
-    return res.json({
-      matchReport: tailorAgentContext.matchReport,
-      jobTitle: jdData.jobTitle,
-      company:  jdData.company,
-      domainSuggestions,
-      jdAnalysisSource,
-      workflow: 'tailoredCv',
-      agentChain: WORKFLOW_AGENT_CHAINS.tailoredCv,
-      gapAnalysis: tailorAgentContext.gapAnalysis,
-      keywordOptimisation: tailorAgentContext.keywordOptimisation,
-      atsFormatting: tailorAgentContext.atsFormatting,
-      truthfulness: tailorAgentContext.truthfulness,
-      truthfulnessReport: buildTruthfulnessReport(tailorAgentContext),
-      domainRisk: summarizeDomainRisk(tailorAgentContext.domainRisk),
-      ...buildQualityMetadata({ provider: 'deterministic' }),
-      evidenceRetrieval: tailorAgentContext.evidenceRetrieval,
-      agentRun: summarizeAgentRun(tailorAgentContext),
-      agentInsights: buildAgentInsights(tailorAgentContext),
-      modelRouter: selectModelRoute('jd_enrichment', {
-        hasLocal: Boolean(LOCAL_LLM_BASE_URL),
-        hasHosted: Boolean(GROQ_API_KEY || OPENROUTER_API_KEY),
-        localModel: LOCAL_LLM_MODEL,
-      }),
-    });
-  } catch (e) {
-    if (e instanceof RequestDeadlineError || (e?.name === 'AbortError' && remainingMs() <= 0)) {
-      return res.status(504).json({ error: 'Request deadline exceeded.', code: 'request_deadline_exceeded', ...safetyMetadata() });
-    }
-    console.error('[DraftApply] Analyze error:', e.message);
-    return res.status(500).json({ error: 'Failed to analyze CV match.' });
-  }
-});
-
 app.post('/api/cv/tailor', authRequired, generateLimiter, validateCostlyText, costlyIdempotency, networkPaidLimit, costlyAdmission, async (req, res) => {
   const { cvText, jobTitle = '', company = '', jobDescription, confirmedSkills = [] } = req.body || {};
 
@@ -2383,7 +2179,7 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, validateCostlyText, co
     let data = null;
     let tailorProvider = null;
     let tailoredCvText = '';
-    let auditSkipped = false;
+    let recovered = false;
     let structuredCv = null;
     const generationMode = 'structured';
 
@@ -2398,10 +2194,11 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, validateCostlyText, co
         code: 'structured_cv_generation_required',
       });
     }
-    if (!Array.isArray(cvData.experience) || cvData.experience.length === 0) {
+    const admissionSkeleton = tailor.buildCvSkeleton(cvData, jdData);
+    if (!tailor.assessSubstantiveEvidence(cvData, admissionSkeleton).admitted) {
       return res.status(422).json({
-        error: 'No work-experience roles could be parsed from this CV. Review the CV formatting and try again.',
-        code: 'cv_experience_parse_failed',
+        error: 'This CV does not contain enough substantive career, project, academic, or skills evidence to tailor safely.',
+        code: 'cv_substantive_evidence_required',
       });
     }
     {
@@ -2428,62 +2225,21 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, validateCostlyText, co
         const structuredData = await structuredCompletion.response.json().catch(() => null);
         const structuredRaw = structuredData?.choices?.[0]?.message?.content;
         const structuredTruncated = structuredData?.choices?.[0]?.finish_reason === 'length';
-        let content = structuredTruncated
-          ? null
-          : tailor.validateStructuredContent(
+        let content = structuredTruncated ? null : tailor.validateStructuredContent(
               tailor.parseStructuredContent(structuredRaw),
               skeleton,
               { matchMap, confirmedSkills, cvData }
             );
-        let acceptedCompletion = structuredCompletion;
-        let acceptedData = structuredData;
-
+        if (!content) {
+          content = tailor.recoverStructuredContent(skeleton, { matchMap, confirmedSkills, cvData });
+          recovered = true;
+        }
         if (content) {
-          // Structured audit: same JSON shape, unsupported claims removed.
-          // Invalid/truncated audit output keeps the pre-audit content.
-          auditSkipped = true;
-          try {
-            const auditPrompt = tailor.buildStructuredAuditPrompt(skeleton, content, matchMap);
-            const auditCompletion = await callChatCompletionWithFallback({
-              workflow: 'cv_tailor',
-              temperature: auditPrompt.temperature,
-              maxTokens: 2500,
-              timeoutMs: 30000,
-              fallbackTimeoutMs: 30000,
-              maxFallbackModels: 2,
-              allowFallback: OPENROUTER_TAILOR_FALLBACK,
-              responseFormat: { type: 'json_object' },
-              messages: [
-                { role: 'system', content: auditPrompt.systemPrompt },
-                { role: 'user',   content: auditPrompt.userPrompt   },
-              ],
-            });
-            const auditData = await auditCompletion.response.json().catch(() => null);
-            if (auditData?.choices?.[0]?.finish_reason !== 'length') {
-              const audited = tailor.validateStructuredContent(
-                tailor.parseStructuredContent(auditData?.choices?.[0]?.message?.content),
-                skeleton,
-                { matchMap, confirmedSkills, cvData }
-              );
-              if (audited) {
-                content = audited;
-                auditSkipped = false;
-                acceptedCompletion = auditCompletion;
-                acceptedData = auditData;
-              }
-            }
-          } catch (auditError) {
-            if (auditError instanceof RequestDeadlineError || (auditError?.name === 'AbortError' && remainingMs() <= 0)) throw new RequestDeadlineError();
-            const detail = auditError instanceof LLMProviderError
-              ? `${auditError.provider} ${auditError.status}` : auditError.message;
-            console.warn('[DraftApply] Structured audit skipped:', detail);
-          }
-
           structuredCv = { skeleton, content };
           tailoredCvText = tailor.renderTailoredCV(skeleton, content);
-          completion = acceptedCompletion;
-          data = acceptedData;
-          tailorProvider = acceptedCompletion.provider;
+          completion = structuredCompletion;
+          data = structuredData;
+          tailorProvider = structuredCompletion.provider;
         } else {
           console.warn(`[DraftApply] Structured generation output rejected${structuredTruncated ? ' (truncated)' : ''}.`);
           return res.status(502).json({
@@ -2523,7 +2279,13 @@ app.post('/api/cv/tailor', authRequired, generateLimiter, validateCostlyText, co
       recruiterReview,
       warnings,
       changedSections,
-      auditSkipped,
+      schemaVersion: 1,
+      skeleton: structuredCv.skeleton,
+      content: structuredCv.content,
+      renderedText: tailoredCvText,
+      audit: { status: 'passed', recovered },
+      recoveryNotice: recovered ? 'We safely kept your original, source-backed CV content because the generated draft was incomplete.' : undefined,
+      analysis: { matchReport, recruiterReview, warnings, agentInsights: buildAgentInsights(tailorAgentContext) },
       structuredCv,
       generationMode,
       jdAnalysisSource,

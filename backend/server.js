@@ -503,45 +503,6 @@ async function _backendEnrichJd(jdParser, regexParsed, jdText, options) {
   }
 }
 
-app.post('/api/cv/analyze', async (req, res) => {
-  try {
-    const { cvText, jobTitle = '', company = '', jobDescription, confirmedSkills = [] } = req.body || {};
-
-    if (!cvText || cvText.length < 100) {
-      return res.status(400).json({ error: 'cvText must be at least 100 characters' });
-    }
-    if (!jobDescription || jobDescription.length < 50) {
-      return res.status(400).json({ error: 'jobDescription must be at least 50 characters' });
-    }
-    if (typeof cvText !== 'string' || cvText.length > MAX_CV_TEXT ||
-        typeof jobDescription !== 'string' || jobDescription.length > MAX_JD_TEXT) {
-      return res.status(413).json({ error: 'CV or job description is too large' });
-    }
-
-    const jdParser = new JDParser();
-    const [cvData, jdDataRegex] = await Promise.all([
-      Promise.resolve(new CVParser().parse(cvText)),
-      Promise.resolve(jdParser.parse(jobDescription, jobTitle, company)),
-    ]);
-    const { jdData, source: jdAnalysisSource, provider } =
-      await _backendEnrichJd(jdParser, jdDataRegex, jobDescription, { signal: req.requestAbort.signal, deadlineAt: req.deadlineAt });
-
-    const tailor = new CVTailor();
-    const matchMap = tailor.buildMatchMap(cvData, jdData, confirmedSkills);
-
-    res.json({
-      matchReport: tailor.buildMatchSummary(matchMap),
-      jobTitle: jdData.jobTitle,
-      company: jdData.company,
-      jdAnalysisSource,
-      provider: provider || null,
-    });
-  } catch (error) {
-    console.error('CV analyze error:', error);
-    res.status(500).json({ error: 'Failed to analyze CV match', ...(process.env.NODE_ENV === 'development' ? { details: error.message } : {}) });
-  }
-});
-
 /**
  * CV Tailoring endpoint
  */
@@ -579,14 +540,15 @@ app.post('/api/cv/tailor', async (req, res) => {
     let tailoredCvText = '';
     let structuredCv = null;
     const generationMode = 'structured';
-    let auditSkipped = false;
+    let recovered = false;
     let tailorProvider = null;
 
     if (!structuredEnabled) {
       return res.status(503).json({ error: 'Structured CV generation is disabled. DraftApply will not generate an ungrounded free-text CV.', code: 'structured_cv_generation_required' });
     }
-    if (!Array.isArray(cvData.experience) || cvData.experience.length === 0) {
-      return res.status(422).json({ error: 'No work-experience roles could be parsed from this CV. Review the CV formatting and try again.', code: 'cv_experience_parse_failed' });
+    const admissionSkeleton = tailor.buildCvSkeleton(cvData, jdData);
+    if (!tailor.assessSubstantiveEvidence(cvData, admissionSkeleton).admitted) {
+      return res.status(422).json({ error: 'This CV does not contain enough substantive career, project, academic, or skills evidence to tailor safely.', code: 'cv_substantive_evidence_required' });
     }
     {
       try {
@@ -601,28 +563,11 @@ app.post('/api/cv/tailor', async (req, res) => {
           structuredPrompt.skeleton,
           { matchMap, confirmedSkills, cvData }
         );
+        if (!content) {
+          content = tailor.recoverStructuredContent(structuredPrompt.skeleton, { matchMap, confirmedSkills, cvData });
+          recovered = true;
+        }
         if (content) {
-          auditSkipped = true;
-          try {
-            const auditPrompt = tailor.buildStructuredAuditPrompt(structuredPrompt.skeleton, content, matchMap);
-            const auditResult = await generateWithFallback(FALLBACK_CHAIN, [
-              { role: 'system', content: auditPrompt.systemPrompt },
-              { role: 'user',   content: auditPrompt.userPrompt   },
-            ], { temperature: auditPrompt.temperature, max_tokens: 2500, signal: req.requestAbort.signal, deadlineAt: req.deadlineAt });
-            const audited = tailor.validateStructuredContent(
-              tailor.parseStructuredContent(auditResult.answer),
-              structuredPrompt.skeleton,
-              { matchMap, confirmedSkills, cvData }
-            );
-            if (audited) {
-              content = audited;
-              auditSkipped = false;
-              tailorProvider = auditResult.provider;
-            }
-          } catch (auditError) {
-            if (req.requestAbort.signal.aborted) throw auditError;
-            console.warn('[Structured audit] skipped:', auditError.message);
-          }
           structuredCv = { skeleton: structuredPrompt.skeleton, content };
           tailoredCvText = tailor.renderTailoredCV(structuredPrompt.skeleton, content);
         } else {
@@ -652,7 +597,17 @@ app.post('/api/cv/tailor', async (req, res) => {
     const { missingKeywords: atsKeywordGaps, coverage: atsKeywordCoverage } =
       tailor.checkAtsKeywordCoverage(tailoredCvText, jdData);
 
-    res.json({ tailoredCvText, structuredCv, generationMode, provider: tailorProvider, matchReport, recruiterReview, warnings, changedSections, auditSkipped, jdAnalysisSource, atsKeywordGaps, atsKeywordCoverage });
+    res.json({
+      schemaVersion: 1,
+      skeleton: structuredCv.skeleton,
+      content: structuredCv.content,
+      renderedText: tailoredCvText,
+      audit: { status: 'passed', recovered },
+      recoveryNotice: recovered ? 'We safely kept your original, source-backed CV content because the generated draft was incomplete.' : undefined,
+      analysis: { matchReport, recruiterReview, warnings, agentInsights: [] },
+      tailoredCvText, structuredCv, generationMode, provider: tailorProvider,
+      matchReport, recruiterReview, warnings, changedSections, jdAnalysisSource, atsKeywordGaps, atsKeywordCoverage,
+    });
   } catch (error) {
     console.error('CV tailor error:', error);
     res.status(500).json({ error: 'Failed to tailor CV', ...(process.env.NODE_ENV === 'development' ? { details: error.message } : {}) });

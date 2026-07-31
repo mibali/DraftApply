@@ -354,7 +354,7 @@ describe('validateStructuredContent', () => {
 
   it('returns null for unusable input', () => {
     expect(tailor.validateStructuredContent(null, skeleton, opts)).toBeNull();
-    expect(tailor.validateStructuredContent({ summary: '' }, { roles: [] }, opts)).toBeNull();
+    expect(tailor.validateStructuredContent({ summary: '' }, { roles: [] }, { ...opts, cvData: {} })).toBeNull();
   });
 
   it('backfills a role the model dropped from its original bullets - a role can never disappear', () => {
@@ -924,5 +924,55 @@ https://github.com/sourcegraph/handbook/blob/main/content/k8-migration.md`);
     expect(skel.contacts).toEqual(['Birmingham, UK | mtbdesigns01@gmail.com | 07401731548 | LinkedIn']);
     expect(skel.educationLines.join(' ')).not.toMatch(/https?:\/\//);
     expect(skel.educationLines.some(line => /^links?:?$/i.test(line))).toBe(false);
+  });
+});
+
+describe('substantive evidence admission and safe recovery', () => {
+  it('admits an academic/project-first CV and recovers without inventing a role', () => {
+    const academic = {
+      contactInfo: { name: 'Amina Student', email: 'amina@example.com' },
+      summary: 'Computer science researcher focused on reproducible machine learning systems and careful evaluation of public datasets.',
+      experience: [],
+      projects: [{
+        name: 'Open Climate Classifier',
+        url: 'https://github.com/amina/climate-classifier',
+        bullets: ['Built and evaluated a Python classifier using documented public climate datasets.'],
+        skills: ['Python', 'Machine Learning'],
+      }],
+      skills: ['Python', 'Machine Learning', 'Data Analysis'],
+      education: [{ degree: 'MSc Computer Science', institution: 'Example University', dates: '2026' }],
+      rawText: 'Amina Student\nPROFESSIONAL SUMMARY\nComputer science researcher focused on reproducible machine learning systems and careful evaluation of public datasets.\nPROJECTS\nOpen Climate Classifier\nEDUCATION\nMSc Computer Science, Example University, 2026',
+    };
+    const skeleton = tailor.buildCvSkeleton(academic, { jobTitle: 'Research Engineer' });
+    expect(tailor.assessSubstantiveEvidence(academic, skeleton).admitted).toBe(true);
+    const content = tailor.recoverStructuredContent(skeleton, { cvData: academic });
+    expect(content).not.toBeNull();
+    expect(skeleton.roles).toEqual([]);
+    const rendered = tailor.renderTailoredCV(skeleton, content);
+    expect(rendered).toContain('PROJECTS');
+    expect(rendered).toContain('EDUCATION, CERTIFICATIONS & RECOGNITION');
+    expect(rendered).not.toContain('PROFESSIONAL EXPERIENCE');
+  });
+
+  it('recovers a one-sentence summary-only CV after malformed model output', () => {
+    const cvData = {
+      summary: 'Experienced interdisciplinary researcher who designs reproducible studies, communicates complex findings clearly, and coordinates collaborative academic programmes.',
+      experience: [], skills: [], education: [],
+    };
+    const skeleton = tailor.buildCvSkeleton(cvData);
+    expect(tailor.assessSubstantiveEvidence(cvData, skeleton).admitted).toBe(true);
+    const recovered = tailor.recoverStructuredContent(skeleton, { cvData });
+    expect(recovered.summary).toBe(cvData.summary);
+    expect(recovered.summaryEvidence).toEqual(['summary:0']);
+    expect(recovered.roles).toEqual([]);
+  });
+
+  it.each([
+    {},
+    { contactInfo: { name: 'Only Contact', email: 'only@example.com', phone: '0123456789' }, rawText: 'Only Contact\nonly@example.com\n0123456789' },
+    { contactInfo: { name: 'Noise' }, rawText: '%%%% 1234 ---- xxxx' },
+  ])('rejects empty, contact-only, and noisy CV data', cv => {
+    const skeleton = tailor.buildCvSkeleton(cv, { jobTitle: 'Engineer' });
+    expect(tailor.assessSubstantiveEvidence(cv, skeleton).admitted).toBe(false);
   });
 });

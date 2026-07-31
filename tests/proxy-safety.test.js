@@ -3,7 +3,7 @@ import {
   CircuitBreaker, ProviderAttemptTimeoutError, RequestDeadlineError, attemptSignal, boundedTimeout,
   isCircuitFailure, recordProviderTrace, recordProviderUsage, reconciledUsage, requestSafetyMiddleware,
 } from '../render-proxy/safety-runtime.js';
-import { MemoryAdmissionStore } from '../render-proxy/admission-control.js';
+import { admissionMiddleware, MemoryAdmissionStore } from '../render-proxy/admission-control.js';
 
 describe('production proxy safety primitives', () => {
   it('bounds every attempt by the absolute request deadline', () => {
@@ -110,6 +110,25 @@ describe('production proxy safety primitives', () => {
       subjectKey: 'install-a', tokens: estimatedTailorTokens, spendMicros: estimatedTailorSpendMicros,
     });
     await expect(store.release(second)).resolves.toBeUndefined();
+  });
+
+  it('allows Tailor CV and one answer concurrently by default, then gives a short retry response', async () => {
+    const store = new MemoryAdmissionStore();
+    await store.reserve({ subjectKey: 'install-a', tokens: 1 });
+    await store.reserve({ subjectKey: 'install-a', tokens: 1 });
+
+    const middleware = admissionMiddleware(store, () => ({ subjectKey: 'install-a', tokens: 1 }));
+    const headers = {};
+    const res = {
+      set: (name, value) => { headers[name] = value; },
+      status: status => ({ json: body => ({ status, body }) }),
+    };
+    const result = await middleware({ path: '/api/generate' }, res, () => {});
+    expect(result).toMatchObject({
+      status: 429,
+      body: { code: 'quota_subject_concurrency', error: expect.stringMatching(/retry in a few seconds/i) },
+    });
+    expect(headers['Retry-After']).toBe('5');
   });
 
   it('reconciles usage only when every successful provider call reports it', () => {

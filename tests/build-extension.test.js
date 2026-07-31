@@ -36,6 +36,7 @@ describe('extension build configuration', () => {
     expect(result.proxyUrl).toBe(OFFICIAL_PROXY_URL);
     expect(result.manifest.host_permissions).toContain(`${OFFICIAL_PROXY_URL}/*`);
     expect(readFileSync(join(dir, 'build-config.js'), 'utf8')).toContain(OFFICIAL_PROXY_URL);
+    expect(readFileSync(join(dir, 'vendor', 'docx.iife.js'), 'utf8')).toContain('var docx =');
   });
 
   it.each(['http://example.com', 'ftp://localhost', 'not a URL', 'https://user:pass@example.com'])
