@@ -84,9 +84,9 @@ export async function ocrPdf({ buffer, pageCount, signal, limits = OCR_LIMITS, r
   const bounded = promise => Promise.race([promise, timeout, cancelled]);
   const langPath = join(dirname(fileURLToPath(import.meta.url)), 'node_modules/@tesseract.js-data/eng/4.0.0_best_int');
   let worker;
+  let workerPromise;
   let pdf;
   let loadingTask;
-  let finished = false;
   const cleanupBound = task => Promise.race([Promise.resolve(task).catch(() => {}), new Promise(resolve => setTimeout(resolve, 1000))]);
   try {
     const pdfjs = runtime.pdfjs || await bounded(import('pdfjs-dist/legacy/build/pdf.mjs'));
@@ -95,11 +95,7 @@ export async function ocrPdf({ buffer, pageCount, signal, limits = OCR_LIMITS, r
     if (!Number.isInteger(pdf.numPages) || pdf.numPages < 1 || pdf.numPages > limits.maxPages) {
       throw new CvExtractionError('ocr_page_limit', `OCR is limited to ${limits.maxPages} pages. Upload a text-based PDF/DOCX or paste your CV text.`);
     }
-    const workerPromise = (runtime.createWorker || createWorker)('eng', 1, { langPath, gzip: true, cacheMethod: 'none' });
-    workerPromise.then(created => {
-      worker = created;
-      if (finished) cleanupBound(created.terminate());
-    }).catch(() => {});
+    workerPromise = (runtime.createWorker || createWorker)('eng', 1, { langPath, gzip: true, cacheMethod: 'none' });
     worker = await bounded(workerPromise);
     const pages = [];
     for (let number = 1; number <= pdf.numPages; number += 1) {
@@ -119,9 +115,14 @@ export async function ocrPdf({ buffer, pageCount, signal, limits = OCR_LIMITS, r
     }
     return normalize(pages.join('\n\n'));
   } finally {
-    finished = true;
     clearTimeout(timer);
     signal?.removeEventListener('abort', cancelListener);
+    if (!worker && workerPromise) {
+      worker = await Promise.race([
+        Promise.resolve(workerPromise).catch(() => undefined),
+        new Promise(resolve => setTimeout(resolve, 1000)),
+      ]);
+    }
     await cleanupBound(worker?.terminate());
     await cleanupBound(pdf?.destroy() || loadingTask?.destroy());
   }
