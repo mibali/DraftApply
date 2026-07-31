@@ -89,9 +89,13 @@ export async function ocrPdf({ buffer, pageCount, signal, limits = OCR_LIMITS, r
   let loadingTask;
   const cleanupBound = task => Promise.race([Promise.resolve(task).catch(() => {}), new Promise(resolve => setTimeout(resolve, 1000))]);
   try {
-    const pdfjs = runtime.pdfjs || await bounded(import('pdfjs-dist/legacy/build/pdf.mjs'));
-    loadingTask = runtime.pdf ? null : pdfjs.getDocument({ data: new Uint8Array(buffer), disableWorker: true });
-    pdf = runtime.pdf || await bounded(loadingTask.promise);
+    if (runtime.pdf) {
+      pdf = runtime.pdf;
+    } else {
+      const pdfjs = runtime.pdfjs || await bounded(import('pdfjs-dist/legacy/build/pdf.mjs'));
+      loadingTask = pdfjs.getDocument({ data: new Uint8Array(buffer), disableWorker: true });
+      pdf = await bounded(loadingTask.promise);
+    }
     if (!Number.isInteger(pdf.numPages) || pdf.numPages < 1 || pdf.numPages > limits.maxPages) {
       throw new CvExtractionError('ocr_page_limit', `OCR is limited to ${limits.maxPages} pages. Upload a text-based PDF/DOCX or paste your CV text.`);
     }
