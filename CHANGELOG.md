@@ -8,6 +8,38 @@ must match the release tag.
 
 ## [Unreleased]
 
+## [2.5.2] - 2026-07-31
+
+### Application answers
+
+- Fixed Insert and Copy actions across ordinary fields, controlled forms,
+  embedded application frames, rerendered fields, and validation-blocked drafts.
+- Prevented stale answers, loading indicators, and prefetched context from
+  leaking across overlapping requests, browser history restores, or job-page
+  navigation.
+- DraftApply controls now follow the field's live visibility and editability,
+  and enforce the field's actual character limit before insertion.
+
+### Tailored CV generation
+
+- Simplified tailoring to one grounded generation flow with deterministic
+  evidence validation and safe recovery from malformed or truncated model
+  output.
+- Added local scanned-PDF OCR, actionable upload errors, durable reviewed edits,
+  genuine Word export, and refreshable structured CV export.
+- Bound every tailored document to its exact source CV and job description so
+  replacing either source invalidates stale Copy and Export actions.
+- Preserved match evidence, safety warnings, hyperlinks, and reviewed text when
+  the popup closes and reopens.
+
+### Reliability
+
+- Prevented older uploads, answer requests, and Tailor jobs from overwriting a
+  newer user action.
+- Added one-time authentication recovery for CV uploads and allowed normal CV
+  tailoring and answer generation to run concurrently without a misleading
+  long quota wait.
+
 ## [2.5.1] - 2026-07-26
 
 ### Reliability and safety
