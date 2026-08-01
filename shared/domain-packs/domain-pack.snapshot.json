@@ -274,7 +274,7 @@
   ],
   "generation": {
     "notes": "Seed snapshot is intentionally compact. Official raw datasets are not committed by default; add source files under shared/domain-packs/raw/ and re-run the refresh script.",
-    "retrievedAt": "2026-07-08T15:07:55.440Z",
+    "retrievedAt": "2026-08-01T08:35:36.532Z",
     "tool": "scripts/refresh-domain-packs.js"
   },
   "schemaVersion": 1,
@@ -285,8 +285,8 @@
       "id": "onet",
       "license": "CC BY 4.0",
       "name": "O*NET Database",
-      "retrievedAt": null,
-      "sha256": null,
+      "retrievedAt": "2026-08-01T08:35:36.532Z",
+      "sha256": "e8ffb7f060675cf726175474e68749662e2570ae3e8e0bf1fc5adda452cbd3eb",
       "url": "https://www.onetcenter.org/database.html"
     },
     {
@@ -295,8 +295,8 @@
       "id": "esco",
       "license": "European Commission open data terms; API software is EUPL 1.2 with Apache 2.0 components",
       "name": "European Skills, Competences, Qualifications and Occupations",
-      "retrievedAt": null,
-      "sha256": null,
+      "retrievedAt": "2026-08-01T08:35:36.532Z",
+      "sha256": "9f39b6ecef61fc0218ce39ab2e8e120795b9e3b274efc319004c508b721036db",
       "url": "https://esco.ec.europa.eu/en/use-esco/download"
     },
     {
@@ -305,8 +305,8 @@
       "id": "nist-nice",
       "license": "U.S. government public information; verify downloaded file notices",
       "name": "NIST NICE Workforce Framework for Cybersecurity",
-      "retrievedAt": null,
-      "sha256": null,
+      "retrievedAt": "2026-08-01T08:35:36.532Z",
+      "sha256": "906c6a09254e53b00bf14bc76c03bfac72d66185fb6fb996860c467476c7fb75",
       "url": "https://www.nist.gov/itl/applied-cybersecurity/nice/nice-framework-resource-center/nice-framework-current-versions"
     },
     {
@@ -315,8 +315,8 @@
       "id": "openalex",
       "license": "CC0 for complete dataset",
       "name": "OpenAlex",
-      "retrievedAt": null,
-      "sha256": null,
+      "retrievedAt": "2026-08-01T08:35:36.532Z",
+      "sha256": "d2c4a7dbfb90dfcb7d0ed0b579c6266f586e958bfe964055c0a289a4b02ca8c5",
       "url": "https://developers.openalex.org/"
     },
     {
@@ -325,8 +325,8 @@
       "id": "faa-airmen",
       "license": "U.S. government public information; verify FAA file notices",
       "name": "FAA Airmen Certification Downloadable Database",
-      "retrievedAt": null,
-      "sha256": null,
+      "retrievedAt": "2026-08-01T08:35:36.532Z",
+      "sha256": "89dede8df878022615211391cc3680b6e1efd5d97bd78367331e00fd5c71d832",
       "url": "https://www.faa.gov/licenses_certificates/airmen_certification/releasable_airmen_download"
     },
     {
@@ -335,10 +335,10 @@
       "id": "cms-nppes",
       "license": "U.S. government public information; verify CMS data dissemination terms",
       "name": "CMS NPPES / NPI Registry",
-      "retrievedAt": null,
-      "sha256": null,
+      "retrievedAt": "2026-08-01T08:35:36.532Z",
+      "sha256": "5400375f65adaf4e2e9266bb0555062ee42bd141b37d78c62052cb9dcd0fddd8",
       "url": "https://npiregistry.cms.hhs.gov/"
     }
   ],
-  "updatedAt": "2026-07-08"
+  "updatedAt": "2026-08-01"
 }
