@@ -27,8 +27,8 @@
     "release:chrome:publish": "node scripts/chrome-release.js --publish"
   },
   "devDependencies": {
-    "@playwright/test": "^1.61.1",
-    "redis": "^4.7.1",
+    "@playwright/test": "^1.62.0",
+    "redis": "^6.1.0",
     "vitest": "^4.1.10"
   },
   "keywords": [
